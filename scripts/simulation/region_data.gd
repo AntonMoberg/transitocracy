@@ -56,6 +56,8 @@ func validation_errors() -> PackedStringArray:
 			errors.append("Land shares do not total 100%% in %s." % neighborhood.name)
 		if neighborhood.households > neighborhood.housing_capacity or neighborhood.jobs > neighborhood.job_capacity:
 			errors.append("Built occupancy exceeds capacity in %s." % neighborhood.name)
+		if neighborhood.shopping_attraction < 0.0 or neighborhood.shopping_attraction > neighborhood.jobs:
+			errors.append("Shopping attraction is outside occupied jobs in %s." % neighborhood.name)
 		var skill_jobs := 0
 		for count in neighborhood.jobs_by_skill.values():
 			skill_jobs += int(count)

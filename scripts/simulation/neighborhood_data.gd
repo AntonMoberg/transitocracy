@@ -16,4 +16,5 @@ var households: int = 0
 var population: int = 0
 var jobs: int = 0
 var jobs_by_skill: Dictionary = {"Entry": 0, "Skilled": 0, "Professional": 0}
+var shopping_attraction: float = 0.0 # Retail-equivalent occupied jobs in Commercial and Mixed zones.
 var monthly_rent: int = 0

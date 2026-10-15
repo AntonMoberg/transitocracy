@@ -89,6 +89,10 @@ static func _populate_capacity_and_occupancy(neighborhood, rng: RandomNumberGene
 	for zone in zone_job_capacity.keys():
 		var filled_jobs := roundi(int(zone_job_capacity[zone]) * job_occupancy)
 		neighborhood.jobs += filled_jobs
+		if zone == "Commercial":
+			neighborhood.shopping_attraction += filled_jobs
+		elif zone == "Mixed":
+			neighborhood.shopping_attraction += filled_jobs * 0.5
 		var mix: Array = JOB_SKILL_MIX[zone]
 		var entry_jobs := roundi(filled_jobs * float(mix[0]))
 		var professional_jobs := roundi(filled_jobs * float(mix[2]))
