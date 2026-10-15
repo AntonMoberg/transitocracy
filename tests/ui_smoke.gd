@@ -12,6 +12,9 @@ func _run_checks() -> void:
 	var main = main_scene.instantiate()
 	root.add_child(main)
 	main._on_play_pressed()
+	main.get_window().mode = Window.MODE_WINDOWED
+	main.get_window().size = Vector2i(1024, 700)
+	main.get_window().content_scale_size = Vector2i(1024, 700)
 	await process_frame
 	_check(main.map_view.size.x > 0 and main.map_view.size.y > 0, "map must have visible layout size")
 	_check(main.flow_timeline.size.x > 0 and main.flow_timeline.size.y > 0, "hour chart must have visible layout size")
@@ -33,6 +36,10 @@ func _run_checks() -> void:
 	_check(is_equal_approx(main.speed_multiplier, 4.0) and main.speed_selector.selected == 1 and not main.playing, "2 must select 4× speed without resuming")
 	_send_key(main, KEY_3)
 	_check(is_equal_approx(main.speed_multiplier, 16.0) and main.speed_selector.selected == 2, "3 must select 16× speed")
+	_send_key(main, KEY_4)
+	_check(is_equal_approx(main.speed_multiplier, 64.0) and main.speed_selector.selected == 3 and not main.playing, "4 must select 64× speed without resuming")
+	_send_key(main, KEY_KP_5)
+	_check(is_equal_approx(main.speed_multiplier, 256.0) and main.speed_selector.selected == 4, "5 and keypad 5 must select 256× speed")
 	_send_key(main, KEY_KP_1)
 	_check(is_equal_approx(main.speed_multiplier, 1.0) and main.speed_selector.selected == 0, "1 must select normal speed")
 	_send_key(main, KEY_SPACE)
@@ -44,7 +51,7 @@ func _run_checks() -> void:
 	_check(main.calendar_clock.get_hour() == 8 and main.calendar_clock.get_minute() == 0, "4× playback must advance from the current minute without resetting it")
 	_send_key(main, KEY_1)
 	main.seed_input.get_line_edit().grab_focus()
-	_send_key(main, KEY_3)
+	_send_key(main, KEY_5)
 	_send_key(main, KEY_SPACE)
 	_check(is_equal_approx(main.speed_multiplier, 1.0) and main.playing, "shortcuts must not interfere with seed entry")
 	main.seed_input.get_line_edit().release_focus()
@@ -52,7 +59,12 @@ func _run_checks() -> void:
 	main._sync_clock_view()
 	var tomorrow_profile = main.next_day_profile
 	main._process(0.5)
-	_check(main.calendar_clock.get_hour() == 0 and main.calendar_clock.get_minute() == 0 and main.flow_profile == tomorrow_profile, "continuous clock must switch to tomorrow's flow profile at midnight")
+	_check(main.calendar_clock.get_hour() == 0 and main.calendar_clock.get_minute() == 0 and main.flow_profile != tomorrow_profile and main.flow_profile.active_day_key == tomorrow_profile.active_day_key, "midnight must rebuild tomorrow's flow from updated neighborhood statistics")
+	_check(main.dynamics_label.text.contains("Today:") and main.inspector.text.contains("Desirability:"), "daily migration and desirability must be visible")
+	var earlier_desirability: float = main.region.neighborhoods[0].desirability
+	main.tax_input.value = 40
+	_check(is_equal_approx(main.region.income_tax_rate, 0.4) and main.region.neighborhoods[0].desirability < earlier_desirability, "tax control must update neighborhood desirability immediately")
+	main.tax_input.value = 10
 	_send_key(main, KEY_SPACE)
 	main._on_purpose_selected(1)
 	main.map_view.set_hour(8)
@@ -117,12 +129,41 @@ func _run_checks() -> void:
 	for neighborhood in main.region.neighborhoods:
 		main.map_view.neighborhood_selected.emit(neighborhood.id)
 		_check(main.inspector.text.contains(neighborhood.name), "selection must update the inspector for %s" % neighborhood.name)
+		_check(main.inspector.autowrap_mode == TextServer.AUTOWRAP_OFF, "inspector stats must keep fixed line breaks")
+		for line in main.inspector.get_parsed_text().split("\n"):
+			var font_size := 22 if line == neighborhood.name else 14
+			var line_width: float = main.inspector.get_theme_default_font().get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+			_check(line_width + 18.0 <= main.inspector.size.x, "inspector line must fit without clipping: %s" % line)
+	_check(main.flow_detail_label.autowrap_mode == TextServer.AUTOWRAP_OFF, "flow summary must keep fixed line breaks")
+	for line in main.flow_detail_label.text.split("\n"):
+		var line_width: float = main.flow_detail_label.get_theme_default_font().get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		_check(line_width + 18.0 <= main.flow_detail_label.size.x, "flow summary line must fit without clipping: %s" % line)
+	var inspector_scroll: VScrollBar = main.inspector.get_v_scroll_bar()
+	_check(inspector_scroll.max_value > inspector_scroll.page, "minimum window size must keep inspector stats scrollable")
+	inspector_scroll.value = maxf(0.0, (inspector_scroll.max_value - inspector_scroll.page) * 0.5)
+	var previous_scroll: float = inspector_scroll.value
+	main._on_neighborhood_selected(main.map_view.selected_id, false)
+	_check(is_equal_approx(inspector_scroll.value, previous_scroll), "daily stat refresh must keep the inspector scroll position")
 	main.flow_timeline.time_selected.emit(17, 30)
 	_check(main.calendar_clock.get_hour() == 17 and main.calendar_clock.get_minute() == 30 and not main.playing, "chart scrubbing must set the minute and pause playback")
 	var half_hour_x: float = main.flow_timeline.LEFT_MARGIN + 17.5 * (main.flow_timeline.size.x - main.flow_timeline.LEFT_MARGIN - main.flow_timeline.RIGHT_MARGIN) / 24.0
 	_check(main.flow_timeline._time_at(half_hour_x) == Vector2i(17, 30), "chart position must map to the corresponding minute")
 	main._on_speed_selected(2)
 	_check(is_equal_approx(main.speed_multiplier, 16.0), "16× speed must advance sixteen hours per second")
+	var before_day: int = main.last_dynamics_day_key
+	var before_population: int = main.region.get_region_totals()["population"]
+	_send_key(main, KEY_4)
+	_check(is_equal_approx(main.speed_multiplier, 64.0) and main.speed_selector.get_item_text(3) == "64×", "4 must expose 64× speed in the selector")
+	main._on_play_pressed()
+	main._process(0.125)
+	_check(main.calendar_clock.get_hour() == 1 and main.calendar_clock.get_minute() == 30 and main.last_dynamics_day_key == before_day + 1, "64× speed must advance eight simulated hours and process midnight")
+	main._on_play_pressed()
+	_send_key(main, KEY_5)
+	_check(is_equal_approx(main.speed_multiplier, 256.0) and main.speed_selector.get_item_text(4) == "256×" and not main.playing, "5 must expose 256× speed without resuming")
+	main._on_play_pressed()
+	main._process(0.125)
+	_check(main.calendar_clock.get_hour() == 9 and main.calendar_clock.get_minute() == 30, "256× speed must advance 32 simulated hours in one eighth of a second")
+	_check(main.last_dynamics_day_key == before_day + 2 and main.region.get_region_totals()["population"] != before_population, "higher speeds must apply daily migration across each midnight")
 	main.seed_input.value = 1730
 	main._on_generate_pressed()
 	_check(main.region.generation_seed == 1730, "Generate must use the entered seed")

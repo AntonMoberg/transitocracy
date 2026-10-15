@@ -7,6 +7,10 @@ var generation_seed: int = 0
 var state_name: String = "New Meridian"
 var region_name: String = "Central Region"
 var county_name: String = "Meridian County"
+var income_tax_rate: float = 0.10
+var daily_tax_revenue: float = 0.0
+var last_population_change: int = 0
+var last_household_change: int = 0
 
 # Each city has an id, name, center_km, and neighborhood_ids.
 var cities: Array[Dictionary] = []
@@ -54,8 +58,10 @@ func validation_errors() -> PackedStringArray:
 				errors.append("Invalid density in %s: %s" % [neighborhood.name, zone])
 		if share_total != 100:
 			errors.append("Land shares do not total 100%% in %s." % neighborhood.name)
-		if neighborhood.households > neighborhood.housing_capacity or neighborhood.jobs > neighborhood.job_capacity:
-			errors.append("Built occupancy exceeds capacity in %s." % neighborhood.name)
+		if neighborhood.households < 0 or neighborhood.population < 0 or neighborhood.households > neighborhood.housing_capacity or neighborhood.jobs > neighborhood.job_capacity:
+			errors.append("Invalid population or occupancy in %s." % neighborhood.name)
+		if neighborhood.desirability < 0.0 or neighborhood.desirability > 100.0 or neighborhood.average_household_wealth < 0.0:
+			errors.append("Invalid household dynamics in %s." % neighborhood.name)
 		if neighborhood.shopping_attraction < 0.0 or neighborhood.shopping_attraction > neighborhood.jobs:
 			errors.append("Shopping attraction is outside occupied jobs in %s." % neighborhood.name)
 		var skill_jobs := 0

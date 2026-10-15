@@ -86,7 +86,7 @@ static func build(region):
 	return profile
 
 
-static func populate_day(profile, region_seed: int, unix_seconds: int, weekend: bool) -> void:
+static func populate_day(profile, region_seed: int, unix_seconds: int, weekend: bool, previous_day_profile = null) -> void:
 	var day_key := floori(float(unix_seconds) / 86400.0)
 	if profile.active_day_key == day_key and profile.active_weekend == weekend:
 		return
@@ -119,7 +119,8 @@ static func populate_day(profile, region_seed: int, unix_seconds: int, weekend: 
 	var shopping_od: Array[PackedFloat32Array] = profile.weekend_shopping_od if weekend else profile.weekday_shopping_od
 	var social_od: Array[PackedFloat32Array] = profile.weekend_social_od if weekend else profile.weekday_social_od
 	var previous_day_weekend: bool = CalendarClock.is_weekend_unix((day_key - 1) * 86400)
-	var previous_social_od: Array[PackedFloat32Array] = profile.weekend_social_od if previous_day_weekend else profile.weekday_social_od
+	var previous_source = previous_day_profile if previous_day_profile != null else profile
+	var previous_social_od: Array[PackedFloat32Array] = previous_source.weekend_social_od if previous_day_weekend else previous_source.weekday_social_od
 	var social_departures: PackedFloat32Array = _social_departure_hours(day_key, region_seed, weekend)
 	var previous_social_departures: PackedFloat32Array = _social_departure_hours(day_key - 1, region_seed, previous_day_weekend)
 	var work_scale := WEEKEND_COMMUTE_FRACTION if weekend else 1.0
@@ -140,7 +141,7 @@ static func copy_for_day(base_profile, region_seed: int, unix_seconds: int, week
 	profile.weekend_shopping_visits = base_profile.weekend_shopping_visits
 	profile.weekday_social_visits = base_profile.weekday_social_visits
 	profile.weekend_social_visits = base_profile.weekend_social_visits
-	populate_day(profile, region_seed, unix_seconds, weekend)
+	populate_day(profile, region_seed, unix_seconds, weekend, base_profile)
 	return profile
 
 

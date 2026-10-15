@@ -18,3 +18,15 @@ var jobs: int = 0
 var jobs_by_skill: Dictionary = {"Entry": 0, "Skilled": 0, "Professional": 0}
 var shopping_attraction: float = 0.0 # Retail-equivalent occupied jobs in Commercial and Mixed zones.
 var monthly_rent: int = 0
+
+# Aggregate household finances and migration state; no individual households are simulated.
+var average_monthly_income: int = 0
+var average_household_wealth: float = 0.0
+var desirability: float = 0.0
+var people_per_household: float = 0.0
+var baseline_monthly_rent: int = 0
+var baseline_occupancy: float = 0.0
+var rent_level: float = 0.0
+var migration_remainder: float = 0.0
+var last_household_change: int = 0
+var last_population_change: int = 0
