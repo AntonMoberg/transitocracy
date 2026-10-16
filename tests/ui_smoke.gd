@@ -18,7 +18,7 @@ func _run_checks() -> void:
 	await process_frame
 	_check(main.map_view.size.x > 0 and main.map_view.size.y > 0, "map must have visible layout size")
 	_check(main.flow_timeline.size.x > 0 and main.flow_timeline.size.y > 0, "hour chart must have visible layout size")
-	_check(main.region.neighborhoods.size() == 12, "main scene must generate twelve neighborhoods")
+	_check(main.region.cities.size() == 8 and main.region.neighborhoods.size() == 64, "main scene must generate eight cities with eight neighborhoods each")
 	_check(main.purpose_selector.get_item_text(0) == "All" and main.purpose_selector.get_item_text(1) == "Work" and main.purpose_selector.get_item_text(2) == "Commercial" and main.purpose_selector.get_item_text(3) == "Social", "flow filter must expose the four requested purposes")
 	_check(main.calendar_label.text.contains("2030") and main.calendar_label.text.contains("07:00"), "calendar must display its initial date and hour")
 	_send_key(main, KEY_SPACE)

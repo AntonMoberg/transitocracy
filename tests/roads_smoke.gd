@@ -21,7 +21,8 @@ func _run_checks() -> void:
 	RoadNetworkGenerator.generate(region)
 	var same_seed = RegionGenerator.generate_region(1729)
 	RoadNetworkGenerator.generate(same_seed)
-	_check(region.road_nodes.size() == 15 and region.road_links.size() == 14, "seed must create a connected tree with the minimum number of links")
+	var starting_links: int = region.road_links.size()
+	_check(region.road_nodes.size() == region.neighborhoods.size() + region.cities.size() and starting_links == region.road_nodes.size() - 1, "seed must create a connected tree with the minimum number of links")
 	for index in range(region.road_links.size()):
 		var link = region.road_links[index]
 		var matching_link = same_seed.road_links[index]
@@ -35,6 +36,7 @@ func _run_checks() -> void:
 	var day_key := floori(float(clock.unix_seconds) / 86400.0)
 	var free_access: float = region.accessibility[0]
 	var starting_free: Dictionary = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region))
+	_check_assignment_matches_paths(region, RoadGraph.free_flow_costs(region))
 	for row in starting_free["times"]:
 		for minutes in row:
 			_check(minutes < RoadGraph.UNREACHABLE_MINUTES, "every starting neighborhood must have a road route to every other")
@@ -64,7 +66,7 @@ func _run_checks() -> void:
 	var treasury_before: float = region.treasury
 	var upkeep_before: float = RoadPlanner.calculate_upkeep(region)
 	var removal: Dictionary = RoadPlanner.demolish(region, removed_link.id)
-	_check(removal["ok"] and region.road_links.size() == 13, "demolition must immediately remove the selected road")
+	_check(removal["ok"] and region.road_links.size() == starting_links - 1, "demolition must immediately remove the selected road")
 	_check(region.treasury == treasury_before and region.daily_road_upkeep < upkeep_before, "demolition must have no refund and end the road's upkeep")
 	AccessibilityCalculator.recalculate(region)
 	var blocked_pair := Vector2i(-1, -1)
@@ -89,14 +91,14 @@ func _run_checks() -> void:
 	var original_reconnect_days := maxi(14, ceili(7.0 + 2.0 * float(reconnect["length_km"])))
 	_check(reconnect["ok"] and reconnect["days"] == ceili(float(original_reconnect_days) / 10.0), "arterial construction must take about one tenth of its original duration")
 	var funded: Dictionary = RoadPlanner.commit(region, reconnect, day_key)
-	_check(funded["ok"] and region.road_links.size() == 13 and region.treasury == treasury_before - reconnect["cost"], "construction must charge upfront and stay closed until opening")
+	_check(funded["ok"] and region.road_links.size() == starting_links - 1 and region.treasury == treasury_before - reconnect["cost"], "construction must charge upfront and stay closed until opening")
 	var tax_receipts: float = region.daily_tax_revenue
 	RoadPlanner.advance_day(region, day_key + 1)
 	_check(is_equal_approx(region.last_fiscal_change, tax_receipts - upkeep_before + demolition["upkeep_saved"]), "daily finances must credit tax and charge only open-road upkeep")
-	_check(region.road_links.size() == 13, "replacement road must remain closed before opening")
+	_check(region.road_links.size() == starting_links - 1, "replacement road must remain closed before opening")
 	RoadPlanner.advance_day(region, int(reconnect["open_day_key"]))
 	AccessibilityCalculator.recalculate(region)
-	_check(region.road_projects.is_empty() and region.road_links.size() == 14 and region.travel_times[blocked_pair.x][blocked_pair.y] < RoadGraph.UNREACHABLE_MINUTES, "replacement road must restore connectivity on its opening day")
+	_check(region.road_projects.is_empty() and region.road_links.size() == starting_links and region.travel_times[blocked_pair.x][blocked_pair.y] < RoadGraph.UNREACHABLE_MINUTES, "replacement road must restore connectivity on its opening day")
 
 	var base_times: Array = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region))["times"]
 	var best_shortcut: Dictionary = {}
@@ -120,9 +122,10 @@ func _run_checks() -> void:
 		var free_routes: Dictionary = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region))
 		_check(free_routes["times"][best_shortcut["from"]][best_shortcut["to"]] < base_times[best_shortcut["from"]][best_shortcut["to"]], "new corridor must shorten trips")
 		var loaded_costs: PackedVector2Array = RoadGraph.free_flow_costs(region)
-		loaded_costs[link_index] *= 6.0
+		loaded_costs[link_index] *= 1000.0
 		var loaded_routes: Dictionary = RoadGraph.route_pairs(region, loaded_costs)
 		_check(free_routes["paths"][best_shortcut["from"]][best_shortcut["to"]] != loaded_routes["paths"][best_shortcut["from"]][best_shortcut["to"]], "traffic must be able to reroute through the old tree when a new corridor is congested")
+		_check_assignment_matches_paths(region, loaded_costs)
 
 	var widen_link = region.road_links[0]
 	var widen: Dictionary = RoadPlanner.widen_preview(region, widen_link.id, day_key)
@@ -181,6 +184,40 @@ func _run_checks() -> void:
 	if failures == 0:
 		print("Road smoke checks passed.")
 	quit(1 if failures > 0 else 0)
+
+
+func _check_assignment_matches_paths(region, costs: PackedVector2Array) -> void:
+	var count: int = region.neighborhoods.size()
+	var demand: Array[PackedFloat32Array] = []
+	for _origin in range(count):
+		var row := PackedFloat32Array()
+		row.resize(count)
+		demand.append(row)
+	for trip in [{"from": 0, "to": 4, "vehicles": 73.0}, {"from": 4, "to": 0, "vehicles": 51.0}, {"from": 1, "to": 5, "vehicles": 29.0}, {"from": 6, "to": 2, "vehicles": 14.0}]:
+		demand[trip["from"]][trip["to"]] = trip["vehicles"]
+	var routes: Dictionary = RoadGraph.route_pairs(region, costs)
+	var expected := PackedVector2Array()
+	expected.resize(region.road_links.size())
+	for origin_id in range(count):
+		for destination_id in range(count):
+			var vehicles: float = demand[origin_id][destination_id]
+			if vehicles <= 0.0:
+				continue
+			for edge in routes["paths"][origin_id][destination_id]:
+				var volume: Vector2 = expected[edge.x]
+				if edge.y == 0:
+					volume.x += vehicles
+				else:
+					volume.y += vehicles
+				expected[edge.x] = volume
+	var assigned: PackedVector2Array = RoadGraph.assign_volumes(region, costs, demand)
+	var cached_assigned := PackedVector2Array()
+	if RoadGraph.is_forest(region):
+		cached_assigned = RoadGraph.assign_volumes(region, costs, demand, [], RoadGraph.assignment_trees(region, costs))
+	for link_index in range(expected.size()):
+		_check(assigned[link_index].distance_to(expected[link_index]) < 0.01, "traffic assignment must match explicit shortest paths on link %d" % link_index)
+		if not cached_assigned.is_empty():
+			_check(cached_assigned[link_index].distance_to(expected[link_index]) < 0.01, "cached forest routes must match explicit shortest paths on link %d" % link_index)
 
 
 func _check(condition: bool, description: String) -> void:

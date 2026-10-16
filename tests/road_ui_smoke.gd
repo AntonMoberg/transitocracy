@@ -38,6 +38,9 @@ func _run_checks() -> void:
 	_check(main.traffic_profile.hourly_volumes[8].size() == main.region.road_links.size(), "traffic must rebuild against the opened road after fast forward")
 	main._on_play_pressed()
 	var first_link = main.region.road_links[0]
+	for link_index in range(1, initial_links):
+		if main.region.road_links[link_index].length_km > first_link.length_km:
+			first_link = main.region.road_links[link_index]
 	var midpoint: Vector2 = first_link.points[0].lerp(first_link.points[1], 0.5)
 	_check(main.map_view._hit_road_link(main.map_view._world_to_screen(midpoint)) == first_link.id, "road lines must be selectable on the map")
 	var original_lanes: int = first_link.lanes_per_direction
@@ -54,7 +57,7 @@ func _run_checks() -> void:
 	_check(main.inspector.text.contains("Capacity:") and main.inspector.text.contains("Forward:") and main.inspector.text.contains("Upkeep:"), "road inspector must expose traffic and finances")
 	main.road_tool_selector.select(5)
 	main._on_road_tool_selected(5)
-	main.map_view.road_link_clicked.emit(main.region.road_links[0].id, main.region.road_links[0].points[0])
+	main.map_view.road_link_clicked.emit(first_link.id, first_link.points[0])
 	_check(main.pending_road_preview.get("kind", "") == "Widen" and main.pending_road_preview.get("ok", false), "widen tool must preview an existing road")
 	main._cancel_road_preview()
 	_check(main.pending_road_preview.is_empty() and main.road_build_button.disabled, "Cancel must clear uncommitted edits")

@@ -14,6 +14,11 @@ const CITY_COLORS = [
 	Color("4b8fbf"),
 	Color("9872c5"),
 	Color("bc8d50"),
+	Color("58a897"),
+	Color("c47789"),
+	Color("7eaa68"),
+	Color("ba82ac"),
+	Color("70a4ba"),
 ]
 
 var region
@@ -325,11 +330,13 @@ func _draw_cities() -> void:
 	var font := get_theme_default_font()
 	for city in region.cities:
 		var center: Vector2 = _world_to_screen(city["center_km"])
-		var color: Color = CITY_COLORS[city["id"]]
-		var radius: float = 12.0 * _map_scale() * zoom
+		var color: Color = CITY_COLORS[int(city["id"]) % CITY_COLORS.size()]
+		var radius: float = 7.5 * _map_scale() * zoom
 		draw_circle(center, radius, Color(color.r, color.g, color.b, 0.08))
 		draw_arc(center, radius, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.28), 1.0, true)
-		draw_string(font, center + Vector2(-36, -radius - 12), str(city["name"]).to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(color.r, color.g, color.b, 0.80))
+		var label: String = str(city["name"]).to_upper()
+		var label_width: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+		draw_string(font, center + Vector2(-label_width * 0.5, -radius - 12), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(color.r, color.g, color.b, 0.80))
 
 
 func _draw_neighborhoods() -> void:
@@ -340,7 +347,6 @@ func _draw_neighborhoods() -> void:
 	for value in region.accessibility:
 		min_access = minf(min_access, value)
 		max_access = maxf(max_access, value)
-	var font := get_theme_default_font()
 	for neighborhood in region.neighborhoods:
 		var screen_position: Vector2 = _world_to_screen(neighborhood.position_km)
 		var radius: float = _node_radius(neighborhood.population)
@@ -354,8 +360,33 @@ func _draw_neighborhoods() -> void:
 			draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("ffffff"), 2.5, true)
 		elif neighborhood.id == hovered_id:
 			draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("a9d7ff"), 2.0, true)
-		var label_position := screen_position + Vector2(radius + 7.0, 4.0)
-		draw_string(font, label_position + Vector2(1, 1), neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("07111e"))
+	var label_order: Array[int] = []
+	if selected_id >= 0:
+		label_order.append(selected_id)
+	if hovered_id >= 0 and hovered_id != selected_id:
+		label_order.append(hovered_id)
+	if zoom >= 1.8:
+		for neighborhood in region.neighborhoods:
+			if neighborhood.id != selected_id and neighborhood.id != hovered_id:
+				label_order.append(neighborhood.id)
+	var font := get_theme_default_font()
+	var label_boxes: Array[Rect2] = []
+	for neighborhood_id in label_order:
+		var neighborhood = region.neighborhoods[neighborhood_id]
+		var screen_position: Vector2 = _world_to_screen(neighborhood.position_km)
+		var label_position: Vector2 = screen_position + Vector2(_node_radius(neighborhood.population) + 7.0, 4.0)
+		var label_width: float = font.get_string_size(neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+		var label_box := Rect2(label_position + Vector2(0.0, -13.0), Vector2(label_width, 16.0))
+		if neighborhood_id != selected_id and neighborhood_id != hovered_id:
+			var overlaps := false
+			for placed_box in label_boxes:
+				if label_box.intersects(placed_box):
+					overlaps = true
+					break
+			if overlaps:
+				continue
+		label_boxes.append(label_box)
+		draw_string(font, label_position + Vector2(1.0, 1.0), neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("07111e"))
 		draw_string(font, label_position, neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("e8f0f7"))
 
 
@@ -453,12 +484,13 @@ func _choose_flows_for_display(visible_flows: Array[Dictionary]) -> Array[Dictio
 	var included_pairs: Dictionary = {}
 	var flow_limit := 30
 	var selected_limit := 12
+	var social_extra_routes := 0
 	if selected_purpose == "Social":
 		var day_peak := 1.0
 		for hourly_trips in flow_profile.hourly_social_trips:
 			day_peak = maxf(day_peak, hourly_trips)
 		var current_trips: float = flow_profile.get_interpolated_hourly_total(selected_hour, hour_fraction, "Social", next_day_profile)
-		flow_limit = clampi(roundi(12.0 + 18.0 * sqrt(current_trips / day_peak)), 18, 30)
+		social_extra_routes = clampi(roundi(5.0 + 18.0 * sqrt(current_trips / day_peak)), 5, 23)
 		selected_limit = 6
 	if selected_id >= 0:
 		for flow in visible_flows:
@@ -487,6 +519,7 @@ func _choose_flows_for_display(visible_flows: Array[Dictionary]) -> Array[Dictio
 				drawn_flows.append(flow)
 				included_pairs[flow["pair_key"]] = true
 				break
+		flow_limit = drawn_flows.size() + social_extra_routes
 	for flow in visible_flows:
 		if drawn_flows.size() >= flow_limit:
 			break
@@ -722,7 +755,7 @@ func _screen_to_world(screen_position: Vector2) -> Vector2:
 
 
 func _node_radius(population: int) -> float:
-	return clampf(7.0 + sqrt(float(population)) * 0.075, 10.0, 18.0)
+	return clampf(4.0 + sqrt(float(population)) * 0.05, 6.0, 11.0) * clampf(sqrt(zoom), 0.9, 1.35)
 
 
 func _access_color(t: float) -> Color:

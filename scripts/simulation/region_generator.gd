@@ -3,8 +3,12 @@ extends RefCounted
 const RegionData = preload("res://scripts/simulation/region_data.gd")
 const NeighborhoodData = preload("res://scripts/simulation/neighborhood_data.gd")
 
-const CITY_NAMES = ["Harbor", "Midvale", "South Ridge"]
-const CITY_CENTERS = [Vector2(18, 15), Vector2(51, 17), Vector2(35, 43)]
+const CITY_NAMES = ["Harbor", "Midvale", "Northbank", "Eastport", "Westfield", "Cedar", "South Ridge", "Lakeside"]
+const CITY_COLUMNS = 4
+const NEIGHBORHOODS_PER_CITY = 8
+const NEIGHBORHOODS_PER_RING = 4
+const CITY_GRID_ORIGIN = Vector2(10.0, 15.5)
+const CITY_GRID_SPACING = Vector2(16.5, 27.0)
 const ARCHETYPES = [
 	{"Residential": 45, "Commercial": 10, "Office": 5, "Mixed": 30, "Industry": 10},
 	{"Residential": 20, "Commercial": 30, "Office": 20, "Mixed": 25, "Industry": 5},
@@ -38,19 +42,25 @@ static func generate_region(seed_value: int):
 	region.generation_seed = seed_value
 
 	for city_id in range(CITY_NAMES.size()):
+		var grid_column: int = city_id % CITY_COLUMNS
+		var grid_row: int = floori(float(city_id) / float(CITY_COLUMNS))
+		var city_center := CITY_GRID_ORIGIN + Vector2(grid_column, grid_row) * CITY_GRID_SPACING
+		city_center += Vector2(rng.randf_range(-1.8, 1.8), rng.randf_range(-1.8, 1.8))
 		var neighborhood_ids: Array[int] = []
-		for local_id in range(4):
+		for local_id in range(NEIGHBORHOODS_PER_CITY):
 			var neighborhood = NeighborhoodData.new()
 			neighborhood.id = region.neighborhoods.size()
 			neighborhood.city_id = city_id
 			neighborhood.name = "%s %d" % [CITY_NAMES[city_id], local_id + 1]
-			var angle: float = TAU * float(local_id) / 4.0 + float(city_id) * 0.4 + rng.randf_range(-0.22, 0.22)
-			var radius: float = rng.randf_range(6.0, 9.0)
-			neighborhood.position_km = CITY_CENTERS[city_id] + Vector2.from_angle(angle) * radius
+			var outer_ring := local_id >= NEIGHBORHOODS_PER_RING
+			var ring_index := local_id % NEIGHBORHOODS_PER_RING
+			var angle: float = TAU * float(ring_index) / float(NEIGHBORHOODS_PER_RING) + (PI / float(NEIGHBORHOODS_PER_RING) if outer_ring else 0.0) + float(city_id) * 0.19 + rng.randf_range(-0.16, 0.16)
+			var radius: float = rng.randf_range(5.0, 6.3) if outer_ring else rng.randf_range(2.5, 3.3)
+			neighborhood.position_km = city_center + Vector2.from_angle(angle) * radius
 			neighborhood.land_area_ha = float(rng.randi_range(80, 130))
 			neighborhood.zone_shares = ARCHETYPES[(local_id + city_id) % ARCHETYPES.size()].duplicate(true)
 
-			var base_density: int = 2 - city_id
+			var base_density: int = 2 if city_id == 0 else (1 if city_id < CITY_COLUMNS else 0)
 			for zone in RegionData.ZONE_TYPES:
 				neighborhood.zone_density[zone] = clampi(base_density + rng.randi_range(-1, 1), 0, 2)
 			_populate_capacity_and_occupancy(neighborhood, rng, base_density)
@@ -60,7 +70,7 @@ static func generate_region(seed_value: int):
 		region.cities.append({
 			"id": city_id,
 			"name": CITY_NAMES[city_id],
-			"center_km": CITY_CENTERS[city_id],
+			"center_km": city_center,
 			"neighborhood_ids": neighborhood_ids,
 		})
 

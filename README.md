@@ -16,7 +16,7 @@ Right click or press Escape to clear a road preview. Drag to pan and scroll to z
 
 Road construction is paid from the regional treasury when funded. Construction takes roughly one tenth of the original project duration, rounded up to full days: a short arterial takes at least 2 days, a highway at least 5 days, and an interchange or highway exit takes 5 days. Each midnight, income tax is credited, upkeep is charged, completed projects open, neighborhood migration advances, and hourly trip demand and road traffic are rebuilt. Each road direction uses the right-hand side and has its own group of lines, one per lane. Each group's color shows its own traffic as a share of directional capacity; arrows show travel direction. Dashed lines are construction projects. Minute values interpolate between hourly results.
 
-The map starts with the shortest connected tree of arterial roads; there are no starting highways. Road crossings connect only at explicit junctions or interchanges. If demolition separates neighborhoods, trips between those groups stop until a new road connects them. Detailed terrain, local streets, and transit services are later layers.
+The map generates eight cities with eight neighborhoods each. Neighborhoods form two rings around each city, and zooming in reveals more neighborhood labels. The map starts with the shortest connected tree of arterial roads; there are no starting highways. Road crossings connect only at explicit junctions or interchanges. If demolition separates neighborhoods, trips between those groups stop until a new road connects them. Detailed terrain, local streets, and transit services are later layers.
 
 ## Verification
 

@@ -35,7 +35,12 @@ static func assign_day(region, flow_profile, hours_to_assign: int = 24, warm_sta
 	var neighbors: Array = RoadGraph.adjacency(region)
 	var count: int = region.neighborhoods.size()
 	var can_warm_start: bool = warm_start_profile != null and warm_start_profile.hourly_volumes.size() >= hours_to_assign and warm_start_profile.hourly_volumes[0].size() == region.road_links.size()
-	var assignment_passes := 2 if can_warm_start else ASSIGNMENT_PASSES
+	# A forest has one path per pair, so congestion cannot change route choice.
+	var forest: bool = RoadGraph.is_forest(region)
+	var assignment_passes := 1 if forest else (2 if can_warm_start else ASSIGNMENT_PASSES)
+	var fixed_trees: Array[Dictionary] = []
+	if forest and hours_to_assign > 1:
+		fixed_trees = RoadGraph.assignment_trees(region, free_costs, neighbors)
 	for hour in range(hours_to_assign):
 		var demand: Array[PackedFloat32Array] = []
 		for origin_id in range(count):
@@ -56,26 +61,12 @@ static func assign_day(region, flow_profile, hours_to_assign: int = 24, warm_sta
 			volumes.resize(region.road_links.size())
 		for iteration in range(assignment_passes):
 			var costs: PackedVector2Array = _congested_costs(region, free_costs, volumes)
-			var routes: Dictionary = RoadGraph.route_pairs(region, costs, neighbors)
-			var assigned := PackedVector2Array()
-			assigned.resize(region.road_links.size())
-			for origin_id in range(count):
-				for destination_id in range(count):
-					var vehicles: float = demand[origin_id][destination_id]
-					if vehicles <= 0.0:
-						continue
-					for edge in routes["paths"][origin_id][destination_id]:
-						var value: Vector2 = assigned[edge.x]
-						if edge.y == 0:
-							value.x += vehicles
-						else:
-							value.y += vehicles
-						assigned[edge.x] = value
+			var assigned: PackedVector2Array = RoadGraph.assign_volumes(region, costs, demand, neighbors, fixed_trees)
 			var weight := 1.0 / float(iteration + 1)
 			for link_index in range(volumes.size()):
 				volumes[link_index] = volumes[link_index].lerp(assigned[link_index], weight)
 		var final_costs: PackedVector2Array = _congested_costs(region, free_costs, volumes)
-		var final_routes: Dictionary = RoadGraph.route_pairs(region, final_costs, neighbors)
+		var final_routes: Dictionary = RoadGraph.route_pairs(region, final_costs, neighbors, false)
 		var peak_ratio := 0.0
 		for link_index in range(volumes.size()):
 			var capacity: float = RoadGraph.capacity_per_lane(region.road_links[link_index].road_class) * region.road_links[link_index].lanes_per_direction
@@ -89,7 +80,7 @@ static func assign_day(region, flow_profile, hours_to_assign: int = 24, warm_sta
 
 static func generalized_travel_times(region, flow_profile, traffic_profile) -> Array[PackedFloat32Array]:
 	var count: int = region.neighborhoods.size()
-	var free_times: Array = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region))["times"]
+	var free_times: Array = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region), [], false)["times"]
 	var result: Array[PackedFloat32Array] = []
 	for origin_id in range(count):
 		var row := PackedFloat32Array()

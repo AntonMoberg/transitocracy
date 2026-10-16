@@ -56,9 +56,25 @@ func get_region_totals() -> Dictionary:
 
 func validation_errors() -> PackedStringArray:
 	var errors := PackedStringArray()
-	if neighborhoods.size() != 12 or cities.size() != 3:
-		errors.append("Expected three cities and twelve neighborhoods.")
+	if neighborhoods.is_empty() or cities.is_empty():
+		errors.append("Region needs cities and neighborhoods.")
+	var listed_neighborhoods := PackedByteArray()
+	listed_neighborhoods.resize(neighborhoods.size())
+	for city_index in range(cities.size()):
+		var city: Dictionary = cities[city_index]
+		if int(city.get("id", -1)) != city_index:
+			errors.append("City ids must match their array positions.")
+		for neighborhood_id in city.get("neighborhood_ids", []):
+			var id: int = int(neighborhood_id)
+			if id < 0 or id >= neighborhoods.size():
+				errors.append("City %d has an invalid neighborhood id." % city_index)
+				continue
+			if listed_neighborhoods[id] != 0 or neighborhoods[id].city_id != city_index:
+				errors.append("Neighborhood %d has an invalid city assignment." % id)
+			listed_neighborhoods[id] = 1
 	for neighborhood in neighborhoods:
+		if neighborhood.id < 0 or neighborhood.id >= neighborhoods.size() or neighborhood.city_id < 0 or neighborhood.city_id >= cities.size() or listed_neighborhoods[neighborhood.id] == 0:
+			errors.append("Invalid neighborhood or city id in %s." % neighborhood.name)
 		var share_total := 0
 		for zone in ZONE_TYPES:
 			share_total += int(neighborhood.zone_shares.get(zone, 0))

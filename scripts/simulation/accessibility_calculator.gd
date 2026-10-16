@@ -9,7 +9,7 @@ const LOCAL_TRAVEL_MINUTES = 5.0
 
 static func recalculate(region) -> void:
 	if not region.road_nodes.is_empty():
-		region.travel_times = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region))["times"]
+		region.travel_times = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region), [], false)["times"]
 		recalculate_jobs(region)
 		return
 	region.travel_times.clear()
