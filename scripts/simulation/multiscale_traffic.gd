@@ -4,6 +4,7 @@ const State = preload("res://scripts/simulation/multiscale_traffic_state.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadTrafficProfile = preload("res://scripts/simulation/road_traffic_profile.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
+const CompactTrafficCalculator = preload("res://scripts/simulation/compact_traffic_calculator.gd")
 
 const SECOND = 0
 const MINUTE = 1
@@ -30,7 +31,18 @@ static func new_day(region, flow_profile, unix_seconds: int, previous_state = nu
 		state.link_ids.append(link.id)
 		state.queues[index] = previous_by_id.get(link.id, Vector2.ZERO)
 		state.last_speed_kmh[index] = Vector2(RoadGraph.free_speed_kmh(link.road_class), RoadGraph.free_speed_kmh(link.road_class))
-	if previous_state != null and previous_state.link_ids == state.link_ids and not previous_state.free_pair_times.is_empty():
+	state.link_capacity_hr.resize(links)
+	state.link_from_nodes.resize(links)
+	state.link_to_nodes.resize(links)
+	state.free_link_costs = RoadGraph.free_flow_costs(region)
+	for index in range(links):
+		var link = region.road_links[index]
+		state.link_capacity_hr[index] = RoadGraph.capacity_per_lane(link.road_class) * link.lanes_per_direction
+		state.link_from_nodes[index] = link.from_node_id
+		state.link_to_nodes[index] = link.to_node_id
+	if region.is_large_scale:
+		CompactTrafficCalculator.prepare_routes(region, state, previous_state)
+	elif previous_state != null and previous_state.link_ids == state.link_ids and not previous_state.free_pair_times.is_empty():
 		state.free_pair_times = previous_state.free_pair_times
 		state.paths_by_mode = previous_state.paths_by_mode.duplicate()
 	else:
@@ -39,7 +51,8 @@ static func new_day(region, flow_profile, unix_seconds: int, previous_state = nu
 		state.paths_by_mode[0] = free_routes["paths"]
 	_prepare_junctions(region, state)
 	state.profile = _new_profile(region, state)
-	_precompute_demand(region, flow_profile, state)
+	if not region.is_large_scale:
+		_precompute_demand(region, flow_profile, state)
 	state.first_recorded_bin = clampi((unix_seconds % SECONDS_PER_DAY) / 900, 0, 95)
 	state.next_bin = state.first_recorded_bin + 1
 	state.profile.first_recorded_bin = state.first_recorded_bin
@@ -70,18 +83,18 @@ static func _new_profile(region, state):
 	profile.end_queues = state.queues.duplicate()
 	var empty := PackedVector2Array()
 	empty.resize(state.link_ids.size())
-	var free: PackedVector2Array = RoadGraph.free_flow_costs(region)
+	var free: PackedVector2Array = state.free_link_costs
 	profile.hourly_peak_ratio.resize(24)
 	profile.hourly_assignment_gap.resize(24)
 	for hour in range(24):
-		profile.hourly_volumes.append(empty.duplicate())
-		profile.hourly_served.append(empty.duplicate())
-		profile.hourly_link_times.append(free.duplicate())
+		profile.hourly_volumes.append(empty if region.is_large_scale else empty.duplicate())
+		profile.hourly_served.append(empty if region.is_large_scale else empty.duplicate())
+		profile.hourly_link_times.append(free if region.is_large_scale else free.duplicate())
 		profile.hourly_pair_times.append(state.free_pair_times)
 	for bin_index in range(96):
-		profile.quarter_hour_queues.append(state.queues.duplicate())
-		profile.quarter_hour_served.append(empty.duplicate())
-		profile.quarter_hour_link_times.append(free.duplicate())
+		profile.quarter_hour_queues.append(state.queues if region.is_large_scale else state.queues.duplicate())
+		profile.quarter_hour_served.append(empty if region.is_large_scale else empty.duplicate())
+		profile.quarter_hour_link_times.append(free if region.is_large_scale else free.duplicate())
 	return profile
 
 
@@ -93,6 +106,12 @@ static func fork_for_day(state):
 	fork.queues = state.queues.duplicate()
 	fork.free_pair_times = state.free_pair_times
 	fork.paths_by_mode = state.paths_by_mode.duplicate()
+	fork.compact_trees_by_mode = state.compact_trees_by_mode.duplicate()
+	fork.spoke_indices = state.spoke_indices.duplicate()
+	fork.link_capacity_hr = state.link_capacity_hr
+	fork.link_from_nodes = state.link_from_nodes
+	fork.link_to_nodes = state.link_to_nodes
+	fork.free_link_costs = state.free_link_costs
 	fork.profile = RoadTrafficProfile.new()
 	fork.profile.hourly_pair_times = state.profile.hourly_pair_times.duplicate(true)
 	return fork
@@ -116,6 +135,12 @@ static func fork_for_week(state):
 	fork.cached_links = state.cached_links.duplicate()
 	fork.cached_revenue = state.cached_revenue.duplicate(true)
 	fork.paths_by_mode = state.paths_by_mode.duplicate()
+	fork.compact_trees_by_mode = state.compact_trees_by_mode.duplicate()
+	fork.spoke_indices = state.spoke_indices.duplicate()
+	fork.link_capacity_hr = state.link_capacity_hr
+	fork.link_from_nodes = state.link_from_nodes
+	fork.link_to_nodes = state.link_to_nodes
+	fork.free_link_costs = state.free_link_costs
 	fork.free_pair_times = state.free_pair_times
 	fork.junction_capacity_hr = state.junction_capacity_hr
 	fork.hourly_demand = state.hourly_demand.duplicate()
@@ -136,12 +161,17 @@ static func fork_for_week(state):
 	profile.hourly_assignment_gap = old.hourly_assignment_gap.duplicate()
 	profile.initial_queues = old.initial_queues.duplicate()
 	profile.quarter_hour_queues = old.quarter_hour_queues.duplicate()
-	for row in old.quarter_hour_served:
-		profile.quarter_hour_served.append(row.duplicate())
-	for row in old.quarter_hour_link_times:
-		profile.quarter_hour_link_times.append(row.duplicate())
-	for row in old.hourly_served:
-		profile.hourly_served.append(row.duplicate())
+	if not state.compact_trees_by_mode.is_empty():
+		profile.quarter_hour_served = old.quarter_hour_served.duplicate()
+		profile.quarter_hour_link_times = old.quarter_hour_link_times.duplicate()
+		profile.hourly_served = old.hourly_served.duplicate()
+	else:
+		for row in old.quarter_hour_served:
+			profile.quarter_hour_served.append(row.duplicate())
+		for row in old.quarter_hour_link_times:
+			profile.quarter_hour_link_times.append(row.duplicate())
+		for row in old.hourly_served:
+			profile.hourly_served.append(row.duplicate())
 	profile.end_queues = old.end_queues.duplicate()
 	fork.profile = profile
 	return fork
@@ -150,6 +180,7 @@ static func fork_for_week(state):
 static func invalidate(state) -> void:
 	state.cached_hour = -1
 	state.paths_by_mode.clear()
+	state.compact_trees_by_mode.clear()
 
 
 static func change_mode(region, flow_profile, state, old_mode: int, new_mode: int) -> void:
@@ -180,57 +211,119 @@ static func change_mode(region, flow_profile, state, old_mode: int, new_mode: in
 
 static func advance(region, flow_profile, state, target_seconds: int, mode: int) -> void:
 	var day_end: int = (state.day_key + 1) * SECONDS_PER_DAY
+	if region.is_large_scale and mode == DAY and target_seconds >= day_end:
+		_advance_compact_day(region, flow_profile, state, day_end)
+		return
 	while state.unix_seconds < mini(target_seconds, day_end):
 		if FiscalCalculator.apply_due_policies(region, state.unix_seconds):
 			invalidate(state)
 		var hour: int = (state.unix_seconds % SECONDS_PER_DAY) / 3600
 		if state.cached_hour != hour or state.cached_mode != mode:
+			var build_started: int = Time.get_ticks_usec()
 			_build_hour(region, flow_profile, state, mode, hour)
+			if region.is_large_scale:
+				state.stage_totals_us["build_hour"] = int(state.stage_totals_us.get("build_hour", 0)) + Time.get_ticks_usec() - build_started
 		var hour_end: int = state.day_key * SECONDS_PER_DAY + (hour + 1) * 3600
-		var bin_end: int = ((state.unix_seconds / 900) + 1) * 900
-		var quantum: int = 1 if mode == SECOND else (60 if mode == MINUTE else 900)
+		var coarse_hour: bool = region.is_large_scale and mode >= HOUR and state.unix_seconds % 3600 == 0 and target_seconds - state.unix_seconds >= 3600
+		var bin_end: int = hour_end if coarse_hour else ((state.unix_seconds / 900) + 1) * 900
+		var quantum: int = 3600 if coarse_hour else (1 if mode == SECOND else (60 if mode == MINUTE else 900))
 		var step_end: int = mini(target_seconds, mini(day_end, mini(hour_end, mini(bin_end, state.unix_seconds + quantum))))
 		if step_end <= state.unix_seconds:
 			break
+		var first_bin: int = (state.unix_seconds - state.day_key * SECONDS_PER_DAY) / 900
+		var links_started: int = Time.get_ticks_usec()
 		_advance_links(region, flow_profile, state, hour, step_end - state.unix_seconds)
+		if region.is_large_scale:
+			state.stage_totals_us["advance_links"] = int(state.stage_totals_us.get("advance_links", 0)) + Time.get_ticks_usec() - links_started
+		if coarse_hour:
+			var total_served: PackedVector2Array = state.profile.quarter_hour_served[first_bin]
+			for link_index in range(total_served.size()):
+				total_served[link_index] /= 4.0
+			state.profile.quarter_hour_served[first_bin] = total_served
+			for offset in range(1, 4):
+				state.profile.quarter_hour_queues[first_bin + offset] = state.queues.duplicate()
+				state.profile.quarter_hour_served[first_bin + offset] = state.profile.quarter_hour_served[first_bin].duplicate()
+				state.profile.quarter_hour_link_times[first_bin + offset] = state.profile.quarter_hour_link_times[first_bin].duplicate()
 		state.unix_seconds = step_end
 		state.next_bin = mini(96, (state.unix_seconds - state.day_key * SECONDS_PER_DAY) / 900 + 1)
 		state.profile.recorded_bin = state.next_bin
 		if state.unix_seconds == hour_end:
+			var finish_started: int = Time.get_ticks_usec()
 			_finish_hour(region, state, hour)
+			if region.is_large_scale:
+				state.stage_totals_us["finish_hour"] = int(state.stage_totals_us.get("finish_hour", 0)) + Time.get_ticks_usec() - finish_started
+
+
+static func _advance_compact_day(region, flow_profile, state, day_end: int) -> void:
+	if state.unix_seconds >= day_end:
+		return
+	FiscalCalculator.apply_due_policies(region, state.unix_seconds)
+	var start_bin: int = clampi((state.unix_seconds - state.day_key * SECONDS_PER_DAY) / 900, 0, 95)
+	var start_hour: int = start_bin / 4
+	var build_started: int = Time.get_ticks_usec()
+	CompactTrafficCalculator.build_hour(region, flow_profile, state, DAY, 24)
+	state.stage_totals_us["build_hour"] = int(state.stage_totals_us.get("build_hour", 0)) + Time.get_ticks_usec() - build_started
+	var previous_departures: float = state.departed_trips
+	var links_started: int = Time.get_ticks_usec()
+	_advance_links(region, flow_profile, state, start_hour, day_end - state.unix_seconds)
+	state.stage_totals_us["advance_links"] = int(state.stage_totals_us.get("advance_links", 0)) + Time.get_ticks_usec() - links_started
+	var actual_departures := 0.0
+	for hour in range(start_hour, 24):
+		actual_departures += flow_profile.hourly_trips[hour]
+	state.departed_trips = previous_departures + actual_departures
+	var mean_served: PackedVector2Array = state.profile.quarter_hour_served[start_bin].duplicate()
+	var remaining_bins: int = 96 - start_bin
+	for index in range(mean_served.size()):
+		mean_served[index] /= float(remaining_bins)
+	var mean_hour: PackedVector2Array = mean_served.duplicate()
+	for index in range(mean_hour.size()):
+		mean_hour[index] *= 4.0
+	var time_row: PackedVector2Array = state.profile.quarter_hour_link_times[start_bin]
+	for bin_index in range(start_bin, 96):
+		state.profile.quarter_hour_queues[bin_index] = state.queues
+		state.profile.quarter_hour_served[bin_index] = mean_served
+		state.profile.quarter_hour_link_times[bin_index] = time_row
+	for hour in range(start_hour, 24):
+		state.profile.hourly_volumes[hour] = state.cached_links
+		state.profile.hourly_served[hour] = mean_hour
+		state.profile.hourly_link_times[hour] = time_row
+		state.profile.hourly_peak_ratio[hour] = state.profile.hourly_peak_ratio[start_hour]
+	state.unix_seconds = day_end
+	state.next_bin = 96
+	state.profile.recorded_bin = 96
+	state.estimated = true
 
 
 static func _advance_links(region, flow_profile, state, hour: int, duration: int) -> void:
 	var fraction: float = float(duration) / 3600.0
 	var bin_index: int = clampi((state.unix_seconds % SECONDS_PER_DAY) / 900, 0, 95)
-	var queued: PackedVector2Array = state.queues
-	var served_bin: PackedVector2Array = state.profile.quarter_hour_served[bin_index]
-	var served_hour: PackedVector2Array = state.profile.hourly_served[hour]
-	var time_bin: PackedVector2Array = state.profile.quarter_hour_link_times[bin_index]
-	var free: PackedVector2Array = RoadGraph.free_flow_costs(region)
+	var queued: PackedVector2Array = state.queues.duplicate()
+	var served_bin: PackedVector2Array = state.profile.quarter_hour_served[bin_index].duplicate()
+	var served_hour: PackedVector2Array = state.profile.hourly_served[hour].duplicate()
+	var time_bin: PackedVector2Array = state.profile.quarter_hour_link_times[bin_index].duplicate()
+	var free: PackedVector2Array = state.free_link_costs
 	var provisional := PackedVector2Array()
 	provisional.resize(region.road_links.size())
 	var node_load := PackedFloat32Array()
 	node_load.resize(region.road_nodes.size())
 	for index in range(region.road_links.size()):
-		var link = region.road_links[index]
-		var capacity: float = RoadGraph.capacity_per_lane(link.road_class) * link.lanes_per_direction
+		var capacity: float = state.link_capacity_hr[index]
 		var available: Vector2 = queued[index] + state.cached_links[index] * fraction
 		var limit: float = capacity * fraction
 		var candidate := Vector2(minf(available.x, limit), minf(available.y, limit))
 		provisional[index] = candidate
-		node_load[link.to_node_id] += candidate.x
-		node_load[link.from_node_id] += candidate.y
+		node_load[state.link_to_nodes[index]] += candidate.x
+		node_load[state.link_from_nodes[index]] += candidate.y
 	var node_scale := PackedFloat32Array()
 	node_scale.resize(region.road_nodes.size())
 	for node_index in range(node_scale.size()):
 		node_scale[node_index] = minf(1.0, state.junction_capacity_hr[node_index] * fraction / maxf(0.000001, node_load[node_index]))
 	for index in range(region.road_links.size()):
 		var link = region.road_links[index]
-		var capacity: float = RoadGraph.capacity_per_lane(link.road_class) * link.lanes_per_direction
+		var capacity: float = state.link_capacity_hr[index]
 		var arrivals: Vector2 = state.cached_links[index] * fraction
 		var candidate: Vector2 = provisional[index]
-		var served := Vector2(candidate.x * node_scale[link.to_node_id], candidate.y * node_scale[link.from_node_id])
+		var served := Vector2(candidate.x * node_scale[state.link_to_nodes[index]], candidate.y * node_scale[state.link_from_nodes[index]])
 		var remaining: Vector2 = queued[index] + arrivals - served
 		queued[index] = remaining
 		served_bin[index] += served
@@ -275,6 +368,8 @@ static func _finish_hour(region, state, hour: int) -> void:
 		for index in range(row.size()):
 			time_sum[index] += row[index] * 0.25
 	state.profile.hourly_link_times[hour] = time_sum
+	if region.is_large_scale:
+		return
 	var mode: int = state.cached_mode
 	var group_count: int = region.neighborhoods.size() if mode <= MINUTE else (region.cities.size() if mode == HOUR else region.region_ids.size())
 	var representatives: Array[int] = []
@@ -412,6 +507,9 @@ static func _build_hour_demand(region, flow_profile, hour: int) -> Dictionary:
 
 
 static func _build_hour(region, flow_profile, state, mode: int, hour: int) -> void:
+	if region.is_large_scale:
+		CompactTrafficCalculator.build_hour(region, flow_profile, state, mode, hour)
+		return
 	state.cached_hour = hour
 	state.cached_mode = mode
 	var group_mode: int = MINUTE if mode <= MINUTE else mode

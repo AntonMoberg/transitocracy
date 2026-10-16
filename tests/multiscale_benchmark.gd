@@ -1,10 +1,10 @@
 extends SceneTree
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
+const UiFixture = preload("res://tests/ui_fixture.gd")
 func _initialize() -> void:
 	call_deferred("_run")
 func _run() -> void:
-	var main = load("res://scenes/main.tscn").instantiate()
-	root.add_child(main)
+	var main = await UiFixture.attach_small(self)
 	main._on_mode_selected(MultiScaleTraffic.DAY)
 	main._on_speed_selected(2)
 	var start_day: int = main.last_dynamics_day_key
@@ -24,4 +24,11 @@ func _run() -> void:
 			boundary_wait_started = -1
 	var seconds: float = float(Time.get_ticks_msec() - start_msec) / 1000.0
 	print("Fastest Day mode: %d days in %.2f s, %.2f days/s, longest frame %.1f ms, longest midnight wait %d ms" % [main.last_dynamics_day_key - start_day, seconds, float(main.last_dynamics_day_key-start_day)/maxf(0.001,seconds), max_frame, max_boundary_wait_msec])
+	if main.week_buffer != null:
+		var status: Dictionary = main.week_buffer.status()
+		var stage_totals: Dictionary = status["stage_totals_us"]
+		var stage_parts: PackedStringArray = []
+		for stage in stage_totals:
+			stage_parts.append("%s %.1f ms/day" % [stage, float(stage_totals[stage]) / maxf(1.0, float(status["produced"])) / 1000.0])
+		print("Day worker stages: ", ", ".join(stage_parts))
 	quit(0 if main.last_dynamics_day_key >= start_day + 14 else 1)

@@ -8,6 +8,14 @@ var produced_days: int = 0
 var produced_at_msec: int = 0
 var work_started_at_msec: int = Time.get_ticks_msec()
 var production_rate: float = 1.0
+var stage_totals_us: Dictionary = {}
+var snapshot_ready: bool = false
+
+
+func mark_snapshot_ready() -> void:
+	mutex.lock()
+	snapshot_ready = true
+	mutex.unlock()
 
 
 func begin_day() -> void:
@@ -27,6 +35,8 @@ func publish(result: Dictionary) -> bool:
 	production_rate = lerpf(production_rate, sample_rate, 0.35 if produced_days > 0 else 0.7)
 	produced_at_msec = now
 	produced_days += 1
+	for stage in result.get("timings_us", {}):
+		stage_totals_us[stage] = int(stage_totals_us.get(stage, 0)) + int(result["timings_us"][stage])
 	ready_days.append(result)
 	mutex.unlock()
 	return true
@@ -43,7 +53,7 @@ func take(day_key: int) -> Dictionary:
 
 func status() -> Dictionary:
 	mutex.lock()
-	var result := {"ready": ready_days.size(), "rate": production_rate, "cancelled": cancelled}
+	var result := {"ready": ready_days.size(), "rate": production_rate, "cancelled": cancelled, "produced": produced_days, "stage_totals_us": stage_totals_us.duplicate(), "snapshot_ready": snapshot_ready}
 	mutex.unlock()
 	return result
 

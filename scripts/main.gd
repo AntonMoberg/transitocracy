@@ -17,6 +17,8 @@ const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd"
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const MultiScaleDayCalculator = preload("res://scripts/simulation/multiscale_day_calculator.gd")
 const MultiScaleWeekBuffer = preload("res://scripts/simulation/multiscale_week_buffer.gd")
+const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
+const RoadRebuild = preload("res://scripts/simulation/road_rebuild.gd")
 
 const DEFAULT_SEED = 1729
 
@@ -31,6 +33,8 @@ var inspected_minute: int = 0
 var pending_day_thread: Thread
 var week_thread: Thread
 var week_buffer
+var active_snapshot_buffers: Array = []
+var deferred_region_edits: Array[Callable] = []
 var pending_day_key: int = -1
 var pending_day_source_mode: int = -1
 var pending_day_result: Dictionary = {}
@@ -55,6 +59,11 @@ var measured_rate: float = 0.0
 var map_view
 var flow_timeline
 var seed_input: SpinBox
+var map_size_selector: OptionButton
+var generate_button: Button
+var generation_thread: Thread
+var road_rebuild_thread: Thread
+var discard_road_rebuild: bool = false
 var summary_label: Label
 var dynamics_label: Label
 var tax_input: SpinBox
@@ -90,6 +99,11 @@ var pending_road_preview: Dictionary = {}
 var road_start_node: int = -1
 var road_waypoints: PackedVector2Array = PackedVector2Array()
 var selected_road_link_id: int = -1
+var last_process_us: int = 0
+var last_handoff_us: int = 0
+var last_advance_us: int = 0
+var last_sync_us: int = 0
+var last_handoff_breakdown: Dictionary = {}
 
 
 func _ready() -> void:
@@ -99,6 +113,10 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	if generation_thread != null:
+		generation_thread.wait_to_finish()
+	if road_rebuild_thread != null:
+		road_rebuild_thread.wait_to_finish()
 	_discard_pending_day()
 	for worker in retired_day_threads:
 		worker.wait_to_finish()
@@ -109,27 +127,48 @@ func _exit_tree() -> void:
 
 
 func _process(delta: float) -> void:
+	var process_started: int = Time.get_ticks_usec()
+	_poll_generation()
+	_poll_road_rebuild()
 	_reap_finished_day_threads()
 	_reap_finished_data_threads()
 	_poll_day_worker()
 	if simulation_mode == MultiScaleTraffic.DAY and traffic_state != null:
 		_ensure_week_worker()
 		_poll_week_worker()
+	if _region_snapshot_busy():
+		return
+	if not deferred_region_edits.is_empty():
+		var edits: Array[Callable] = deferred_region_edits.duplicate()
+		deferred_region_edits.clear()
+		for edit in edits:
+			edit.call()
+	if _region_snapshot_busy():
+		return
+	var handoff_started: int = Time.get_ticks_usec()
 	_ensure_day_profiles()
+	last_handoff_us = Time.get_ticks_usec() - handoff_started
 	if not playing or calendar_clock == null or traffic_state == null:
 		return
 	var target_rate: float = [1.0, 60.0, 3600.0, 86400.0][simulation_mode] * [1.0, 2.0, 4.0][pace_index]
 	var effective_rate: float = _effective_day_rate(target_rate) if simulation_mode == MultiScaleTraffic.DAY else target_rate
 	speed_multiplier = target_rate / 3600.0
-	simulation_credit = minf(simulation_credit + delta * effective_rate, maxf(1.0, effective_rate * 0.25))
+	var compact_day: bool = simulation_mode == MultiScaleTraffic.DAY and region.is_large_scale
+	var compact_hour: bool = simulation_mode == MultiScaleTraffic.HOUR and region.is_large_scale
+	simulation_credit = minf(simulation_credit + delta * effective_rate, maxf(86400.0 if compact_day else (3600.0 if compact_hour else 1.0), effective_rate * 0.25))
 	var game_start: int = traffic_state.unix_seconds
+	var advance_started: int = Time.get_ticks_usec()
 	var budget_end: int = Time.get_ticks_usec() + 2500
 	while simulation_credit >= 1.0 and Time.get_ticks_usec() < budget_end:
 		var day_end: int = (traffic_state.day_key + 1) * 86400
 		if traffic_state.unix_seconds >= day_end:
 			_queue_next_day(traffic_state.day_key)
 			break
-		var quantum: int = 1 if simulation_mode == MultiScaleTraffic.SECOND else (60 if simulation_mode == MultiScaleTraffic.MINUTE else 3600)
+		if compact_day and simulation_credit < float(day_end - traffic_state.unix_seconds):
+			break
+		if compact_hour and simulation_credit < float(mini(day_end, (traffic_state.unix_seconds / 3600 + 1) * 3600) - traffic_state.unix_seconds):
+			break
+		var quantum: int = 1 if simulation_mode == MultiScaleTraffic.SECOND else (60 if simulation_mode == MultiScaleTraffic.MINUTE else (86400 if compact_day else 3600))
 		var duration: int = mini(floori(simulation_credit), mini(quantum, day_end - traffic_state.unix_seconds))
 		if duration <= 0:
 			break
@@ -144,6 +183,7 @@ func _process(delta: float) -> void:
 			_queue_next_day(traffic_state.day_key)
 			break
 	calendar_clock.fractional_second = minf(0.999, simulation_credit) if simulation_mode == MultiScaleTraffic.SECOND else 0.0
+	last_advance_us = Time.get_ticks_usec() - advance_started
 	game_rate_seconds += traffic_state.unix_seconds - game_start
 	real_rate_seconds += delta
 	if real_rate_seconds >= 1.0:
@@ -152,7 +192,10 @@ func _process(delta: float) -> void:
 		real_rate_seconds = 0.0
 		game_rate_seconds = 0.0
 	inspected_hour = -1
+	var sync_started: int = Time.get_ticks_usec()
 	_sync_clock_view()
+	last_sync_us = Time.get_ticks_usec() - sync_started
+	last_process_us = Time.get_ticks_usec() - process_started
 
 
 func _input(event: InputEvent) -> void:
@@ -235,7 +278,18 @@ func _build_interface() -> void:
 	seed_input.value = DEFAULT_SEED
 	seed_input.custom_minimum_size = Vector2(116, 0)
 	header.add_child(seed_input)
-	var generate_button := Button.new()
+	var map_size_label := Label.new()
+	map_size_label.text = "Map size"
+	map_size_label.add_theme_color_override("font_color", Color("b8c9d6"))
+	header.add_child(map_size_label)
+	map_size_selector = OptionButton.new()
+	map_size_selector.add_item("96 neighborhoods", 16)
+	map_size_selector.add_item("5,120 neighborhoods", 128)
+	map_size_selector.add_item("20,480 neighborhoods", 512)
+	map_size_selector.select(1)
+	map_size_selector.tooltip_text = "Generated cities and neighborhoods"
+	header.add_child(map_size_selector)
+	generate_button = Button.new()
 	generate_button.text = "Generate"
 	generate_button.pressed.connect(_on_generate_pressed)
 	header.add_child(generate_button)
@@ -543,6 +597,9 @@ func _on_time_selected(hour: int, minute: int) -> void:
 func _on_tax_changed(value: float) -> void:
 	if region == null:
 		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_tax_changed").bind(value))
+		return
 	_discard_pending_day()
 	FiscalCalculator.queue_policy(region, 0, "income_tax_rate", value / 100.0, calendar_clock.unix_seconds)
 	_invalidate_traffic_forecast()
@@ -618,8 +675,15 @@ func _on_policy_changed(value: float) -> void:
 		return
 	var option: Dictionary = policy_options[policy_selector.selected]
 	var policy_value: float = value / 100.0 if option["percent"] else value
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_apply_specific_policy").bind(selected_jurisdiction_id, option["property"], policy_value))
+		return
+	_apply_specific_policy(selected_jurisdiction_id, option["property"], policy_value)
+
+
+func _apply_specific_policy(area_id: int, property_name: String, policy_value: float) -> void:
 	_discard_pending_day()
-	FiscalCalculator.queue_policy(region, selected_jurisdiction_id, option["property"], policy_value, calendar_clock.unix_seconds)
+	FiscalCalculator.queue_policy(region, area_id, property_name, policy_value, calendar_clock.unix_seconds)
 	_invalidate_traffic_forecast()
 	_queue_next_day(last_dynamics_day_key)
 	_refresh_fiscal_controls()
@@ -715,25 +779,49 @@ func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
 
 
 func _generate_region(seed_value: int) -> void:
+	if generation_thread != null:
+		return
+	discard_road_rebuild = road_rebuild_thread != null
+	var city_count: int = map_size_selector.get_selected_id()
+	generate_button.disabled = true
+	map_size_selector.disabled = true
+	summary_label.text = "Generating %s…" % map_size_selector.get_item_text(map_size_selector.selected)
+	var worker := Thread.new()
+	var task := Callable(RegionSetup, "build").bind(seed_value, city_count, tax_input.value / 100.0)
+	if worker.start(task, Thread.PRIORITY_NORMAL) != OK:
+		generate_button.disabled = false
+		map_size_selector.disabled = false
+		push_error("Could not start region generation worker.")
+		return
+	generation_thread = worker
+
+
+func _poll_generation() -> void:
+	if generation_thread == null or generation_thread.is_alive():
+		return
+	var result: Dictionary = generation_thread.wait_to_finish()
+	generation_thread = null
+	generate_button.disabled = false
+	map_size_selector.disabled = false
+	if result.is_empty():
+		push_error("Region generation returned no data.")
+		return
+	_apply_generated_region(result)
+
+
+func _apply_generated_region(result: Dictionary) -> void:
 	_discard_pending_day()
-	region = RegionGenerator.generate_region(seed_value)
-	RoadNetworkGenerator.generate(region)
-	AccessibilityCalculator.recalculate(region)
-	region.jurisdictions[0].income_tax_rate = tax_input.value / 100.0
-	NeighborhoodDynamics.initialize(region)
-	RoadPlanner.refresh_upkeep(region)
-	calendar_clock = CalendarClock.new()
-	last_dynamics_day_key = floori(float(calendar_clock.unix_seconds) / 86400.0)
-	region.current_day_key = last_dynamics_day_key
-	flow_profile = TripFlowCalculator.build(region)
-	TripFlowCalculator.populate_day(flow_profile, region.generation_seed, calendar_clock.unix_seconds, calendar_clock.is_weekend())
-	traffic_state = MultiScaleTraffic.new_day(region, flow_profile, calendar_clock.unix_seconds)
+	deferred_region_edits.clear()
+	region = result["region"]
+	flow_profile = result["flow"]
+	traffic_state = result["traffic_state"]
+	calendar_clock = result["clock"]
+	last_dynamics_day_key = traffic_state.day_key
 	traffic_profile = traffic_state.profile
 	week_timeline_history.clear()
 	week_timeline_start_key = traffic_state.day_key if simulation_mode == MultiScaleTraffic.DAY else -1
 	inspected_hour = -1
-	NeighborhoodDynamics.refresh_desirability(region)
-	var errors: PackedStringArray = region.validation_errors()
+	var errors: PackedStringArray = result["errors"]
 	if not errors.is_empty():
 		push_error("Invalid generated region: " + "; ".join(errors))
 		inspector.text = "[color=#ff8c8c]Region generation failed validation.[/color]"
@@ -789,6 +877,7 @@ func _ensure_day_profiles() -> void:
 		return
 	if traffic_state.unix_seconds < pending_day_result_key * 86400:
 		return
+	var handoff_started: int = Time.get_ticks_usec()
 	if simulation_mode == MultiScaleTraffic.DAY and week_timeline_start_key >= 0:
 		week_timeline_history[traffic_state.day_key] = flow_profile.get_daily_totals()
 	var old_data: Dictionary = {"region": region, "flow": flow_profile, "traffic_state": traffic_state, "traffic_profile": traffic_profile}
@@ -812,10 +901,15 @@ func _ensure_day_profiles() -> void:
 	map_view.set_next_day_profile(null)
 	map_view.set_next_traffic_profile(null)
 	flow_timeline.set_next_day_profile(null)
+	last_handoff_breakdown["assign"] = Time.get_ticks_usec() - handoff_started
 	_retire_simulation_data(old_data)
+	last_handoff_breakdown["retire"] = Time.get_ticks_usec() - handoff_started
 	_refresh_region_summary()
+	last_handoff_breakdown["summary"] = Time.get_ticks_usec() - handoff_started
 	_refresh_inspector(false)
+	last_handoff_breakdown["inspector"] = Time.get_ticks_usec() - handoff_started
 	_update_road_status()
+	last_handoff_breakdown["total"] = Time.get_ticks_usec() - handoff_started
 
 
 func _retire_simulation_data(payload: Dictionary) -> void:
@@ -844,19 +938,30 @@ func _ensure_week_worker() -> void:
 		week_buffer = null
 	if week_thread != null or week_buffer != null or pending_day_thread != null or pending_day_result_key >= 0:
 		return
+	if _region_snapshot_busy():
+		return
 	if Time.get_ticks_msec() < day_worker_retry_at_msec:
 		return
-	var region_snapshot = DayCycleCalculator.copy_region(region)
 	var traffic_snapshot = MultiScaleTraffic.fork_for_week(traffic_state)
 	var buffer = MultiScaleWeekBuffer.new()
 	var worker := Thread.new()
-	var task := Callable(MultiScaleDayCalculator, "produce_seven_day_windows").bind(region_snapshot, flow_profile, traffic_snapshot, buffer)
+	var task := Callable(MultiScaleDayCalculator, "produce_seven_day_windows").bind(region, flow_profile, traffic_snapshot, buffer)
 	if worker.start(task, Thread.PRIORITY_LOW) != OK:
 		day_worker_retry_at_msec = Time.get_ticks_msec() + 1000
 		push_warning("Could not start seven-day worker; simulation will retry.")
 		return
 	week_buffer = buffer
 	week_thread = worker
+	active_snapshot_buffers.append(buffer)
+
+
+func _region_snapshot_busy() -> bool:
+	if road_rebuild_thread != null:
+		return true
+	for index in range(active_snapshot_buffers.size() - 1, -1, -1):
+		if bool(active_snapshot_buffers[index].status()["snapshot_ready"]):
+			active_snapshot_buffers.remove_at(index)
+	return not active_snapshot_buffers.is_empty()
 
 
 func _poll_week_worker() -> void:
@@ -952,7 +1057,6 @@ func _invalidate_traffic_forecast() -> void:
 
 
 func _sync_clock_view() -> void:
-	_ensure_day_profiles()
 	var hour: int = inspected_hour if inspected_hour >= 0 else calendar_clock.get_hour()
 	var fraction: float = float(inspected_minute) / 60.0 if inspected_hour >= 0 else calendar_clock.get_hour_fraction()
 	var weekend: bool = calendar_clock.is_weekend()
@@ -1094,14 +1198,23 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	text_lines.append("")
 	text_lines.append("[color=#78c8dc][b]TRAVEL TIMES[/b][/color]")
 	var travel_order: Array[int] = []
-	for id in range(region.neighborhoods.size()):
-		travel_order.append(id)
-	travel_order.sort_custom(func(a: int, b: int) -> bool: return region.travel_times[neighborhood_id][a] < region.travel_times[neighborhood_id][b])
-	for id in travel_order:
-		if region.travel_times[neighborhood_id][id] >= 1000000.0:
+	if region.is_large_scale:
+		# Keep the inspector bounded at state scale. Nearby destinations are the useful ones.
+		for id in region.cities[neighborhood.city_id]["neighborhood_ids"]:
+			travel_order.append(id)
+		for city in region.cities:
+			if city["id"] != neighborhood.city_id:
+				travel_order.append(city["neighborhood_ids"][0])
+	else:
+		for id in range(region.neighborhoods.size()):
+			travel_order.append(id)
+	travel_order.sort_custom(func(a: int, b: int) -> bool: return region.travel_time_between(neighborhood_id, a) < region.travel_time_between(neighborhood_id, b))
+	for id in travel_order.slice(0, 24 if region.is_large_scale else travel_order.size()):
+		var minutes: float = region.travel_time_between(neighborhood_id, id)
+		if minutes >= 1000000.0:
 			text_lines.append("%s: no road route" % region.neighborhoods[id].name)
 		else:
-			text_lines.append("%s: %.1f min" % [region.neighborhoods[id].name, region.travel_times[neighborhood_id][id]])
+			text_lines.append("%s: %.1f min" % [region.neighborhoods[id].name, minutes])
 	text_lines.append("")
 	text_lines.append("[color=#78c8dc][b]%s CITY TOTAL[/b][/color]" % region.get_city_name(neighborhood.city_id).to_upper())
 	text_lines.append("Population: %s" % _format_count(city_totals["population"]))
@@ -1167,6 +1280,9 @@ func _on_road_node_clicked(node_id: int) -> void:
 
 
 func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_road_link_clicked").bind(link_id, world_position))
+		return
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
 	if tool_name != "Junction":
 		selected_road_link_id = link_id
@@ -1196,6 +1312,9 @@ func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
 
 
 func _on_road_empty_clicked(world_position: Vector2) -> void:
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_road_empty_clicked").bind(world_position))
+		return
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
 	if tool_name == "Junction":
 		var result: Dictionary = RoadPlanner.add_junction(region, world_position)
@@ -1209,6 +1328,9 @@ func _on_road_empty_clicked(world_position: Vector2) -> void:
 
 
 func _on_road_build_pressed() -> void:
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_road_build_pressed"))
+		return
 	if pending_road_preview.get("kind", "") == RoadPlanner.DEMOLISH:
 		var result: Dictionary = RoadPlanner.demolish(region, pending_road_preview["target_link_id"])
 		if not result["ok"]:
@@ -1270,7 +1392,19 @@ func _update_road_status() -> void:
 
 func _rebuild_after_road_change() -> void:
 	_discard_pending_day()
+	if region.is_large_scale:
+		var worker := Thread.new()
+		var task := Callable(RoadRebuild, "build").bind(region, traffic_state, calendar_clock.unix_seconds)
+		if worker.start(task, Thread.PRIORITY_NORMAL) == OK:
+			road_rebuild_thread = worker
+			discard_road_rebuild = false
+			map_view.set_traffic_profile(null)
+			map_view.set_recorded_bin(0, 0)
+			road_status_label.text = "Recalculating road access and trips…"
+			return
+		push_warning("Could not start road rebuild worker; calculating on the main thread.")
 	var previous_state = traffic_state
+	region.city_od_candidates.clear()
 	AccessibilityCalculator.recalculate(region)
 	flow_profile = TripFlowCalculator.build(region)
 	TripFlowCalculator.populate_day(flow_profile, region.generation_seed, calendar_clock.unix_seconds, calendar_clock.is_weekend())
@@ -1286,6 +1420,38 @@ func _rebuild_after_road_change() -> void:
 	flow_timeline.set_next_day_profile(null)
 	_refresh_region_summary()
 	_refresh_inspector(false)
+	map_view.queue_redraw()
+
+
+func _poll_road_rebuild() -> void:
+	if road_rebuild_thread == null or road_rebuild_thread.is_alive():
+		return
+	var result: Dictionary = road_rebuild_thread.wait_to_finish()
+	road_rebuild_thread = null
+	if discard_road_rebuild:
+		discard_road_rebuild = false
+		return
+	if result.is_empty() or not result["errors"].is_empty():
+		push_error("Road recalculation failed.")
+		return
+	var old_data: Dictionary = {"region": region, "flow": flow_profile, "traffic_state": traffic_state, "traffic_profile": traffic_profile}
+	region = result["region"]
+	flow_profile = result["flow"]
+	traffic_state = result["traffic_state"]
+	traffic_profile = traffic_state.profile
+	map_view.region = region
+	map_view.set_flow_profile(flow_profile)
+	map_view.set_traffic_profile(traffic_profile)
+	flow_timeline.set_profile(flow_profile)
+	next_day_profile = null
+	next_traffic_profile = null
+	map_view.set_next_day_profile(null)
+	map_view.set_next_traffic_profile(null)
+	flow_timeline.set_next_day_profile(null)
+	_retire_simulation_data(old_data)
+	_refresh_region_summary()
+	_refresh_inspector(false)
+	_update_road_status()
 	map_view.queue_redraw()
 
 
@@ -1328,11 +1494,18 @@ func _refresh_toll_controls() -> void:
 func _on_toll_changed(property_name: String, value: float) -> void:
 	if suppress_toll_input or selected_road_link_id < 0 or region == null:
 		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_apply_specific_toll").bind(selected_road_link_id, property_name, value))
+		return
+	_apply_specific_toll(selected_road_link_id, property_name, value)
+
+
+func _apply_specific_toll(link_id: int, property_name: String, value: float) -> void:
 	_discard_pending_day()
-	FiscalCalculator.queue_toll(region, selected_road_link_id, property_name, value, calendar_clock.unix_seconds)
+	FiscalCalculator.queue_toll(region, link_id, property_name, value, calendar_clock.unix_seconds)
 	_invalidate_traffic_forecast()
 	road_status_label.text = "Toll change begins at the next 15-minute checkpoint."
-	_show_road_inspector(selected_road_link_id)
+	_show_road_inspector(link_id)
 
 
 func _show_road_inspector(link_id: int) -> void:

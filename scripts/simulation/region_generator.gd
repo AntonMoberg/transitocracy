@@ -121,6 +121,89 @@ static func generate_region(seed_value: int):
 	return region
 
 
+static func generate_large_region(seed_value: int, city_count: int = 128, neighborhoods_per_city: int = 40):
+	# A benchmark-sized state with bounded local geometry and the same
+	# State → Region → County → City → Neighborhood ownership model.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	var region = RegionData.new()
+	region.generation_seed = seed_value
+	region.is_large_scale = true
+	var columns: int = ceili(sqrt(float(city_count) * 2.0))
+	columns = maxi(4, ceili(float(columns) / 4.0) * 4)
+	var rows: int = ceili(float(city_count) / float(columns))
+	rows = maxi(4, ceili(float(rows) / 4.0) * 4)
+	var state_width: float = float(columns) * 20.0
+	var state_height: float = float(rows) * 20.0
+	var state = _add_jurisdiction(region, JurisdictionData.STATE, region.state_name, -1, Vector2(state_width, state_height) * 0.5)
+	state.bounds_km = Rect2(0.0, 0.0, state_width, state_height)
+	state.income_tax_rate = 0.10
+	state.treasury = 500000000.0
+	for region_row in range(4):
+		for region_column in range(4):
+			var region_index: int = region_row * 4 + region_column
+			var region_bounds := Rect2(float(region_column) * state_width / 4.0, float(region_row) * state_height / 4.0, state_width / 4.0, state_height / 4.0)
+			var planning_region = _add_jurisdiction(region, JurisdictionData.REGION, "Region %d" % (region_index + 1), state.id, region_bounds.get_center())
+			planning_region.bounds_km = region_bounds
+			region.region_ids.append(planning_region.id)
+			for county_row in range(2):
+				for county_column in range(2):
+					var county_index: int = region_index * 4 + county_row * 2 + county_column
+					var county_bounds := Rect2(region_bounds.position + Vector2(county_column, county_row) * region_bounds.size * 0.5, region_bounds.size * 0.5)
+					var county = _add_jurisdiction(region, JurisdictionData.COUNTY, "County %d" % (county_index + 1), planning_region.id, county_bounds.get_center())
+					county.bounds_km = county_bounds
+					county.income_tax_rate = 0.02
+					county.property_tax_rate = 0.005
+					county.sales_tax_rate = 0.02
+					county.treasury = 50000000.0
+					region.county_ids.append(county.id)
+	for city_id in range(city_count):
+		var grid_column: int = city_id % columns
+		var grid_row: int = city_id / columns
+		var region_column: int = mini(3, grid_column * 4 / columns)
+		var region_row: int = mini(3, grid_row * 4 / rows)
+		var region_index: int = region_row * 4 + region_column
+		var county_column: int = mini(1, (grid_column * 8 / columns) % 2)
+		var county_row: int = mini(1, (grid_row * 8 / rows) % 2)
+		var county_index: int = region_index * 4 + county_row * 2 + county_column
+		var county = region.jurisdictions[region.county_ids[county_index]]
+		var city_center := Vector2((float(grid_column) + 0.5) * 20.0, (float(grid_row) + 0.5) * 20.0)
+		var city_name: String = "%s %d" % [CITY_NAMES[city_id % CITY_NAMES.size()], city_id / CITY_NAMES.size() + 1]
+		var city = _add_jurisdiction(region, JurisdictionData.CITY, city_name, county.id, city_center)
+		city.bounds_km = Rect2(city_center - Vector2(10.0, 10.0), Vector2(20.0, 20.0))
+		city.treasury = 10000000.0
+		region.city_jurisdiction_ids.append(city.id)
+		var neighborhood_ids: Array[int] = []
+		for local_id in range(neighborhoods_per_city):
+			var neighborhood = NeighborhoodData.new()
+			neighborhood.id = region.neighborhoods.size()
+			neighborhood.city_id = city_id
+			neighborhood.county_id = county_index
+			neighborhood.region_id = region_index
+			neighborhood.name = "%s · %d" % [city_name, local_id + 1]
+			var angle: float = float(local_id) * 2.3999632 + rng.randf_range(-0.05, 0.05)
+			var radius: float = 1.0 + 7.0 * sqrt(float(local_id + 0.5) / float(neighborhoods_per_city))
+			neighborhood.position_km = city_center + Vector2.from_angle(angle) * radius
+			var district = _add_jurisdiction(region, JurisdictionData.NEIGHBORHOOD, neighborhood.name, city.id, neighborhood.position_km)
+			district.treasury = 1000000.0
+			neighborhood.jurisdiction_id = district.id
+			region.neighborhood_jurisdiction_ids.append(district.id)
+			neighborhood.land_area_ha = float(rng.randi_range(80, 130))
+			neighborhood.zone_shares = ARCHETYPES[(local_id + city_id) % ARCHETYPES.size()].duplicate(true)
+			var base_density: int = 2 if city_id % 8 == 0 else (1 if city_id % 8 < 3 else 0)
+			for zone in RegionData.ZONE_TYPES:
+				neighborhood.zone_density[zone] = clampi(base_density + rng.randi_range(-1, 1), 0, 2)
+			_populate_capacity_and_occupancy(neighborhood, rng, base_density)
+			region.neighborhoods.append(neighborhood)
+			neighborhood_ids.append(neighborhood.id)
+			var current_id: int = district.id
+			while current_id >= 0:
+				region.jurisdictions[current_id].neighborhood_ids.append(neighborhood.id)
+				current_id = region.jurisdictions[current_id].parent_id
+		region.cities.append({"id": city_id, "name": city_name, "center_km": city_center, "neighborhood_ids": neighborhood_ids, "county_id": county_index, "region_id": region_index, "jurisdiction_id": city.id})
+	return region
+
+
 static func _add_jurisdiction(region, kind: String, name: String, parent_id: int, center: Vector2):
 	var area = JurisdictionData.new()
 	area.id = region.jurisdictions.size()

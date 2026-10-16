@@ -1,6 +1,7 @@
 extends SceneTree
 
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
+const UiFixture = preload("res://tests/ui_fixture.gd")
 var failures := 0
 
 
@@ -9,8 +10,7 @@ func _initialize() -> void:
 
 
 func _run() -> void:
-	var main = load("res://scenes/main.tscn").instantiate()
-	root.add_child(main)
+	var main = await UiFixture.attach_small(self)
 	_check(main.simulation_mode == MultiScaleTraffic.MINUTE and main.mode_selector.item_count == 4 and main.speed_selector.item_count == 3, "mode and pace selectors are available")
 	var start_day: int = main.last_dynamics_day_key
 	main._on_mode_selected(MultiScaleTraffic.DAY)

@@ -8,7 +8,6 @@ const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const INTERCHANGE_COST = 10000000
 const INTERCHANGE_UPKEEP = 1000.0
 const BUILD_TIME_DIVISOR = 10.0
-const WORLD_SIZE = Vector2(240.0, 160.0)
 const DEMOLISH = "Demolish"
 
 
@@ -24,7 +23,7 @@ static func link_preview(region, from_id: int, to_id: int, road_class: String, w
 			return {"ok": false, "reason": "This road connection already exists."}
 	var points := PackedVector2Array([region.road_nodes[from_id].position_km])
 	for point in waypoints:
-		if not _inside_map(point):
+		if not _inside_map(point, region):
 			return {"ok": false, "reason": "Keep road waypoints inside the region."}
 		points.append(point)
 	points.append(region.road_nodes[to_id].position_km)
@@ -155,7 +154,7 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 
 
 static func add_junction(region, point: Vector2, split_link_id: int = -1) -> Dictionary:
-	if not _inside_map(point):
+	if not _inside_map(point, region):
 		return {"ok": false, "reason": "Place junctions inside the region."}
 	if split_link_id >= 0:
 		var index: int = RoadGraph.link_index(region, split_link_id)
@@ -175,6 +174,7 @@ static func add_junction(region, point: Vector2, split_link_id: int = -1) -> Dic
 	var junction = RoadNodeData.new()
 	junction.id = region.road_nodes.size()
 	junction.position_km = point
+	junction.city_id = region.neighborhoods[region.nearest_neighborhood_id(point)].city_id
 	region.road_nodes.append(junction)
 	if split_link_id >= 0:
 		_split_link(region, split_link_id, junction.id, point)
@@ -209,6 +209,7 @@ static func advance_day(region, day_key: int) -> bool:
 				var exit_node = RoadNodeData.new()
 				exit_node.id = region.road_nodes.size()
 				exit_node.position_km = project.position_km
+				exit_node.city_id = region.neighborhoods[region.nearest_neighborhood_id(project.position_km)].city_id
 				exit_node.is_interchange = true
 				region.road_nodes.append(exit_node)
 				_split_link(region, project.target_link_id, exit_node.id, project.position_km)
@@ -304,11 +305,12 @@ static func _construction_days(base_days: int) -> int:
 	return maxi(1, ceili(float(base_days) / BUILD_TIME_DIVISOR))
 
 
-static func _inside_map(point: Vector2) -> bool:
-	return point.x >= 0.0 and point.y >= 0.0 and point.x <= WORLD_SIZE.x and point.y <= WORLD_SIZE.y
+static func _inside_map(point: Vector2, region) -> bool:
+	return region.jurisdictions[0].bounds_km.has_point(point)
 
 
 static func _neighborhood_components_without(region, excluded_link_id: int) -> int:
+	var neighbors: Array = RoadGraph.adjacency(region)
 	var visited := PackedByteArray()
 	visited.resize(region.road_nodes.size())
 	var components := 0
@@ -320,15 +322,12 @@ static func _neighborhood_components_without(region, excluded_link_id: int) -> i
 		visited[gateway_id] = 1
 		while not frontier.is_empty():
 			var current: int = frontier.pop_back()
-			for link in region.road_links:
+			for edge in neighbors[current]:
+				var link = region.road_links[edge.x]
 				if link.id == excluded_link_id:
 					continue
-				var neighbor := -1
-				if link.from_node_id == current:
-					neighbor = link.to_node_id
-				elif link.to_node_id == current:
-					neighbor = link.from_node_id
-				if neighbor >= 0 and visited[neighbor] == 0:
+				var neighbor: int = link.to_node_id if edge.y == 0 else link.from_node_id
+				if visited[neighbor] == 0:
 					visited[neighbor] = 1
 					frontier.append(neighbor)
 	return components

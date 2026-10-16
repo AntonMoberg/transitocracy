@@ -12,12 +12,12 @@ static func assess_homes(region) -> void:
 
 static func after_income_tax(region, neighborhood) -> float:
 	var state = region.jurisdictions[0]
-	var county = region.jurisdiction_for_neighborhood(neighborhood.id, "County")
+	var county = region.jurisdictions[region.county_ids[neighborhood.county_id]]
 	return float(neighborhood.average_monthly_income) * (1.0 - state.income_tax_rate - county.income_tax_rate)
 
 
 static func property_cost_monthly(region, neighborhood) -> float:
-	var county = region.jurisdiction_for_neighborhood(neighborhood.id, "County")
+	var county = region.jurisdictions[region.county_ids[neighborhood.county_id]]
 	return neighborhood.assessed_home_value * county.property_tax_rate / 12.0
 
 
@@ -30,7 +30,7 @@ static func refresh_tax_estimates(region) -> void:
 		area.daily_income_revenue = 0.0
 		area.daily_property_revenue = 0.0
 	for neighborhood in region.neighborhoods:
-		var county = region.jurisdiction_for_neighborhood(neighborhood.id, "County")
+		var county = region.jurisdictions[region.county_ids[neighborhood.county_id]]
 		var annual_income: float = float(neighborhood.households * neighborhood.average_monthly_income) * 12.0
 		region.jurisdictions[0].daily_income_revenue += annual_income * region.jurisdictions[0].income_tax_rate / DAYS_PER_YEAR
 		county.daily_income_revenue += annual_income * county.income_tax_rate / DAYS_PER_YEAR

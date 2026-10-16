@@ -1,6 +1,7 @@
 extends SceneTree
 
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const UiFixture = preload("res://tests/ui_fixture.gd")
 
 var failures := 0
 
@@ -10,8 +11,7 @@ func _initialize() -> void:
 
 
 func _run_checks() -> void:
-	var main = load("res://scenes/main.tscn").instantiate()
-	root.add_child(main)
+	var main = await UiFixture.attach_small(self)
 	main._on_play_pressed()
 	main.get_window().mode = Window.MODE_WINDOWED
 	main.get_window().size = Vector2i(1024, 700)

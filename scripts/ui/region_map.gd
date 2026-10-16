@@ -53,6 +53,8 @@ var pan: Vector2 = Vector2.ZERO
 var pointer_down: bool = false
 var pointer_dragged: bool = false
 var pointer_start: Vector2 = Vector2.ZERO
+var last_draw_us: int = 0
+var last_draw_stages_us: Dictionary = {}
 
 
 func _ready() -> void:
@@ -127,12 +129,18 @@ func set_hour(hour: int) -> void:
 
 
 func set_time(hour: int, fraction: float) -> void:
-	selected_hour = clampi(hour, 0, 23)
-	hour_fraction = clampf(fraction, 0.0, 1.0)
+	var next_hour: int = clampi(hour, 0, 23)
+	var next_fraction: float = clampf(fraction, 0.0, 1.0)
+	if selected_hour == next_hour and is_equal_approx(hour_fraction, next_fraction):
+		return
+	selected_hour = next_hour
+	hour_fraction = next_fraction
 	queue_redraw()
 
 
 func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
+	if recorded_bin == bin_index and first_recorded_bin == first_bin:
+		return
 	recorded_bin = bin_index
 	first_recorded_bin = first_bin
 	queue_redraw()
@@ -192,15 +200,44 @@ func _ensure_aggregate_cache() -> void:
 		aggregate_neighborhood_groups[neighborhood.id] = region.jurisdiction_for_neighborhood(neighborhood.id, _aggregate_kind()).id
 	aggregate_node_groups.resize(region.road_nodes.size())
 	for node in region.road_nodes:
-		aggregate_node_groups[node.id] = aggregate_neighborhood_groups[region.nearest_neighborhood_id(node.position_km)]
+		var neighborhood_id: int = node.neighborhood_id
+		if neighborhood_id < 0 and node.city_id >= 0:
+			neighborhood_id = region.cities[node.city_id]["neighborhood_ids"][0]
+		if neighborhood_id < 0:
+			neighborhood_id = region.nearest_neighborhood_id(node.position_km)
+		aggregate_node_groups[node.id] = aggregate_neighborhood_groups[neighborhood_id]
 
 
 func _aggregate_flow_matrix(profile, hour: int, purpose: String) -> Dictionary:
 	var cache_key: String = "%d:%d:%s" % [profile.get_instance_id(), hour, purpose]
 	if aggregate_flow_cache.has(cache_key):
 		return aggregate_flow_cache[cache_key]
-	var matrix: Array = profile.get_hour_matrix(hour, purpose)
 	var grouped: Dictionary = {}
+	if profile.is_compact:
+		if _aggregate_kind() == "Region":
+			var regional_matrix: Array = profile.compact_region_od[purpose]
+			var regional_curves: Dictionary = profile.compact_curves[purpose]
+			for origin_region in range(region.region_ids.size()):
+				for destination_region in range(region.region_ids.size()):
+					if origin_region == destination_region:
+						continue
+					var key := Vector2i(region.region_ids[origin_region], region.region_ids[destination_region])
+					grouped[key] = regional_matrix[origin_region][destination_region] * regional_curves["out"][hour] + regional_matrix[destination_region][origin_region] * regional_curves["back"][hour]
+			aggregate_flow_cache[cache_key] = grouped
+			return grouped
+		var city_matrix: Array = profile.compact_city_od[purpose]
+		var curves: Dictionary = profile.compact_curves[purpose]
+		for origin_city in range(region.cities.size()):
+			var from_group: int = aggregate_neighborhood_groups[region.cities[origin_city]["neighborhood_ids"][0]]
+			for destination_city in range(region.cities.size()):
+				var to_group: int = aggregate_neighborhood_groups[region.cities[destination_city]["neighborhood_ids"][0]]
+				if from_group == to_group:
+					continue
+				var key := Vector2i(from_group, to_group)
+				grouped[key] = float(grouped.get(key, 0.0)) + city_matrix[origin_city][destination_city] * curves["out"][hour] + city_matrix[destination_city][origin_city] * curves["back"][hour]
+		aggregate_flow_cache[cache_key] = grouped
+		return grouped
+	var matrix: Array = profile.get_hour_matrix(hour, purpose)
 	for origin_id in range(aggregate_neighborhood_groups.size()):
 		var from_group: int = aggregate_neighborhood_groups[origin_id]
 		for destination_id in range(aggregate_neighborhood_groups.size()):
@@ -234,10 +271,13 @@ func _draw_aggregate_roads() -> void:
 		if _is_strategic_road(link):
 			continue
 		local_km += link.length_km
-		draw_polyline(_screen_polyline(link.points), Color("526474", 0.30), 1.0, true)
+		if (not region.is_large_scale or detail_level == "County" and zoom >= 4.0) and _polyline_visible(link.points):
+			draw_polyline(_screen_polyline(link.points), Color("526474", 0.30), 1.0, true)
 	for index in range(region.road_links.size()):
 		var link = region.road_links[index]
 		if not _is_strategic_road(link):
+			continue
+		if not _polyline_visible(link.points):
 			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
@@ -356,17 +396,24 @@ func _hit_aggregate_node(screen_position: Vector2) -> int:
 
 
 func _draw() -> void:
+	var draw_started: int = Time.get_ticks_usec()
 	draw_rect(Rect2(Vector2.ZERO, size), Color("101b2b"))
 	_draw_grid()
 	if region == null:
+		last_draw_us = Time.get_ticks_usec() - draw_started
 		return
 	_draw_boundaries()
+	last_draw_stages_us["boundaries"] = Time.get_ticks_usec() - draw_started
 	_draw_cities()
+	last_draw_stages_us["cities"] = Time.get_ticks_usec() - draw_started
 	_draw_roads()
+	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
 	if map_mode == "Trips":
 		_draw_hourly_flows()
 	_draw_neighborhoods()
+	last_draw_stages_us["neighborhoods"] = Time.get_ticks_usec() - draw_started
 	_draw_jurisdiction_labels()
+	last_draw_stages_us["labels"] = Time.get_ticks_usec() - draw_started
 	_draw_jurisdiction_key()
 	if map_mode == "Roads":
 		_draw_road_nodes()
@@ -374,6 +421,8 @@ func _draw() -> void:
 		_draw_road_legend()
 	else:
 		_draw_legend()
+	last_draw_stages_us["done"] = Time.get_ticks_usec() - draw_started
+	last_draw_us = Time.get_ticks_usec() - draw_started
 
 
 func _draw_roads() -> void:
@@ -383,6 +432,10 @@ func _draw_roads() -> void:
 		return
 	for link_index in range(region.road_links.size()):
 		var link = region.road_links[link_index]
+		if region.is_large_scale and zoom < 2.0 and not _is_strategic_road(link):
+			continue
+		if not _polyline_visible(link.points):
+			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
 		if map_mode == "Roads" and not _is_recorded_time():
@@ -519,8 +572,14 @@ func _congestion_color(ratio: float) -> Color:
 
 
 func _draw_road_nodes() -> void:
-	for node in region.road_nodes:
+	var first_node: int = region.neighborhoods.size() if region.is_large_scale and zoom < 2.0 else 0
+	for node_id in range(first_node, region.road_nodes.size()):
+		var node = region.road_nodes[node_id]
 		var position_on_screen: Vector2 = _world_to_screen(node.position_km)
+		if not _screen_visible(position_on_screen, 16.0):
+			continue
+		if region.is_large_scale and zoom < 2.0 and node.neighborhood_id >= 0:
+			continue
 		if detail_level != "Neighborhood" and node.neighborhood_id >= 0 and not node.is_interchange:
 			draw_circle(position_on_screen, 2.0, Color("8ea3b1", 0.48))
 			continue
@@ -565,10 +624,12 @@ func _draw_road_legend() -> void:
 
 func _draw_grid() -> void:
 	var grid_color := Color(0.32, 0.47, 0.60, 0.15)
-	for x in range(0, 241, 20):
-		draw_line(_world_to_screen(Vector2(x, 0)), _world_to_screen(Vector2(x, WORLD_SIZE.y)), grid_color, 1.0)
-	for y in range(0, 161, 20):
-		draw_line(_world_to_screen(Vector2(0, y)), _world_to_screen(Vector2(WORLD_SIZE.x, y)), grid_color, 1.0)
+	var world_size: Vector2 = _world_size()
+	var spacing: int = maxi(20, ceili(35.0 / (_map_scale() * zoom) / 20.0) * 20)
+	for x in range(0, ceili(world_size.x) + 1, spacing):
+		draw_line(_world_to_screen(Vector2(x, 0)), _world_to_screen(Vector2(x, world_size.y)), grid_color, 1.0)
+	for y in range(0, ceili(world_size.y) + 1, spacing):
+		draw_line(_world_to_screen(Vector2(0, y)), _world_to_screen(Vector2(world_size.x, y)), grid_color, 1.0)
 
 
 func _draw_boundaries() -> void:
@@ -578,8 +639,12 @@ func _draw_boundaries() -> void:
 			draw_rect(_jurisdiction_screen_rect(selected), Color("e5d69a", 0.055))
 	# Draw the smaller divisions first so the broader borders stay legible where they coincide.
 	for kind in ["City", "County", "Region"]:
+		if region.is_large_scale and detail_level == "State" and zoom < 4.0 and kind == "City":
+			continue
 		for area in region.jurisdictions:
 			if area.kind != kind:
+				continue
+			if not _jurisdiction_screen_rect(area).intersects(Rect2(Vector2.ZERO, size)):
 				continue
 			var color: Color = _jurisdiction_color(kind)
 			color.a = {"City": 0.46, "County": 0.72, "Region": 0.92}[kind]
@@ -632,8 +697,14 @@ func _jurisdiction_label_rect(area) -> Rect2:
 func _draw_jurisdiction_labels() -> void:
 	var font := get_theme_default_font()
 	for kind in ["Region", "County", "City"]:
+		if region.is_large_scale and detail_level == "State" and zoom < 4.0 and kind != "Region":
+			continue
+		if region.is_large_scale and detail_level == "Region" and zoom < 4.0 and kind == "City":
+			continue
 		for area in region.jurisdictions:
 			if area.kind != kind:
+				continue
+			if not _jurisdiction_screen_rect(area).intersects(Rect2(Vector2.ZERO, size)):
 				continue
 			var rect: Rect2 = _jurisdiction_label_rect(area)
 			var color: Color = _jurisdiction_color(kind)
@@ -672,16 +743,22 @@ func _is_recorded_time() -> bool:
 func _draw_cities() -> void:
 	for city in region.cities:
 		var center: Vector2 = _world_to_screen(city["center_km"])
+		if not _screen_visible(center, 50.0):
+			continue
 		var color: Color = CITY_COLORS[int(city["id"]) % CITY_COLORS.size()]
-		var radius: float = 7.5 * _map_scale() * zoom
+		var radius: float = (4.0 if region.is_large_scale else 7.5) * _map_scale() * zoom
 		draw_circle(center, radius, Color(color.r, color.g, color.b, 0.08))
 		draw_arc(center, radius, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.28), 1.0, true)
 
 
 func _draw_neighborhoods() -> void:
 	if detail_level != "Neighborhood":
+		if region.is_large_scale and detail_level in ["State", "Region"]:
+			return
 		for neighborhood in region.neighborhoods:
-			draw_circle(_world_to_screen(neighborhood.position_km), 2.5, Color("718899", 0.45))
+			var point: Vector2 = _world_to_screen(neighborhood.position_km)
+			if _screen_visible(point, 3.0) and (not region.is_large_scale or zoom >= 2.0):
+				draw_circle(point, 2.5, Color("718899", 0.45))
 		return
 	if region.accessibility.is_empty():
 		return
@@ -690,8 +767,16 @@ func _draw_neighborhoods() -> void:
 	for value in region.accessibility:
 		min_access = minf(min_access, value)
 		max_access = maxf(max_access, value)
+	var visible_count := 0
+	for neighborhood in region.neighborhoods:
+		if _screen_visible(_world_to_screen(neighborhood.position_km), 15.0):
+			visible_count += 1
+	var detail_limit: float = 256.0 if zoom < 2.0 else 512.0
+	var stride: int = maxi(1, ceili(float(visible_count) / detail_limit)) if region.is_large_scale else 1
 	for neighborhood in region.neighborhoods:
 		var screen_position: Vector2 = _world_to_screen(neighborhood.position_km)
+		if not _screen_visible(screen_position, 15.0) or (neighborhood.id % stride != 0 and neighborhood.id != selected_id and neighborhood.id != hovered_id):
+			continue
 		var radius: float = _node_radius(neighborhood.population)
 		var color := _access_color((region.accessibility[neighborhood.id] - min_access) / maxf(1.0, max_access - min_access))
 		draw_circle(screen_position, radius + 3.0, Color("0b1421"))
@@ -710,7 +795,7 @@ func _draw_neighborhoods() -> void:
 		label_order.append(hovered_id)
 	if zoom >= 1.8:
 		for neighborhood in region.neighborhoods:
-			if neighborhood.id != selected_id and neighborhood.id != hovered_id:
+			if neighborhood.id != selected_id and neighborhood.id != hovered_id and _screen_visible(_world_to_screen(neighborhood.position_km), 25.0) and neighborhood.id % stride == 0:
 				label_order.append(neighborhood.id)
 	var font := get_theme_default_font()
 	var label_boxes: Array[Rect2] = []
@@ -734,6 +819,9 @@ func _draw_neighborhoods() -> void:
 
 
 func _draw_hourly_flows() -> void:
+	if region.is_large_scale and detail_level == "Neighborhood":
+		_draw_compact_city_flows()
+		return
 	if detail_level != "Neighborhood":
 		_draw_aggregate_flows()
 		return
@@ -775,6 +863,75 @@ func _draw_hourly_flows() -> void:
 		var arrow_base: Vector2 = end_point - direction * (6.0 + 5.0 * strength)
 		var side: Vector2 = Vector2(-direction.y, direction.x) * (3.0 + 2.0 * strength)
 		draw_colored_polygon(PackedVector2Array([arrow_tip, arrow_base + side, arrow_base - side]), flow_color)
+
+
+func _draw_compact_city_flows() -> void:
+	if flow_profile == null:
+		return
+	if zoom < 2.0:
+		_draw_compact_region_flows()
+		return
+	var purposes: Array = [FlowProfile.WORK, FlowProfile.COMMERCIAL, FlowProfile.SOCIAL] if selected_purpose == FlowProfile.ALL else [selected_purpose]
+	var flows: Array[Dictionary] = []
+	var next_profile = next_day_profile if selected_hour == 23 and next_day_profile != null else flow_profile
+	var next_hour: int = (selected_hour + 1) % 24
+	for purpose in purposes:
+		for from_city in range(region.cities.size()):
+			if not _screen_visible(_world_to_screen(region.cities[from_city]["center_km"]), 30.0):
+				continue
+			for to_city in range(region.cities.size()):
+				if from_city == to_city or not _screen_visible(_world_to_screen(region.cities[to_city]["center_km"]), 30.0):
+					continue
+				var current: float = flow_profile._compact_city_hour_pair(from_city, to_city, selected_hour, purpose)
+				var following: float = next_profile._compact_city_hour_pair(from_city, to_city, next_hour, purpose)
+				var trips: float = lerpf(current, following, hour_fraction)
+				if purpose != FlowProfile.SOCIAL:
+					trips -= lerpf(flow_profile._compact_city_hour_pair(to_city, from_city, selected_hour, purpose), next_profile._compact_city_hour_pair(to_city, from_city, next_hour, purpose), hour_fraction)
+				if trips > 0.1:
+					flows.append({"from": from_city, "to": to_city, "purpose": purpose, "trips": trips})
+	flows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["trips"] > b["trips"])
+	var peak: float = float(flows[0]["trips"]) if not flows.is_empty() else 1.0
+	for index in range(mini(40, flows.size())):
+		var flow: Dictionary = flows[index]
+		var start_point: Vector2 = _world_to_screen(region.cities[flow["from"]]["center_km"])
+		var end_point: Vector2 = _world_to_screen(region.cities[flow["to"]]["center_km"])
+		var direction: Vector2 = (end_point - start_point).normalized()
+		var strength: float = sqrt(float(flow["trips"]) / maxf(1.0, peak))
+		var color: Color = _purpose_color(flow["purpose"])
+		color.a = 0.2 + 0.65 * strength
+		_draw_flow_stroke(start_point + direction * 5.0, end_point - direction * 8.0, color, 1.0 + 5.0 * strength, selected_id >= 0 and region.neighborhoods[selected_id].city_id == flow["from"])
+		var side: Vector2 = direction.orthogonal() * (2.0 + 2.0 * strength)
+		draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
+
+
+func _draw_compact_region_flows() -> void:
+	var purposes: Array = [FlowProfile.WORK, FlowProfile.COMMERCIAL, FlowProfile.SOCIAL] if selected_purpose == FlowProfile.ALL else [selected_purpose]
+	var next_profile = next_day_profile if selected_hour == 23 and next_day_profile != null else flow_profile
+	var next_hour: int = (selected_hour + 1) % 24
+	var flows: Array[Dictionary] = []
+	for purpose in purposes:
+		for from_region in range(region.region_ids.size()):
+			for to_region in range(region.region_ids.size()):
+				if from_region == to_region:
+					continue
+				var trips: float = lerpf(flow_profile._compact_region_hour_pair(from_region, to_region, selected_hour, purpose), next_profile._compact_region_hour_pair(from_region, to_region, next_hour, purpose), hour_fraction)
+				if purpose != FlowProfile.SOCIAL:
+					trips -= lerpf(flow_profile._compact_region_hour_pair(to_region, from_region, selected_hour, purpose), next_profile._compact_region_hour_pair(to_region, from_region, next_hour, purpose), hour_fraction)
+				if trips > 0.1:
+					flows.append({"from": from_region, "to": to_region, "purpose": purpose, "trips": trips})
+	flows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["trips"] > b["trips"])
+	var peak: float = float(flows[0]["trips"]) if not flows.is_empty() else 1.0
+	for index in range(mini(30, flows.size())):
+		var flow: Dictionary = flows[index]
+		var start_point: Vector2 = _world_to_screen(region.jurisdictions[region.region_ids[flow["from"]]].center_km)
+		var end_point: Vector2 = _world_to_screen(region.jurisdictions[region.region_ids[flow["to"]]].center_km)
+		var direction: Vector2 = (end_point - start_point).normalized()
+		var strength: float = sqrt(float(flow["trips"]) / maxf(1.0, peak))
+		var color: Color = _purpose_color(flow["purpose"])
+		color.a = 0.2 + 0.65 * strength
+		_draw_flow_stroke(start_point + direction * 12.0, end_point - direction * 12.0, color, 1.0 + 5.0 * strength, false)
+		var side: Vector2 = direction.orthogonal() * (2.0 + 2.0 * strength)
+		draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
 
 
 func _purpose_color(purpose: String) -> Color:
@@ -999,7 +1156,7 @@ func _gui_input(event: InputEvent) -> void:
 		var mouse_button := event as InputEventMouseButton
 		if mouse_button.pressed and (mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP or mouse_button.button_index == MOUSE_BUTTON_WHEEL_DOWN):
 			var old_zoom := zoom
-			zoom = clampf(zoom * (1.12 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.12), 1.0, 2.8)
+			zoom = clampf(zoom * (1.12 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.12), 1.0, 32.0 if region != null and region.is_large_scale else 2.8)
 			var ratio := zoom / old_zoom
 			pan = mouse_button.position - size * 0.5 - (mouse_button.position - size * 0.5 - pan) * ratio
 			queue_redraw()
@@ -1157,15 +1314,38 @@ func _jurisdiction_at(screen_position: Vector2) -> int:
 
 
 func _map_scale() -> float:
-	return maxf(1.0, minf((size.x - 110.0) / WORLD_SIZE.x, (size.y - 110.0) / WORLD_SIZE.y))
+	var world_size: Vector2 = _world_size()
+	return minf((size.x - 110.0) / world_size.x, (size.y - 110.0) / world_size.y)
+
+
+func _world_size() -> Vector2:
+	return region.jurisdictions[0].bounds_km.size if region != null else WORLD_SIZE
+
+
+func _world_center() -> Vector2:
+	return region.jurisdictions[0].bounds_km.get_center() if region != null else WORLD_CENTER
+
+
+func _screen_visible(point: Vector2, margin: float = 0.0) -> bool:
+	return point.x >= -margin and point.y >= -margin and point.x <= size.x + margin and point.y <= size.y + margin
+
+
+func _polyline_visible(points: PackedVector2Array) -> bool:
+	if points.is_empty():
+		return false
+	var first: Vector2 = _world_to_screen(points[0])
+	var bounds := Rect2(first, Vector2.ZERO)
+	for point in points:
+		bounds = bounds.expand(_world_to_screen(point))
+	return bounds.grow(20.0).intersects(Rect2(Vector2.ZERO, size))
 
 
 func _world_to_screen(world_position: Vector2) -> Vector2:
-	return size * 0.5 + pan + (world_position - WORLD_CENTER) * _map_scale() * zoom
+	return size * 0.5 + pan + (world_position - _world_center()) * _map_scale() * zoom
 
 
 func _screen_to_world(screen_position: Vector2) -> Vector2:
-	return WORLD_CENTER + (screen_position - size * 0.5 - pan) / (_map_scale() * zoom)
+	return _world_center() + (screen_position - size * 0.5 - pan) / (_map_scale() * zoom)
 
 
 func _node_radius(population: int) -> float:

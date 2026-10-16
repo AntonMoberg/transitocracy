@@ -19,6 +19,14 @@ var weekend_social_visits: float = 0.0
 
 var active_day_key: int = -1
 var active_weekend: bool = false
+var is_compact: bool = false
+var compact_region
+var compact_city_od: Dictionary = {}
+var compact_region_od: Dictionary = {}
+var compact_origin_daily: Dictionary = {}
+var compact_destination_daily: Dictionary = {}
+var compact_curves: Dictionary = {}
+var build_timings_us: Dictionary = {}
 var hourly_od: Array = []
 var hourly_work_od: Array = []
 var hourly_shopping_od: Array = []
@@ -69,6 +77,12 @@ func get_interpolated_hour_matrix(hour: int, fraction: float, purpose: String = 
 
 
 func get_interpolated_neighborhood_totals(neighborhood_id: int, hour: int, fraction: float, purpose: String = ALL, next_day_profile = null) -> Vector3:
+	if is_compact:
+		var current: Vector3 = _compact_neighborhood_totals(neighborhood_id, hour, purpose)
+		var next_hour: int = (hour + 1) % 24
+		var next_profile = next_day_profile if hour == 23 and next_day_profile != null else self
+		var next: Vector3 = next_profile._compact_neighborhood_totals(neighborhood_id, next_hour, purpose)
+		return current.lerp(next, clampf(fraction, 0.0, 1.0))
 	var current_matrix: Array = get_hour_matrix(hour, purpose)
 	var next_matrix: Array = next_day_profile.get_hour_matrix(0, purpose) if hour == 23 and next_day_profile != null else get_hour_matrix((hour + 1) % 24, purpose)
 	var current_out := 0.0
@@ -82,6 +96,48 @@ func get_interpolated_neighborhood_totals(neighborhood_id: int, hour: int, fract
 		next_in += next_matrix[other_id][neighborhood_id]
 	var blend: float = clampf(fraction, 0.0, 1.0)
 	return Vector3(lerpf(current_out, next_out, blend), lerpf(current_in, next_in, blend), lerpf(current_matrix[neighborhood_id][neighborhood_id], next_matrix[neighborhood_id][neighborhood_id], blend))
+
+
+func _compact_neighborhood_totals(neighborhood_id: int, hour: int, purpose: String) -> Vector3:
+	if purpose == ALL:
+		return _compact_neighborhood_totals(neighborhood_id, hour, WORK) + _compact_neighborhood_totals(neighborhood_id, hour, COMMERCIAL) + _compact_neighborhood_totals(neighborhood_id, hour, SOCIAL)
+	var origin: float = compact_origin_daily[purpose][neighborhood_id]
+	var destination: float = compact_destination_daily[purpose][neighborhood_id]
+	var outward: float = compact_curves[purpose]["out"][hour]
+	var returning: float = compact_curves[purpose]["back"][hour]
+	return Vector3(origin * outward + destination * returning, destination * outward + origin * returning, 0.0)
+
+
+func compact_city_hour_matrix(hour: int, purpose: String = ALL) -> Array[PackedFloat32Array]:
+	var city_count: int = compact_city_od[WORK].size()
+	var matrix: Array[PackedFloat32Array] = []
+	for origin_id in range(city_count):
+		var row := PackedFloat32Array()
+		row.resize(city_count)
+		for destination_id in range(city_count):
+			if purpose == ALL:
+				for category in [WORK, COMMERCIAL, SOCIAL]:
+					row[destination_id] += _compact_city_hour_pair(origin_id, destination_id, hour, category)
+			else:
+				row[destination_id] = _compact_city_hour_pair(origin_id, destination_id, hour, purpose)
+		matrix.append(row)
+	return matrix
+
+
+func _compact_city_hour_pair(origin_id: int, destination_id: int, hour: int, purpose: String) -> float:
+	var daily: Array = compact_city_od[purpose]
+	if hour == 24:
+		return (daily[origin_id][destination_id] + daily[destination_id][origin_id]) / 24.0
+	var curves: Dictionary = compact_curves[purpose]
+	return daily[origin_id][destination_id] * curves["out"][hour] + daily[destination_id][origin_id] * curves["back"][hour]
+
+
+func _compact_region_hour_pair(origin_id: int, destination_id: int, hour: int, purpose: String) -> float:
+	var daily: Array = compact_region_od[purpose]
+	if hour == 24:
+		return (daily[origin_id][destination_id] + daily[destination_id][origin_id]) / 24.0
+	var curves: Dictionary = compact_curves[purpose]
+	return daily[origin_id][destination_id] * curves["out"][hour] + daily[destination_id][origin_id] * curves["back"][hour]
 
 
 func get_hourly_total(hour: int, purpose: String = ALL) -> float:
@@ -114,6 +170,8 @@ func get_interpolated_hourly_total(hour: int, fraction: float, purpose: String =
 
 
 func get_outgoing(neighborhood_id: int, hour: int, purpose: String = ALL) -> float:
+	if is_compact:
+		return _compact_neighborhood_totals(neighborhood_id, clampi(hour, 0, 23), purpose).x
 	var total := 0.0
 	for trips in get_hour_matrix(hour, purpose)[neighborhood_id]:
 		total += trips
@@ -121,6 +179,8 @@ func get_outgoing(neighborhood_id: int, hour: int, purpose: String = ALL) -> flo
 
 
 func get_incoming(neighborhood_id: int, hour: int, purpose: String = ALL) -> float:
+	if is_compact:
+		return _compact_neighborhood_totals(neighborhood_id, clampi(hour, 0, 23), purpose).y
 	var total := 0.0
 	for row in get_hour_matrix(hour, purpose):
 		total += row[neighborhood_id]

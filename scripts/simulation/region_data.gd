@@ -4,6 +4,10 @@ const ZONE_TYPES = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 const DENSITY_NAMES = ["Low", "Medium", "High"]
 
 var generation_seed: int = 0
+var is_large_scale: bool = false
+var city_travel_times: Array[PackedFloat32Array] = []
+var city_od_candidates: Array[PackedInt32Array] = []
+var neighborhood_accessible: PackedByteArray = PackedByteArray()
 var current_day_key: int = 0
 var state_name: String = "New Meridian"
 var jurisdictions: Array = []
@@ -26,6 +30,21 @@ var road_nodes: Array = []
 var road_links: Array = []
 var road_projects: Array = []
 var neighborhood_gateway_node_ids: Array[int] = []
+var city_hub_node_ids: Array[int] = []
+var neighborhood_spoke_link_ids: Array[int] = []
+
+
+func travel_time_between(origin_id: int, destination_id: int) -> float:
+	if not is_large_scale:
+		return travel_times[origin_id][destination_id]
+	if not neighborhood_accessible.is_empty() and (neighborhood_accessible[origin_id] == 0 or neighborhood_accessible[destination_id] == 0):
+		return 1000000.0
+	var origin = neighborhoods[origin_id]
+	var destination = neighborhoods[destination_id]
+	var city_minutes: float = city_travel_times[origin.city_id][destination.city_id]
+	if origin.city_id == destination.city_id:
+		return 5.0 + origin.position_km.distance_to(destination.position_km) * 1.2
+	return city_minutes + origin.position_km.distance_to(cities[origin.city_id]["center_km"]) * 1.2 + destination.position_km.distance_to(cities[destination.city_id]["center_km"]) * 1.2
 
 
 func jurisdiction_for_neighborhood(neighborhood_id: int, kind: String):
@@ -109,9 +128,8 @@ func get_city_name(city_id: int) -> String:
 
 func get_city_totals(city_id: int) -> Dictionary:
 	var totals := {"population": 0, "households": 0, "housing_capacity": 0, "jobs": 0, "job_capacity": 0}
-	for neighborhood in neighborhoods:
-		if neighborhood.city_id != city_id:
-			continue
+	for neighborhood_id in cities[city_id]["neighborhood_ids"]:
+		var neighborhood = neighborhoods[neighborhood_id]
 		totals["population"] += neighborhood.population
 		totals["households"] += neighborhood.households
 		totals["housing_capacity"] += neighborhood.housing_capacity
@@ -133,8 +151,11 @@ func get_jurisdiction_totals(jurisdiction_id: int) -> Dictionary:
 	var totals := {"population": 0, "households": 0, "housing_capacity": 0, "jobs": 0, "job_capacity": 0}
 	for neighborhood_id in jurisdictions[jurisdiction_id].neighborhood_ids:
 		var neighborhood = neighborhoods[neighborhood_id]
-		for key in totals:
-			totals[key] += neighborhood.get(key)
+		totals["population"] += neighborhood.population
+		totals["households"] += neighborhood.households
+		totals["housing_capacity"] += neighborhood.housing_capacity
+		totals["jobs"] += neighborhood.jobs
+		totals["job_capacity"] += neighborhood.job_capacity
 	return totals
 
 
@@ -192,12 +213,16 @@ func validation_errors() -> PackedStringArray:
 			skill_jobs += int(count)
 		if skill_jobs != neighborhood.jobs:
 			errors.append("Job skill counts do not match total jobs in %s." % neighborhood.name)
-	if travel_times.size() != neighborhoods.size() or accessibility.size() != neighborhoods.size():
+	if accessibility.size() != neighborhoods.size() or (is_large_scale and city_travel_times.size() != cities.size()) or (not is_large_scale and travel_times.size() != neighborhoods.size()):
 		errors.append("Travel-time or accessibility data is incomplete.")
-	else:
+	elif not is_large_scale:
 		for row in travel_times:
 			if row.size() != neighborhoods.size():
 				errors.append("Travel-time matrix has an incomplete row.")
+	else:
+		for row in city_travel_times:
+			if row.size() != cities.size():
+				errors.append("City travel-time matrix has an incomplete row.")
 	if not road_nodes.is_empty():
 		if neighborhood_gateway_node_ids.size() != neighborhoods.size():
 			errors.append("Neighborhood road gateways are incomplete.")

@@ -8,12 +8,128 @@ const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd"
 const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
 const RollingTrafficCalculator = preload("res://scripts/simulation/rolling_traffic_calculator.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
+const RegionData = preload("res://scripts/simulation/region_data.gd")
+const NeighborhoodData = preload("res://scripts/simulation/neighborhood_data.gd")
+const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
+const RoadNodeData = preload("res://scripts/simulation/road_node_data.gd")
+const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 
 
 # The caller owns this region. A worker receives a detached copy, so UI reads
 # and road or tax edits cannot race against the next day's calculations.
 static func copy_region(source):
+	if source is RegionData and source.is_large_scale:
+		return _copy_large_region(source)
 	return _copy_value(source)
+
+
+static func _copy_large_region(source):
+	# Geography and ownership are immutable. Copy the changing economic and road
+	# objects while sharing the large static ID lists and packed geometry.
+	var copy = RegionData.new()
+	copy.generation_seed = source.generation_seed
+	copy.is_large_scale = true
+	copy.current_day_key = source.current_day_key
+	copy.state_name = source.state_name
+	copy.region_ids = source.region_ids.duplicate()
+	copy.county_ids = source.county_ids.duplicate()
+	copy.city_jurisdiction_ids = source.city_jurisdiction_ids.duplicate()
+	copy.neighborhood_jurisdiction_ids = source.neighborhood_jurisdiction_ids.duplicate()
+	copy.cities = source.cities.duplicate()
+	copy.city_travel_times = source.city_travel_times.duplicate()
+	copy.city_od_candidates = source.city_od_candidates.duplicate()
+	copy.neighborhood_accessible = source.neighborhood_accessible.duplicate()
+	copy.travel_times = source.travel_times.duplicate()
+	copy.accessibility = source.accessibility.duplicate()
+	copy.pending_policy_changes = source.pending_policy_changes.duplicate(true)
+	copy.last_population_change = source.last_population_change
+	copy.last_household_change = source.last_household_change
+	copy.next_road_link_id = source.next_road_link_id
+	copy.next_road_project_id = source.next_road_project_id
+	copy.neighborhood_gateway_node_ids = source.neighborhood_gateway_node_ids.duplicate()
+	copy.city_hub_node_ids = source.city_hub_node_ids.duplicate()
+	copy.neighborhood_spoke_link_ids = source.neighborhood_spoke_link_ids.duplicate()
+	for original in source.neighborhoods:
+		var n = NeighborhoodData.new()
+		n.id = original.id
+		n.city_id = original.city_id
+		n.county_id = original.county_id
+		n.region_id = original.region_id
+		n.jurisdiction_id = original.jurisdiction_id
+		n.name = original.name
+		n.position_km = original.position_km
+		n.land_area_ha = original.land_area_ha
+		n.zone_shares = original.zone_shares.duplicate()
+		n.zone_density = original.zone_density.duplicate()
+		n.housing_capacity = original.housing_capacity
+		n.job_capacity = original.job_capacity
+		n.households = original.households
+		n.population = original.population
+		n.jobs = original.jobs
+		n.jobs_by_skill = original.jobs_by_skill.duplicate()
+		n.shopping_attraction = original.shopping_attraction
+		n.monthly_rent = original.monthly_rent
+		n.assessed_home_value = original.assessed_home_value
+		n.average_monthly_income = original.average_monthly_income
+		n.average_household_wealth = original.average_household_wealth
+		n.desirability = original.desirability
+		n.people_per_household = original.people_per_household
+		n.baseline_monthly_rent = original.baseline_monthly_rent
+		n.baseline_occupancy = original.baseline_occupancy
+		n.rent_level = original.rent_level
+		n.migration_remainder = original.migration_remainder
+		n.last_household_change = original.last_household_change
+		n.last_population_change = original.last_population_change
+		copy.neighborhoods.append(n)
+	for original in source.jurisdictions:
+		var j = JurisdictionData.new()
+		j.id = original.id
+		j.kind = original.kind
+		j.name = original.name
+		j.parent_id = original.parent_id
+		j.child_ids = original.child_ids
+		j.neighborhood_ids = original.neighborhood_ids
+		j.center_km = original.center_km
+		j.bounds_km = original.bounds_km
+		j.income_tax_rate = original.income_tax_rate
+		j.property_tax_rate = original.property_tax_rate
+		j.sales_tax_rate = original.sales_tax_rate
+		j.parking_fee = original.parking_fee
+		j.congestion_fee = original.congestion_fee
+		j.congestion_start_hour = original.congestion_start_hour
+		j.congestion_end_hour = original.congestion_end_hour
+		j.treasury = original.treasury
+		j.daily_income_revenue = original.daily_income_revenue
+		j.daily_property_revenue = original.daily_property_revenue
+		j.daily_sales_revenue = original.daily_sales_revenue
+		j.daily_fee_revenue = original.daily_fee_revenue
+		j.daily_road_upkeep = original.daily_road_upkeep
+		j.last_fiscal_change = original.last_fiscal_change
+		copy.jurisdictions.append(j)
+	for original in source.road_nodes:
+		var node = RoadNodeData.new()
+		node.id = original.id
+		node.position_km = original.position_km
+		node.kind = original.kind
+		node.neighborhood_id = original.neighborhood_id
+		node.city_id = original.city_id
+		node.is_interchange = original.is_interchange
+		copy.road_nodes.append(node)
+	for original in source.road_links:
+		var link = RoadLinkData.new()
+		link.id = original.id
+		link.from_node_id = original.from_node_id
+		link.to_node_id = original.to_node_id
+		link.road_class = original.road_class
+		link.lanes_per_direction = original.lanes_per_direction
+		link.points = original.points
+		link.length_km = original.length_km
+		link.owner_jurisdiction_id = original.owner_jurisdiction_id
+		link.toll_forward = original.toll_forward
+		link.toll_reverse = original.toll_reverse
+		copy.road_links.append(link)
+	copy.road_projects = source.road_projects.duplicate()
+	return copy
 
 
 static func release_retired_data(payload: Dictionary) -> void:

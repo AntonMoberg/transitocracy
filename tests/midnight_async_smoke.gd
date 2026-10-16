@@ -1,5 +1,7 @@
 extends SceneTree
 
+const UiFixture = preload("res://tests/ui_fixture.gd")
+
 var failures := 0
 
 
@@ -8,8 +10,7 @@ func _initialize() -> void:
 
 
 func _run_checks() -> void:
-	var main = load("res://scenes/main.tscn").instantiate()
-	root.add_child(main)
+	var main = await UiFixture.attach_small(self)
 	main._on_map_mode_selected(1)
 	main._on_mode_selected(3)
 	main._on_speed_selected(2)

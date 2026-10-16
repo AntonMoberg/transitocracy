@@ -1,5 +1,7 @@
 extends SceneTree
 
+const UiFixture = preload("res://tests/ui_fixture.gd")
+
 var failures := 0
 
 
@@ -8,8 +10,7 @@ func _initialize() -> void:
 
 
 func _run_checks() -> void:
-	var main = load("res://scenes/main.tscn").instantiate()
-	root.add_child(main)
+	var main = await UiFixture.attach_small(self)
 	main._on_play_pressed()
 	await process_frame
 	_check(main.region.region_ids.size() == 4 and main.region.county_ids.size() == 8 and main.region.cities.size() == 16 and main.region.neighborhoods.size() == 96, "main scene must generate the state hierarchy")

@@ -4,6 +4,7 @@ const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd"
 
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
+const CompactTripFlowCalculator = preload("res://scripts/simulation/compact_trip_flow_calculator.gd")
 
 const WORKERS_PER_HOUSEHOLD = 1.1
 const TRAVEL_TIME_DECAY_MINUTES = 30.0
@@ -19,6 +20,8 @@ const SOCIAL_STAY_SHARES = [0.55, 0.35, 0.10]
 
 
 static func build(region):
+	if region.is_large_scale:
+		return CompactTripFlowCalculator.build(region)
 	var profile = FlowProfile.new()
 	var count: int = region.neighborhoods.size()
 	var worker_supply := PackedFloat32Array()
@@ -101,6 +104,9 @@ static func build(region):
 
 
 static func populate_day(profile, region_seed: int, unix_seconds: int, weekend: bool, previous_day_profile = null, parallel_hours: bool = true) -> void:
+	if profile.is_compact:
+		CompactTripFlowCalculator.populate_day(profile, profile.compact_region, unix_seconds, weekend)
+		return
 	var day_key := floori(float(unix_seconds) / 86400.0)
 	if profile.active_day_key == day_key and profile.active_weekend == weekend:
 		return

@@ -44,7 +44,7 @@ static func refresh_desirability(region) -> void:
 		var vacancy: float = clampf(float(neighborhood.housing_capacity - neighborhood.households) / maxf(1.0, float(neighborhood.housing_capacity)) / 0.25, 0.0, 1.0)
 		var amenities: float = clampf((float(neighborhood.zone_shares.get("Commercial", 0)) + 0.5 * float(neighborhood.zone_shares.get("Mixed", 0))) / 40.0, 0.0, 1.0)
 		var access: float = region.accessibility[neighborhood.id] / max_access
-		var county = region.jurisdiction_for_neighborhood(neighborhood.id, "County")
+		var county = region.jurisdictions[region.county_ids[neighborhood.county_id]]
 		neighborhood.desirability = clampf(10.0 + 30.0 * access + 25.0 * affordability + 10.0 * wealth_buffer + 10.0 * vacancy + 10.0 * amenities - 30.0 * (region.jurisdictions[0].income_tax_rate + county.income_tax_rate), 0.0, 100.0)
 
 

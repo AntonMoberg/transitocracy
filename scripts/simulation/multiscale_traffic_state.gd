@@ -15,6 +15,12 @@ var cached_mode: int = -1
 var cached_links: PackedVector2Array = PackedVector2Array()
 var cached_revenue: Dictionary = {}
 var paths_by_mode: Dictionary = {}
+var compact_trees_by_mode: Dictionary = {}
+var spoke_indices: PackedInt32Array = PackedInt32Array()
+var link_capacity_hr: PackedFloat32Array = PackedFloat32Array()
+var link_from_nodes: PackedInt32Array = PackedInt32Array()
+var link_to_nodes: PackedInt32Array = PackedInt32Array()
+var free_link_costs: PackedVector2Array = PackedVector2Array()
 var free_pair_times: Array = []
 var junction_capacity_hr: PackedFloat32Array = PackedFloat32Array()
 var hourly_demand: Dictionary = {}
@@ -22,6 +28,7 @@ var hourly_fiscal_base: Array[Dictionary] = []
 var departed_trips: float = 0.0
 var served_cars: float = 0.0
 var estimated: bool = false
+var stage_totals_us: Dictionary = {}
 
 
 func queued_cars() -> float:
