@@ -57,6 +57,14 @@ func _run_checks() -> void:
 		if (morning.x > morning.y and evening.y > evening.x) or (morning.y > morning.x and evening.x > evening.y):
 			has_rush_reversal = true
 	_check(rush_peak > night_peak and has_rush_reversal, "road traffic must show a directional rush hour")
+	var overloaded_road_queued := false
+	for link_index in range(region.road_links.size()):
+		var link = region.road_links[link_index]
+		var capacity: float = RoadGraph.capacity_per_lane(link.road_class) * link.lanes_per_direction
+		if traffic.hourly_volumes[8][link_index].x > capacity and traffic.quarter_hour_queues[8 * 4 + 3][link_index].x > 0.0:
+			overloaded_road_queued = true
+			break
+	_check(overloaded_road_queued, "morning overload must create a visible road queue")
 	_check(traffic.interpolated_volume(0, 8, 0.5).distance_to(traffic.hourly_volumes[8][0].lerp(traffic.hourly_volumes[9][0], 0.5)) < 0.001, "road volumes must interpolate between hours")
 	_check(not RoadPlanner.link_preview(region, 0, 1, "Highway", PackedVector2Array(), day_key)["ok"], "highways must require interchanges")
 

@@ -148,10 +148,11 @@ func _draw_roads() -> void:
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
 		if map_mode == "Roads" and traffic_profile != null:
-			var volume: Vector2 = traffic_profile.interpolated_volume(link_index, selected_hour, hour_fraction, next_traffic_profile)
+			var served: Vector2 = traffic_profile.interpolated_served_rate(link_index, selected_hour, hour_fraction, next_traffic_profile)
+			var queue: Vector2 = traffic_profile.interpolated_queue(link_index, selected_hour, hour_fraction)
 			var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
-			forward_color = _congestion_color(volume.x / capacity)
-			reverse_color = _congestion_color(volume.y / capacity)
+			forward_color = _congestion_color(maxf(served.x / capacity, queue.x / (capacity * 0.5)))
+			reverse_color = _congestion_color(maxf(served.y / capacity, queue.y / (capacity * 0.5)))
 		if map_mode == "Trips":
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
@@ -309,11 +310,11 @@ func _draw_road_legend() -> void:
 	var font := get_theme_default_font()
 	var base := Vector2(18.0, size.y - 16.0)
 	draw_rect(Rect2(base - Vector2(9, 95), Vector2(440, 116)), Color(0.04, 0.09, 0.16, 0.90))
-	draw_string(font, base + Vector2(0, -76), "ROAD VOLUME / CAPACITY BY DIRECTION", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
+	draw_string(font, base + Vector2(0, -76), "ROAD FLOW / CAPACITY + QUEUES", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
 	for index in range(12):
 		draw_rect(Rect2(base + Vector2(index * 18.0, -64), Vector2(17, 9)), _congestion_color(float(index) / 7.0))
 	draw_string(font, base + Vector2(0, -39), "clear", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, base + Vector2(164, -39), "over capacity", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	draw_string(font, base + Vector2(164, -39), "saturated / queued", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	draw_string(font, base + Vector2(0, 4), "Dashed = under construction  •  Gold = interchange", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 

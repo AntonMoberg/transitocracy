@@ -67,9 +67,11 @@ func _run_checks() -> void:
 	RoadPlanner.advance_day(region, int(shortcut["open_day_key"]))
 	AccessibilityCalculator.recalculate(region)
 	_check(not RoadGraph.is_forest(region), "cycle fixture must exercise congestion-based rerouting")
-	var serial_cycle = RoadTrafficCalculator.assign_day(region, day["flow"], 4, null, false)
-	var parallel_cycle = RoadTrafficCalculator.assign_day(region, day["flow"], 4, null, true)
-	for hour in range(4):
+	var serial_cycle = RoadTrafficCalculator.assign_day(region, day["flow"], 18, null, false)
+	var parallel_cycle = RoadTrafficCalculator.assign_day(region, day["flow"], 18, null, true)
+	for hour in range(18):
+		_check(serial_cycle.hourly_assignment_gap[hour] < 0.015, "alternate-route assignment must converge near shortest paths at hour %d (gap %.3f)" % [hour, serial_cycle.hourly_assignment_gap[hour]])
+		_check(is_equal_approx(serial_cycle.hourly_assignment_gap[hour], parallel_cycle.hourly_assignment_gap[hour]), "parallel assignment gap must match serial hour %d" % hour)
 		for link_index in range(region.road_links.size()):
 			_check(serial_cycle.hourly_volumes[hour][link_index].distance_to(parallel_cycle.hourly_volumes[hour][link_index]) < 0.001, "parallel cycle volume must match serial hour %d link %d" % [hour, link_index])
 			_check(serial_cycle.hourly_link_times[hour][link_index].distance_to(parallel_cycle.hourly_link_times[hour][link_index]) < 0.001, "parallel cycle cost must match serial hour %d link %d" % [hour, link_index])

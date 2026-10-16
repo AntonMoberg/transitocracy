@@ -56,7 +56,7 @@ func _run_checks() -> void:
 	_check(forward_side.y > 0.0 and reverse_side.y < 0.0 and main.map_view._road_lane_offset(2, 0, 0) != main.map_view._road_lane_offset(2, 0, 1), "each travel direction must occupy its right-hand lanes")
 	first_link.lanes_per_direction = original_lanes
 	main.map_view.road_link_clicked.emit(first_link.id, midpoint)
-	_check(main.inspector.text.contains("Capacity:") and main.inspector.text.contains("Forward:") and main.inspector.text.contains("Upkeep:"), "road inspector must expose traffic and finances")
+	_check(main.inspector.text.contains("Capacity:") and main.inspector.text.contains("Forward demand:") and main.inspector.text.contains("Forward flow:") and main.inspector.text.contains("Forward queue:") and main.inspector.text.contains("Reverse queue:") and main.inspector.text.contains("Upkeep:"), "road inspector must expose demand, actual flow, directional queues and finances")
 	main.road_tool_selector.select(5)
 	main._on_road_tool_selected(5)
 	main.map_view.road_link_clicked.emit(first_link.id, first_link.points[0])

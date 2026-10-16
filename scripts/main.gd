@@ -446,7 +446,7 @@ func _ensure_day_profiles() -> void:
 	if next_day_profile == null or next_day_profile.active_day_key != day_key + 1:
 		var next_day_seconds: int = (day_key + 1) * 86400
 		next_day_profile = TripFlowCalculator.copy_for_day(flow_profile, region.generation_seed, next_day_seconds, CalendarClock.is_weekend_unix(next_day_seconds))
-		next_traffic_profile = RoadTrafficCalculator.assign_day(region, next_day_profile, 1)
+		next_traffic_profile = RoadTrafficCalculator.assign_day(region, next_day_profile, 1, traffic_profile)
 		map_view.set_next_day_profile(next_day_profile)
 		map_view.set_next_traffic_profile(next_traffic_profile)
 		flow_timeline.set_next_day_profile(next_day_profile)
@@ -775,15 +775,19 @@ func _show_road_inspector(link_id: int) -> void:
 	var link = region.road_links[index]
 	var hour: int = calendar_clock.get_hour()
 	var volume: Vector2 = traffic_profile.interpolated_volume(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
+	var served: Vector2 = traffic_profile.interpolated_served_rate(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
+	var queue: Vector2 = traffic_profile.interpolated_queue(index, hour, calendar_clock.get_hour_fraction())
 	var time: Vector2 = traffic_profile.interpolated_link_time(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
 	var capacity: float = (1800.0 if link.road_class == RoadLinkData.HIGHWAY else 900.0) * link.lanes_per_direction
 	var project_text := ""
 	for project in region.road_projects:
 		if project.target_link_id == link_id:
 			project_text += "\n%s: %d days left" % [project.kind, project.days_remaining(_current_day_key())]
-	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\n\n[color=#78c8dc][b]CURRENT HOUR[/b][/color]\nForward: %s vehicles/h (%.0f%%)\nReverse: %s vehicles/h (%.0f%%)\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
+	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\n\n[color=#78c8dc][b]CURRENT TIME[/b][/color]\nForward demand: %s vehicles/h (%.0f%%)\nReverse demand: %s vehicles/h (%.0f%%)\nForward flow: %s vehicles/h\nReverse flow: %s vehicles/h\nForward queue: %s vehicles\nReverse queue: %s vehicles\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
 		link.road_class, link.id, link.length_km, link.lanes_per_direction, _format_count(roundi(capacity)),
 		_format_count(roundi(volume.x)), 100.0 * volume.x / capacity, _format_count(roundi(volume.y)), 100.0 * volume.y / capacity,
+		_format_count(roundi(served.x)), _format_count(roundi(served.y)),
+		_format_count(roundi(queue.x)), _format_count(roundi(queue.y)),
 		time.x, time.y, link.length_km * 60.0 / (90.0 if link.road_class == RoadLinkData.HIGHWAY else 50.0),
 		_format_count(roundi(link.length_km * link.lanes_per_direction * (600.0 if link.road_class == RoadLinkData.HIGHWAY else 200.0))), project_text]
 
