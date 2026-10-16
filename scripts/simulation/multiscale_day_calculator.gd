@@ -9,6 +9,7 @@ const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculato
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RoadTrafficSummary = preload("res://scripts/simulation/road_traffic_summary.gd")
 
 
 static func advance_day(region, day_key: int, previous_flow, previous_state) -> Dictionary:
@@ -78,6 +79,7 @@ static func produce_seven_day_windows(region, flow, traffic_state, buffer) -> vo
 			var stage_start: int = Time.get_ticks_usec()
 			MultiScaleTraffic.advance(region, flow, traffic_state, (current_day + 1) * 86400, MultiScaleTraffic.DAY)
 			var traffic_us: int = Time.get_ticks_usec() - stage_start
+			var completed_road_day: Dictionary = RoadTrafficSummary.completed_day(traffic_state)
 			if bool(buffer.status()["cancelled"]):
 				buffer.discard_ready_on_worker()
 				return
@@ -95,6 +97,7 @@ static func produce_seven_day_windows(region, flow, traffic_state, buffer) -> vo
 				"region": DayCycleCalculator.copy_region(region),
 				"flow": flow,
 				"traffic_state": MultiScaleTraffic.fork_for_week(traffic_state),
+				"completed_road_day": completed_road_day,
 				"summary_stats": result["summary_stats"],
 				"timings_us": result["timings_us"],
 			}

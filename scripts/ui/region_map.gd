@@ -12,6 +12,10 @@ const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
 const SPATIAL_GRID_SIZE = 32
+const ROAD_LIVE = 0
+const ROAD_HOUR = 1
+const ROAD_DAY = 2
+const ROAD_HISTORY = 3
 const CITY_COLORS = [
 	Color("4b8fbf"),
 	Color("9872c5"),
@@ -27,7 +31,6 @@ var region
 var flow_profile
 var next_day_profile
 var traffic_profile
-var next_traffic_profile
 var map_mode: String = "Roads"
 var detail_level: String = "Neighborhood"
 var road_tool: String = "Inspect"
@@ -44,6 +47,12 @@ var first_recorded_bin: int = 0
 var road_history_previous_hour: int = -1
 var road_history_current_hour: int = -1
 var road_history_fraction: float = 1.0
+var road_traffic_mode: int = ROAD_LIVE
+var live_traffic_state
+var hour_carry_summary: Dictionary = {}
+var previous_day_road_summary: Dictionary = {}
+var current_day_road_summary: Dictionary = {}
+var day_road_fraction: float = 0.0
 var selected_purpose: String = FlowProfile.ALL
 var selected_id: int = -1
 var selected_jurisdiction_id: int = -1
@@ -86,6 +95,10 @@ func set_region(new_region) -> void:
 	spatial_region = null
 	road_history_previous_hour = -1
 	road_history_current_hour = -1
+	hour_carry_summary = {}
+	previous_day_road_summary = {}
+	current_day_road_summary = {}
+	live_traffic_state = null
 	if new_region != null:
 		call_deferred("_ensure_spatial_index")
 	selected_id = -1
@@ -112,11 +125,6 @@ func set_traffic_profile(new_profile) -> void:
 	if new_profile == null:
 		road_history_previous_hour = -1
 		road_history_current_hour = -1
-	queue_redraw()
-
-
-func set_next_traffic_profile(new_profile) -> void:
-	next_traffic_profile = new_profile
 	queue_redraw()
 
 
@@ -178,6 +186,44 @@ func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: fl
 	road_history_previous_hour = previous_hour
 	road_history_current_hour = current_hour
 	road_history_fraction = next_fraction
+	queue_redraw()
+
+
+func set_road_traffic_mode(mode: int, state) -> void:
+	if road_traffic_mode == mode and live_traffic_state == state:
+		return
+	road_traffic_mode = mode
+	live_traffic_state = state
+	queue_redraw()
+
+
+func set_hour_carry_summary(summary: Dictionary) -> void:
+	hour_carry_summary = summary
+	queue_redraw()
+
+
+func set_current_day_road_summary(summary: Dictionary) -> void:
+	current_day_road_summary = summary
+	queue_redraw()
+
+
+func promote_day_road_summary() -> void:
+	previous_day_road_summary = current_day_road_summary
+	current_day_road_summary = {}
+	queue_redraw()
+
+
+func clear_day_road_summaries() -> void:
+	previous_day_road_summary = {}
+	current_day_road_summary = {}
+	queue_redraw()
+
+
+func set_day_road_fraction(fraction: float) -> void:
+	var next_fraction: float = clampf(fraction, 0.0, 1.0)
+	if is_equal_approx(day_road_fraction, next_fraction):
+		return
+	day_road_fraction = next_fraction
 	queue_redraw()
 
 
@@ -315,13 +361,10 @@ func _draw_aggregate_roads() -> void:
 			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
-		if map_mode == "Roads" and road_history_current_hour < 0 and not _is_recorded_time():
-			forward_color = Color("647687")
-			reverse_color = forward_color
-		elif map_mode == "Roads" and traffic_profile != null and index < traffic_profile.link_ids.size():
-			var load: Vector2 = _road_load_ratio(index, link)
-			forward_color = _congestion_color(load.x)
-			reverse_color = _congestion_color(load.y)
+		if map_mode == "Roads":
+			var load: Vector3 = _road_load_ratio(index, link)
+			forward_color = _congestion_color(load.x) if load.z > 0.0 else Color("647687")
+			reverse_color = _congestion_color(load.y) if load.z > 0.0 else Color("647687")
 		if map_mode == "Trips":
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
@@ -570,13 +613,10 @@ func _draw_roads() -> void:
 			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
-		if map_mode == "Roads" and road_history_current_hour < 0 and not _is_recorded_time():
-			forward_color = Color("647687")
-			reverse_color = forward_color
-		elif map_mode == "Roads" and traffic_profile != null:
-			var load: Vector2 = _road_load_ratio(link_index, link)
-			forward_color = _congestion_color(load.x)
-			reverse_color = _congestion_color(load.y)
+		if map_mode == "Roads":
+			var load: Vector3 = _road_load_ratio(link_index, link)
+			forward_color = _congestion_color(load.x) if load.z > 0.0 else Color("647687")
+			reverse_color = _congestion_color(load.y) if load.z > 0.0 else Color("647687")
 		if map_mode == "Trips":
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
@@ -762,23 +802,225 @@ func _congestion_color(ratio: float) -> Color:
 	return Color("e6c56f").lerp(Color("e25e5e"), clampf((ratio - 0.7) / 0.8, 0.0, 1.0))
 
 
-func _road_load_ratio(link_index: int, link) -> Vector2:
-	var served: Vector2
-	var queue: Vector2
-	if road_history_current_hour >= 0:
-		var current_bin: int = road_history_current_hour * 4 + 3
-		var current_served: Vector2 = traffic_profile.quarter_hour_served[current_bin][link_index]
-		served = current_served * 4.0
-		queue = traffic_profile.quarter_hour_queues[current_bin][link_index]
-		if road_history_previous_hour >= 0 and road_history_previous_hour != road_history_current_hour:
-			var previous_bin: int = road_history_previous_hour * 4 + 3
-			served = traffic_profile.quarter_hour_served[previous_bin][link_index].lerp(current_served, road_history_fraction) * 4.0
-			queue = traffic_profile.quarter_hour_queues[previous_bin][link_index].lerp(queue, road_history_fraction)
-	else:
-		served = traffic_profile.interpolated_served_rate(link_index, selected_hour, hour_fraction, next_traffic_profile)
-		queue = traffic_profile.interpolated_queue(link_index, selected_hour, hour_fraction)
+func _road_load_ratio(link_index: int, link) -> Vector3:
+	var sample: Vector4 = _road_sample(link_index, link)
+	if not is_finite(sample.x):
+		return Vector3.ZERO
 	var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
-	return Vector2(maxf(served.x / capacity, queue.x / (capacity * 0.5)), maxf(served.y / capacity, queue.y / (capacity * 0.5)))
+	return Vector3(maxf(sample.x / capacity, sample.z / (capacity * 0.5)), maxf(sample.y / capacity, sample.w / (capacity * 0.5)), 1.0)
+
+
+func _road_sample(link_index: int, link) -> Vector4:
+	match road_traffic_mode:
+		ROAD_LIVE:
+			return _live_road_sample(link_index, link)
+		ROAD_HOUR:
+			return _hour_road_sample(link_index, link)
+		ROAD_DAY:
+			var previous: Vector4 = _summary_road_sample(previous_day_road_summary, link.id) if _previous_day_summary_valid() else Vector4(INF, 0.0, 0.0, 0.0)
+			var current: Vector4 = _summary_road_sample(current_day_road_summary, link.id) if _current_day_summary_valid() else Vector4(INF, 0.0, 0.0, 0.0)
+			if is_finite(previous.x) and is_finite(current.x):
+				return previous.lerp(current, day_road_fraction)
+			if is_finite(current.x):
+				return current
+			if is_finite(previous.x):
+				return previous
+			return _live_road_sample(link_index, link)
+		ROAD_HISTORY:
+			return _history_road_sample(link_index, link)
+	return Vector4(INF, 0.0, 0.0, 0.0)
+
+
+func _live_road_sample(link_index: int, link) -> Vector4:
+	if not _has_live_road_sample(link_index, link):
+		return _recent_day_road_sample(link.id)
+	var served: Vector2 = live_traffic_state.last_served[link_index]
+	var queue: Vector2 = live_traffic_state.queues[link_index]
+	return Vector4(served.x, served.y, queue.x, queue.y)
+
+
+func _has_live_road_sample(link_index: int, link) -> bool:
+	return live_traffic_state != null and live_traffic_state.has_live_sample and link_index >= 0 and link_index < live_traffic_state.link_ids.size() and live_traffic_state.link_ids[link_index] == link.id
+
+
+func _live_road_time(link_index: int, link, queue: Vector2) -> Vector2:
+	var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
+	var free_minutes: float = live_traffic_state.free_link_costs[link_index].x
+	return Vector2(free_minutes + 60.0 * queue.x / capacity, free_minutes + 60.0 * queue.y / capacity)
+
+
+func _hour_road_sample(link_index: int, link) -> Vector4:
+	if road_history_current_hour < 0:
+		var carried: Vector4 = _summary_road_sample(hour_carry_summary, link.id) if _hour_carry_valid() else Vector4(INF, 0.0, 0.0, 0.0)
+		return carried if is_finite(carried.x) else _live_road_sample(link_index, link)
+	if traffic_profile == null or link_index >= traffic_profile.link_ids.size() or traffic_profile.link_ids[link_index] != link.id:
+		var carried: Vector4 = _summary_road_sample(hour_carry_summary, link.id) if _hour_carry_valid() else Vector4(INF, 0.0, 0.0, 0.0)
+		return carried if is_finite(carried.x) else _live_road_sample(link_index, link)
+	var hour: int = road_history_current_hour
+	var current_served: Vector2 = traffic_profile.hourly_served[hour][link_index]
+	var current_queue: Vector2 = traffic_profile.quarter_hour_queues[hour * 4 + 3][link_index]
+	var previous_served: Vector2 = current_served
+	var previous_queue: Vector2 = current_queue
+	if road_history_previous_hour >= 0:
+		previous_served = traffic_profile.hourly_served[road_history_previous_hour][link_index]
+		previous_queue = traffic_profile.quarter_hour_queues[road_history_previous_hour * 4 + 3][link_index]
+	else:
+		var carry_index: int = _summary_link_index(hour_carry_summary, link.id) if _hour_carry_valid() else -1
+		if carry_index >= 0:
+			previous_served = hour_carry_summary["served"][carry_index]
+			previous_queue = hour_carry_summary["queue"][carry_index]
+		else:
+			var recent: Vector4 = _recent_day_road_sample(link.id)
+			if is_finite(recent.x):
+				previous_served = Vector2(recent.x, recent.y)
+				previous_queue = Vector2(recent.z, recent.w)
+	var served: Vector2 = previous_served.lerp(current_served, road_history_fraction)
+	var queue: Vector2 = previous_queue.lerp(current_queue, road_history_fraction)
+	return Vector4(served.x, served.y, queue.x, queue.y)
+
+
+func _history_road_sample(link_index: int, link) -> Vector4:
+	if traffic_profile == null or not _is_recorded_time() or link_index >= traffic_profile.link_ids.size() or traffic_profile.link_ids[link_index] != link.id:
+		return Vector4(INF, 0.0, 0.0, 0.0)
+	var bin_index: int = selected_hour * 4 + floori(hour_fraction * 4.0)
+	var served: Vector2 = traffic_profile.quarter_hour_served[bin_index][link_index] * 4.0
+	if live_traffic_state != null and live_traffic_state.has_live_sample and bin_index == (live_traffic_state.unix_seconds % 86400) / 900:
+		served = live_traffic_state.last_served[link_index]
+	var queue: Vector2 = traffic_profile.quarter_hour_queues[bin_index][link_index]
+	return Vector4(served.x, served.y, queue.x, queue.y)
+
+
+func _summary_link_index(summary: Dictionary, link_id: int) -> int:
+	return int(summary.get("by_link_id", {}).get(link_id, -1))
+
+
+func _hour_carry_valid() -> bool:
+	return live_traffic_state != null and int(hour_carry_summary.get("day_key", -1)) == live_traffic_state.day_key - 1
+
+
+func _current_day_summary_valid() -> bool:
+	return live_traffic_state != null and int(current_day_road_summary.get("day_key", -1)) == live_traffic_state.day_key
+
+
+func _previous_day_summary_valid() -> bool:
+	return live_traffic_state != null and int(previous_day_road_summary.get("day_key", -1)) == live_traffic_state.day_key - 1
+
+
+func _summary_road_sample(summary: Dictionary, link_id: int) -> Vector4:
+	var index: int = _summary_link_index(summary, link_id)
+	if index < 0:
+		return Vector4(INF, 0.0, 0.0, 0.0)
+	var served: Vector2 = summary["served"][index]
+	var queue: Vector2 = summary["queue"][index]
+	return Vector4(served.x, served.y, queue.x, queue.y)
+
+
+func _recent_day_road_sample(link_id: int) -> Vector4:
+	if live_traffic_state == null:
+		return Vector4(INF, 0.0, 0.0, 0.0)
+	if _current_day_summary_valid():
+		var current: Vector4 = _summary_road_sample(current_day_road_summary, link_id)
+		if is_finite(current.x):
+			return current
+	if _previous_day_summary_valid():
+		return _summary_road_sample(previous_day_road_summary, link_id)
+	return Vector4(INF, 0.0, 0.0, 0.0)
+
+
+func _recent_day_metric(link_id: int, key: String) -> Vector2:
+	if live_traffic_state == null:
+		return Vector2.ZERO
+	if _current_day_summary_valid():
+		var current_index: int = _summary_link_index(current_day_road_summary, link_id)
+		if current_index >= 0:
+			return current_day_road_summary[key][current_index]
+	if _previous_day_summary_valid():
+		var previous_index: int = _summary_link_index(previous_day_road_summary, link_id)
+		if previous_index >= 0:
+			return previous_day_road_summary[key][previous_index]
+	return Vector2.ZERO
+
+
+func get_road_traffic_metrics(link_index: int, link) -> Dictionary:
+	var sample: Vector4 = _road_sample(link_index, link)
+	if not is_finite(sample.x):
+		return {}
+	var demand: Vector2 = Vector2.ZERO
+	var time: Vector2 = Vector2.ZERO
+	var label: String = "SELECTED TIME"
+	match road_traffic_mode:
+		ROAD_LIVE:
+			if _has_live_road_sample(link_index, link):
+				demand = live_traffic_state.last_arrivals[link_index]
+				time = _live_road_time(link_index, link, Vector2(sample.z, sample.w))
+				label = "LIVE TRAFFIC"
+			else:
+				demand = _recent_day_metric(link.id, "demand")
+				time = _recent_day_metric(link.id, "time")
+				label = "RECENT DAILY ESTIMATE"
+		ROAD_HOUR:
+			var hour: int = road_history_current_hour
+			if hour >= 0 and traffic_profile != null and link_index < traffic_profile.link_ids.size() and traffic_profile.link_ids[link_index] == link.id:
+				var current_demand: Vector2 = traffic_profile.hourly_volumes[hour][link_index]
+				var current_time: Vector2 = traffic_profile.hourly_link_times[hour][link_index]
+				var previous_demand: Vector2 = current_demand
+				var previous_time: Vector2 = current_time
+				if road_history_previous_hour >= 0:
+					previous_demand = traffic_profile.hourly_volumes[road_history_previous_hour][link_index]
+					previous_time = traffic_profile.hourly_link_times[road_history_previous_hour][link_index]
+				else:
+					var carry_index: int = _summary_link_index(hour_carry_summary, link.id) if _hour_carry_valid() else -1
+					if carry_index >= 0:
+						previous_demand = hour_carry_summary["demand"][carry_index]
+						previous_time = hour_carry_summary["time"][carry_index]
+					elif is_finite(_recent_day_road_sample(link.id).x):
+						previous_demand = _recent_day_metric(link.id, "demand")
+						previous_time = _recent_day_metric(link.id, "time")
+				demand = previous_demand.lerp(current_demand, road_history_fraction)
+				time = previous_time.lerp(current_time, road_history_fraction)
+				label = "COMPLETED HOURS"
+			else:
+				var carry_index: int = _summary_link_index(hour_carry_summary, link.id) if _hour_carry_valid() else -1
+				if carry_index >= 0:
+					demand = hour_carry_summary["demand"][carry_index]
+					time = hour_carry_summary["time"][carry_index]
+					label = "PREVIOUS COMPLETED HOUR"
+				elif _has_live_road_sample(link_index, link):
+					demand = live_traffic_state.last_arrivals[link_index]
+					time = _live_road_time(link_index, link, Vector2(sample.z, sample.w))
+					label = "LATEST TRAFFIC ESTIMATE"
+				else:
+					demand = _recent_day_metric(link.id, "demand")
+					time = _recent_day_metric(link.id, "time")
+					label = "RECENT DAILY ESTIMATE"
+		ROAD_DAY:
+			var previous_index: int = _summary_link_index(previous_day_road_summary, link.id) if _previous_day_summary_valid() else -1
+			var current_index: int = _summary_link_index(current_day_road_summary, link.id) if _current_day_summary_valid() else -1
+			if previous_index >= 0 and current_index >= 0:
+				demand = previous_day_road_summary["demand"][previous_index].lerp(current_day_road_summary["demand"][current_index], day_road_fraction)
+				time = previous_day_road_summary["time"][previous_index].lerp(current_day_road_summary["time"][current_index], day_road_fraction)
+				label = "DAILY AVERAGE ESTIMATE"
+			elif current_index >= 0:
+				demand = current_day_road_summary["demand"][current_index]
+				time = current_day_road_summary["time"][current_index]
+				label = "DAILY AVERAGE ESTIMATE"
+			elif previous_index >= 0:
+				demand = previous_day_road_summary["demand"][previous_index]
+				time = previous_day_road_summary["time"][previous_index]
+				label = "PREVIOUS DAILY ESTIMATE"
+			elif _has_live_road_sample(link_index, link):
+				demand = live_traffic_state.last_arrivals[link_index]
+				time = _live_road_time(link_index, link, Vector2(sample.z, sample.w))
+				label = "LATEST TRAFFIC ESTIMATE"
+			else:
+				demand = _recent_day_metric(link.id, "demand")
+				time = _recent_day_metric(link.id, "time")
+				label = "RECENT DAILY ESTIMATE"
+		ROAD_HISTORY:
+			var bin_index: int = selected_hour * 4 + floori(hour_fraction * 4.0)
+			demand = traffic_profile.hourly_volumes[selected_hour][link_index]
+			time = traffic_profile.quarter_hour_link_times[bin_index][link_index]
+	return {"demand": demand, "served": Vector2(sample.x, sample.y), "queue": Vector2(sample.z, sample.w), "time": time, "label": label}
 
 
 func _draw_road_nodes() -> void:

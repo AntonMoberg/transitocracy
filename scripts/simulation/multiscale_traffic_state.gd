@@ -30,6 +30,7 @@ var hourly_fiscal_base: Array[Dictionary] = []
 var departed_trips: float = 0.0
 var served_cars: float = 0.0
 var estimated: bool = false
+var has_live_sample: bool = false
 var stage_totals_us: Dictionary = {}
 
 

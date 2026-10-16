@@ -148,6 +148,7 @@ static func fork_for_week(state):
 	fork.departed_trips = state.departed_trips
 	fork.served_cars = state.served_cars
 	fork.estimated = state.estimated
+	fork.has_live_sample = state.has_live_sample
 	var profile = RoadTrafficProfile.new()
 	var old = state.profile
 	profile.active_day_key = old.active_day_key
@@ -359,6 +360,7 @@ static func _advance_links(region, flow_profile, state, hour: int, duration: int
 	state.profile.quarter_hour_link_times[bin_index] = time_bin
 	state.profile.hourly_served[hour] = served_hour
 	state.profile.end_queues = queued.duplicate()
+	state.has_live_sample = true
 	state.departed_trips += float(flow_profile.hourly_trips[hour]) * fraction
 	for area_id in state.cached_revenue:
 		var revenue: Dictionary = state.cached_revenue[area_id]

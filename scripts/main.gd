@@ -20,6 +20,7 @@ const MultiScaleWeekBuffer = preload("res://scripts/simulation/multiscale_week_b
 const CompactHourPrecompute = preload("res://scripts/simulation/compact_hour_precompute.gd")
 const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
 const RoadRebuild = preload("res://scripts/simulation/road_rebuild.gd")
+const RoadTrafficSummary = preload("res://scripts/simulation/road_traffic_summary.gd")
 
 const DEFAULT_SEED = 1729
 
@@ -27,7 +28,6 @@ var region
 var flow_profile
 var next_day_profile
 var traffic_profile
-var next_traffic_profile
 var traffic_state
 var inspected_hour: int = -1
 var inspected_minute: int = 0
@@ -583,7 +583,7 @@ func _on_mode_selected(index: int) -> void:
 		if calendar_clock != null:
 			calendar_clock.visual_offset_seconds = 0.0
 	if old_mode != index and (old_mode == MultiScaleTraffic.DAY or index == MultiScaleTraffic.DAY):
-		_discard_pending_day()
+		_discard_pending_day(false)
 	elif old_mode == MultiScaleTraffic.HOUR and index != MultiScaleTraffic.HOUR:
 		_discard_compact_hour_precompute()
 	simulation_mode = index
@@ -865,7 +865,6 @@ func _apply_generated_region(result: Dictionary) -> void:
 		inspector.text = "[color=#ff8c8c]Region generation failed validation.[/color]"
 		return
 	next_day_profile = null
-	next_traffic_profile = null
 	road_start_node = -1
 	road_waypoints.clear()
 	pending_road_preview.clear()
@@ -917,6 +916,10 @@ func _ensure_day_profiles() -> void:
 	if traffic_state.unix_seconds < pending_day_result_key * 86400:
 		return
 	_discard_compact_hour_precompute()
+	if simulation_mode == MultiScaleTraffic.DAY:
+		map_view.promote_day_road_summary()
+	elif simulation_mode == MultiScaleTraffic.HOUR:
+		map_view.set_hour_carry_summary(RoadTrafficSummary.completed_hour(traffic_state, 23))
 	var handoff_started: int = Time.get_ticks_usec()
 	last_handoff_breakdown.clear()
 	if simulation_mode == MultiScaleTraffic.DAY and week_timeline_start_key >= 0:
@@ -939,9 +942,7 @@ func _ensure_day_profiles() -> void:
 	map_view.set_traffic_profile(traffic_profile)
 	flow_timeline.set_profile(flow_profile)
 	next_day_profile = null
-	next_traffic_profile = null
 	map_view.set_next_day_profile(null)
-	map_view.set_next_traffic_profile(null)
 	flow_timeline.set_next_day_profile(null)
 	last_handoff_breakdown["assign"] = Time.get_ticks_usec() - handoff_started
 	_retire_simulation_data(old_data)
@@ -1069,6 +1070,9 @@ func _poll_week_worker() -> void:
 	pending_day_result_key = target_day_key
 	pending_day_source_mode = MultiScaleTraffic.DAY
 	_set_next_day_flow(pending_day_result["flow"])
+	var completed_road_day: Dictionary = pending_day_result.get("completed_road_day", {})
+	if int(completed_road_day.get("day_key", -1)) == traffic_state.day_key:
+		map_view.set_current_day_road_summary(completed_road_day)
 
 
 func _effective_day_rate(target_rate: float) -> float:
@@ -1127,9 +1131,11 @@ func _set_next_day_flow(profile) -> void:
 		flow_timeline.set_next_day_profile(profile)
 
 
-func _discard_pending_day() -> void:
+func _discard_pending_day(clear_road_display: bool = true) -> void:
 	_discard_compact_hour_precompute()
 	_set_next_day_flow(null)
+	if clear_road_display and map_view != null:
+		map_view.clear_day_road_summaries()
 	if week_buffer != null:
 		week_buffer.cancel()
 		week_buffer = null
@@ -1194,13 +1200,16 @@ func _sync_clock_view() -> void:
 		flow_timeline.set_week_mode(false)
 	var latest_completed_hour: int = -1
 	var previous_completed_hour: int = -1
-	if simulation_mode == MultiScaleTraffic.HOUR and region.is_large_scale and inspected_hour < 0:
+	if simulation_mode == MultiScaleTraffic.HOUR and inspected_hour < 0:
 		var candidate_hour: int = (traffic_state.unix_seconds - traffic_state.day_key * 86400) / 3600 - 1
 		if candidate_hour >= 0 and candidate_hour * 4 + 3 < traffic_state.next_bin and candidate_hour * 4 + 3 >= traffic_state.first_recorded_bin:
 			latest_completed_hour = candidate_hour
 			if candidate_hour > 0 and (candidate_hour - 1) * 4 + 3 >= traffic_state.first_recorded_bin:
 				previous_completed_hour = candidate_hour - 1
 	map_view.set_hourly_road_history(previous_completed_hour, latest_completed_hour, fraction)
+	var road_display_mode: int = RegionMap.ROAD_DAY if simulation_mode == MultiScaleTraffic.DAY else (RegionMap.ROAD_HISTORY if inspected_hour >= 0 else (RegionMap.ROAD_HOUR if simulation_mode == MultiScaleTraffic.HOUR else RegionMap.ROAD_LIVE))
+	map_view.set_road_traffic_mode(road_display_mode, traffic_state)
+	map_view.set_day_road_fraction(fposmod(calendar_clock.get_display_unix_seconds(), 86400.0) / 86400.0)
 	if map_view.map_mode == "Trips":
 		map_view.set_time(hour, fraction)
 	else:
@@ -1514,6 +1523,7 @@ func _update_road_status() -> void:
 
 func _rebuild_after_road_change() -> void:
 	_discard_pending_day()
+	map_view.set_hour_carry_summary({})
 	if region.is_large_scale:
 		var worker := Thread.new()
 		var task := Callable(RoadRebuild, "build").bind(region, traffic_state, calendar_clock.unix_seconds)
@@ -1536,9 +1546,7 @@ func _rebuild_after_road_change() -> void:
 	map_view.set_traffic_profile(traffic_profile)
 	flow_timeline.set_profile(flow_profile)
 	next_day_profile = null
-	next_traffic_profile = null
 	map_view.set_next_day_profile(null)
-	map_view.set_next_traffic_profile(null)
 	flow_timeline.set_next_day_profile(null)
 	_refresh_region_summary()
 	_refresh_inspector(false)
@@ -1562,13 +1570,12 @@ func _poll_road_rebuild() -> void:
 	traffic_state = result["traffic_state"]
 	traffic_profile = traffic_state.profile
 	map_view.region = region
+	map_view.set_hour_carry_summary({})
 	map_view.set_flow_profile(flow_profile)
 	map_view.set_traffic_profile(traffic_profile)
 	flow_timeline.set_profile(flow_profile)
 	next_day_profile = null
-	next_traffic_profile = null
 	map_view.set_next_day_profile(null)
-	map_view.set_next_traffic_profile(null)
 	flow_timeline.set_next_day_profile(null)
 	_retire_simulation_data(old_data)
 	_refresh_region_summary()
@@ -1639,29 +1646,26 @@ func _show_road_inspector(link_id: int) -> void:
 	if index < 0:
 		return
 	var link = region.road_links[index]
-	var hour: int = inspected_hour if inspected_hour >= 0 else calendar_clock.get_hour()
-	var fraction: float = float(inspected_minute) / 60.0 if inspected_hour >= 0 else calendar_clock.get_hour_fraction()
-	var traffic_display_time: Vector2 = _display_traffic_time(hour, fraction)
-	hour = int(traffic_display_time.x)
-	fraction = traffic_display_time.y
-	var requested_bin: int = hour * 4 + floori(fraction * 4.0)
-	if requested_bin < traffic_state.first_recorded_bin or requested_bin >= traffic_state.next_bin:
+	var road_metrics: Dictionary = map_view.get_road_traffic_metrics(index, link)
+	if road_metrics.is_empty():
 		inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#78c8dc]Directional road traffic for this time is still uncalculated.[/color]\nThe chart shows scheduled trip demand." % [
 			link.road_class, link.id, link.length_km, link.lanes_per_direction,
 			region.jurisdictions[link.owner_jurisdiction_id].name, link.toll_forward, link.toll_reverse]
 		return
-	var volume: Vector2 = traffic_profile.interpolated_volume(index, hour, fraction, next_traffic_profile)
-	var served: Vector2 = traffic_profile.interpolated_served_rate(index, hour, fraction, next_traffic_profile)
-	var queue: Vector2 = traffic_profile.interpolated_queue(index, hour, fraction)
-	var time: Vector2 = traffic_profile.interpolated_link_time(index, hour, fraction, next_traffic_profile)
+	var volume: Vector2 = road_metrics["demand"]
+	var served: Vector2 = road_metrics["served"]
+	var queue: Vector2 = road_metrics["queue"]
+	var time: Vector2 = road_metrics["time"]
+	var sample_label: String = road_metrics["label"]
 	var capacity: float = (1800.0 if link.road_class == RoadLinkData.HIGHWAY else 900.0) * link.lanes_per_direction
 	var project_text := ""
 	for project in region.road_projects:
 		if project.target_link_id == link_id:
 			project_text += "\n%s: %d days left" % [project.kind, project.days_remaining(_current_day_key())]
-	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#78c8dc][b]SELECTED TIME[/b][/color]\nForward demand: %s vehicles/h (%.0f%%)\nReverse demand: %s vehicles/h (%.0f%%)\nForward flow: %s vehicles/h\nReverse flow: %s vehicles/h\nForward queue: %s vehicles\nReverse queue: %s vehicles\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
+	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#78c8dc][b]%s[/b][/color]\nForward demand: %s vehicles/h (%.0f%%)\nReverse demand: %s vehicles/h (%.0f%%)\nForward flow: %s vehicles/h\nReverse flow: %s vehicles/h\nForward queue: %s vehicles\nReverse queue: %s vehicles\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
 		link.road_class, link.id, link.length_km, link.lanes_per_direction, _format_count(roundi(capacity)),
 		region.jurisdictions[link.owner_jurisdiction_id].name, link.toll_forward, link.toll_reverse,
+		sample_label,
 		_format_count(roundi(volume.x)), 100.0 * volume.x / capacity, _format_count(roundi(volume.y)), 100.0 * volume.y / capacity,
 		_format_count(roundi(served.x)), _format_count(roundi(served.y)),
 		_format_count(roundi(queue.x)), _format_count(roundi(queue.y)),
