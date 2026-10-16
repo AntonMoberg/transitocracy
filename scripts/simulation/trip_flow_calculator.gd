@@ -23,22 +23,34 @@ static func build(region):
 	var job_demand := PackedFloat32Array()
 	worker_supply.resize(count)
 	job_demand.resize(count)
-	var total_workers := 0.0
-	var total_jobs := 0.0
 	for id in range(count):
 		worker_supply[id] = region.neighborhoods[id].households * WORKERS_PER_HOUSEHOLD
 		job_demand[id] = region.neighborhoods[id].jobs
-		total_workers += worker_supply[id]
-		total_jobs += job_demand[id]
-	profile.daily_commuters = minf(total_workers, total_jobs)
 
 	var row_targets := PackedFloat32Array()
 	var column_targets := PackedFloat32Array()
 	row_targets.resize(count)
 	column_targets.resize(count)
-	for id in range(count):
-		row_targets[id] = worker_supply[id] * profile.daily_commuters / maxf(1.0, total_workers)
-		column_targets[id] = job_demand[id] * profile.daily_commuters / maxf(1.0, total_jobs)
+	var assigned := PackedByteArray()
+	assigned.resize(count)
+	for first_id in range(count):
+		if assigned[first_id] != 0:
+			continue
+		var component: Array[int] = []
+		var workers := 0.0
+		var jobs := 0.0
+		for id in range(count):
+			if region.travel_times[first_id][id] >= 1000000.0:
+				continue
+			assigned[id] = 1
+			component.append(id)
+			workers += worker_supply[id]
+			jobs += job_demand[id]
+		var commuters := minf(workers, jobs)
+		profile.daily_commuters += commuters
+		for id in component:
+			row_targets[id] = worker_supply[id] * commuters / maxf(1.0, workers)
+			column_targets[id] = job_demand[id] * commuters / maxf(1.0, jobs)
 
 	# Balance workplace destinations against jobs while preferring shorter trips.
 	for origin_id in range(count):

@@ -11,12 +11,21 @@ var income_tax_rate: float = 0.10
 var daily_tax_revenue: float = 0.0
 var last_population_change: int = 0
 var last_household_change: int = 0
+var treasury: float = 100000000.0
+var daily_road_upkeep: float = 0.0
+var last_fiscal_change: float = 0.0
+var next_road_link_id: int = 0
+var next_road_project_id: int = 0
 
 # Each city has an id, name, center_km, and neighborhood_ids.
 var cities: Array[Dictionary] = []
 var neighborhoods: Array = []
 var travel_times: Array[PackedFloat32Array] = []
 var accessibility: PackedFloat32Array = PackedFloat32Array()
+var road_nodes: Array = []
+var road_links: Array = []
+var road_projects: Array = []
+var neighborhood_gateway_node_ids: Array[int] = []
 
 
 func get_city_name(city_id: int) -> String:
@@ -75,4 +84,12 @@ func validation_errors() -> PackedStringArray:
 		for row in travel_times:
 			if row.size() != neighborhoods.size():
 				errors.append("Travel-time matrix has an incomplete row.")
+	if not road_nodes.is_empty():
+		if neighborhood_gateway_node_ids.size() != neighborhoods.size():
+			errors.append("Neighborhood road gateways are incomplete.")
+		for link in road_links:
+			if link.from_node_id < 0 or link.to_node_id < 0 or link.from_node_id >= road_nodes.size() or link.to_node_id >= road_nodes.size() or link.length_km <= 0.0:
+				errors.append("Invalid road link %d." % link.id)
+			elif link.road_class == "Highway" and (not road_nodes[link.from_node_id].is_interchange or not road_nodes[link.to_node_id].is_interchange):
+				errors.append("Highway %d lacks an interchange." % link.id)
 	return errors

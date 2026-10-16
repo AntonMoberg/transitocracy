@@ -9,12 +9,18 @@ const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 const RegionData = preload("res://scripts/simulation/region_data.gd")
 const RegionMap = preload("res://scripts/ui/region_map.gd")
 const FlowTimeline = preload("res://scripts/ui/flow_timeline.gd")
+const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_generator.gd")
+const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
+const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 
 const DEFAULT_SEED = 1729
 
 var region
 var flow_profile
 var next_day_profile
+var traffic_profile
+var next_traffic_profile
 var last_dynamics_day_key: int = -1
 var flow_purpose: String = FlowProfile.ALL
 var calendar_clock
@@ -33,6 +39,14 @@ var play_button: Button
 var speed_selector: OptionButton
 var purpose_selector: OptionButton
 var inspector: RichTextLabel
+var map_mode_selector: OptionButton
+var road_tool_selector: OptionButton
+var road_build_button: Button
+var road_status_label: Label
+var pending_road_preview: Dictionary = {}
+var road_start_node: int = -1
+var road_waypoints: PackedVector2Array = PackedVector2Array()
+var selected_road_link_id: int = -1
 
 
 func _ready() -> void:
@@ -70,6 +84,8 @@ func _input(event: InputEvent) -> void:
 			_on_speed_selected(3)
 		KEY_5, KEY_KP_5:
 			_on_speed_selected(4)
+		KEY_ESCAPE:
+			_cancel_road_preview()
 		_:
 			return
 	get_viewport().set_input_as_handled()
@@ -193,6 +209,35 @@ func _build_interface() -> void:
 	hourly_trip_label.add_theme_color_override("font_color", Color("f5b67c"))
 	clock_controls.add_child(hourly_trip_label)
 
+	var road_controls := HBoxContainer.new()
+	road_controls.add_theme_constant_override("separation", 8)
+	layout.add_child(road_controls)
+	map_mode_selector = OptionButton.new()
+	map_mode_selector.add_item("Roads")
+	map_mode_selector.add_item("Trips")
+	map_mode_selector.selected = 0
+	map_mode_selector.item_selected.connect(_on_map_mode_selected)
+	road_controls.add_child(map_mode_selector)
+	road_tool_selector = OptionButton.new()
+	for tool_name in ["Inspect", "Arterial", "Highway", "Junction", "Interchange", "Widen", "Demolish"]:
+		road_tool_selector.add_item(tool_name)
+	road_tool_selector.item_selected.connect(_on_road_tool_selected)
+	road_controls.add_child(road_tool_selector)
+	road_build_button = Button.new()
+	road_build_button.text = "Build"
+	road_build_button.disabled = true
+	road_build_button.pressed.connect(_on_road_build_pressed)
+	road_controls.add_child(road_build_button)
+	var cancel_road_button := Button.new()
+	cancel_road_button.text = "Cancel"
+	cancel_road_button.pressed.connect(_cancel_road_preview)
+	road_controls.add_child(cancel_road_button)
+	road_status_label = Label.new()
+	road_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	road_status_label.clip_text = true
+	road_status_label.add_theme_color_override("font_color", Color("a9c8d8"))
+	road_controls.add_child(road_status_label)
+
 	var timeline_panel := PanelContainer.new()
 	timeline_panel.add_theme_stylebox_override("panel", _panel_style(Color("152235"), 0))
 	layout.add_child(timeline_panel)
@@ -214,6 +259,10 @@ func _build_interface() -> void:
 	map_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	map_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	map_view.neighborhood_selected.connect(_on_neighborhood_selected)
+	map_view.road_node_clicked.connect(_on_road_node_clicked)
+	map_view.road_link_clicked.connect(_on_road_link_clicked)
+	map_view.road_empty_clicked.connect(_on_road_empty_clicked)
+	map_view.road_cancel_requested.connect(_cancel_road_preview)
 	map_panel.add_child(map_view)
 
 	var inspector_panel := PanelContainer.new()
@@ -297,20 +346,39 @@ func _on_tax_changed(value: float) -> void:
 
 func _generate_region(seed_value: int) -> void:
 	region = RegionGenerator.generate_region(seed_value)
+	RoadNetworkGenerator.generate(region)
 	AccessibilityCalculator.recalculate(region)
 	region.income_tax_rate = tax_input.value / 100.0
 	NeighborhoodDynamics.initialize(region)
-	flow_profile = TripFlowCalculator.build(region)
+	region.daily_road_upkeep = RoadPlanner.calculate_upkeep(region)
+	calendar_clock = CalendarClock.new()
+	last_dynamics_day_key = floori(float(calendar_clock.unix_seconds) / 86400.0)
+	var day_result: Dictionary = RoadTrafficCalculator.build_day(region, calendar_clock.unix_seconds)
+	flow_profile = day_result["flow"]
+	traffic_profile = day_result["traffic"]
+	NeighborhoodDynamics.refresh_desirability(region)
 	var errors: PackedStringArray = region.validation_errors()
 	if not errors.is_empty():
 		push_error("Invalid generated region: " + "; ".join(errors))
 		inspector.text = "[color=#ff8c8c]Region generation failed validation.[/color]"
 		return
-	calendar_clock = CalendarClock.new()
-	last_dynamics_day_key = floori(float(calendar_clock.unix_seconds) / 86400.0)
 	next_day_profile = null
+	next_traffic_profile = null
+	road_start_node = -1
+	road_waypoints.clear()
+	pending_road_preview.clear()
+	selected_road_link_id = -1
 	map_view.set_region(region)
+	map_view.set_map_mode("Roads")
+	map_mode_selector.select(0)
+	road_tool_selector.select(0)
+	road_build_button.text = "Build"
+	map_view.set_road_tool("Inspect")
+	map_view.set_traffic_profile(traffic_profile)
+	map_view.set_flow_profile(flow_profile)
+	flow_timeline.set_profile(flow_profile)
 	_ensure_day_profiles()
+	_update_road_status()
 	map_view.set_purpose(flow_purpose)
 	flow_timeline.set_purpose(flow_purpose)
 	_refresh_region_summary()
@@ -327,37 +395,45 @@ func _refresh_region_summary() -> void:
 		region.cities.size(), region.neighborhoods.size(),
 		_format_count(totals["population"]), _format_count(totals["jobs"]),
 	]
-	dynamics_label.text = "Today: %+d households / %+d people     •     Est. income tax: $%s/day" % [
-		region.last_household_change, region.last_population_change, _format_count(roundi(region.daily_tax_revenue))
+	dynamics_label.text = "Today: %+d households / %+d people  •  Treasury $%s  •  Net $%s/day" % [
+		region.last_household_change, region.last_population_change, _format_count(roundi(region.treasury)), _format_count(roundi(region.daily_tax_revenue - region.daily_road_upkeep))
 	]
 
 
 func _ensure_day_profiles() -> void:
 	var day_key := floori(float(calendar_clock.unix_seconds) / 86400.0)
 	var dynamics_advanced := false
-	var prior_profile = flow_profile
-	var prior_day_key := last_dynamics_day_key
 	if day_key > last_dynamics_day_key:
-		for _crossed_day in range(last_dynamics_day_key + 1, day_key + 1):
+		for crossed_day in range(last_dynamics_day_key + 1, day_key + 1):
+			var prior_profile = flow_profile
+			var prior_traffic_profile = traffic_profile
+			var roads_changed: bool = RoadPlanner.advance_day(region, crossed_day)
+			if roads_changed:
+				AccessibilityCalculator.recalculate(region)
 			NeighborhoodDynamics.advance_day(region)
+			var day_result: Dictionary = RoadTrafficCalculator.build_day(region, crossed_day * 86400, prior_profile, roads_changed, prior_traffic_profile)
+			flow_profile = day_result["flow"]
+			traffic_profile = day_result["traffic"]
+			NeighborhoodDynamics.refresh_desirability(region)
 		last_dynamics_day_key = day_key
-		flow_profile = TripFlowCalculator.build(region)
 		next_day_profile = null
+		next_traffic_profile = null
 		dynamics_advanced = true
-	if flow_profile.active_day_key != day_key:
-		var overnight_profile = prior_profile if dynamics_advanced and day_key == prior_day_key + 1 else null
-		TripFlowCalculator.populate_day(flow_profile, region.generation_seed, calendar_clock.unix_seconds, calendar_clock.is_weekend(), overnight_profile)
+	if dynamics_advanced:
 		map_view.set_flow_profile(flow_profile)
+		map_view.set_traffic_profile(traffic_profile)
 		flow_timeline.set_profile(flow_profile)
-		next_day_profile = null
 	if next_day_profile == null or next_day_profile.active_day_key != day_key + 1:
 		var next_day_seconds: int = (day_key + 1) * 86400
 		next_day_profile = TripFlowCalculator.copy_for_day(flow_profile, region.generation_seed, next_day_seconds, CalendarClock.is_weekend_unix(next_day_seconds))
+		next_traffic_profile = RoadTrafficCalculator.assign_day(region, next_day_profile, 1)
 		map_view.set_next_day_profile(next_day_profile)
+		map_view.set_next_traffic_profile(next_traffic_profile)
 		flow_timeline.set_next_day_profile(next_day_profile)
 	if dynamics_advanced:
 		_refresh_region_summary()
-		_on_neighborhood_selected(map_view.selected_id, false)
+		_refresh_inspector(false)
+		_update_road_status()
 
 
 func _sync_clock_view() -> void:
@@ -376,6 +452,8 @@ func _sync_clock_view() -> void:
 	flow_timeline.set_weekend(weekend)
 	map_view.set_time(hour, fraction)
 	_update_flow_detail()
+	if selected_road_link_id >= 0 and map_mode_selector.selected == 0:
+		_show_road_inspector(selected_road_link_id)
 
 
 func _update_flow_detail() -> void:
@@ -402,6 +480,8 @@ func _update_flow_detail() -> void:
 
 
 func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) -> void:
+	selected_road_link_id = -1
+	map_view.set_selected_road_link(-1)
 	map_view.set_selected(neighborhood_id)
 	_update_flow_detail()
 	if neighborhood_id < 0:
@@ -451,7 +531,10 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 		travel_order.append(id)
 	travel_order.sort_custom(func(a: int, b: int) -> bool: return region.travel_times[neighborhood_id][a] < region.travel_times[neighborhood_id][b])
 	for id in travel_order:
-		text_lines.append("%s: %.1f min" % [region.neighborhoods[id].name, region.travel_times[neighborhood_id][id]])
+		if region.travel_times[neighborhood_id][id] >= 1000000.0:
+			text_lines.append("%s: no road route" % region.neighborhoods[id].name)
+		else:
+			text_lines.append("%s: %.1f min" % [region.neighborhoods[id].name, region.travel_times[neighborhood_id][id]])
 	text_lines.append("")
 	text_lines.append("[color=#78c8dc][b]%s CITY TOTAL[/b][/color]" % region.get_city_name(neighborhood.city_id).to_upper())
 	text_lines.append("Population: %s" % _format_count(city_totals["population"]))
@@ -462,6 +545,193 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 		inspector.scroll_to_line(0)
 	else:
 		inspector.get_v_scroll_bar().value = previous_scroll
+
+
+func _current_day_key() -> int:
+	return floori(float(calendar_clock.unix_seconds) / 86400.0)
+
+
+func _on_map_mode_selected(index: int) -> void:
+	map_view.set_map_mode("Roads" if index == 0 else "Trips")
+	_cancel_road_preview()
+	_refresh_inspector(false)
+
+
+func _on_road_tool_selected(index: int) -> void:
+	map_view.set_road_tool(road_tool_selector.get_item_text(index))
+	road_build_button.text = "Demolish" if road_tool_selector.get_item_text(index) == "Demolish" else "Build"
+	_cancel_road_preview()
+	_update_road_status()
+
+
+func _on_road_node_clicked(node_id: int) -> void:
+	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
+	match tool_name:
+		"Arterial", "Highway":
+			if road_start_node < 0 or not pending_road_preview.is_empty():
+				road_start_node = node_id
+				road_waypoints.clear()
+				pending_road_preview.clear()
+				map_view.set_road_preview(road_start_node, road_waypoints, {})
+			else:
+				pending_road_preview = RoadPlanner.link_preview(region, road_start_node, node_id, RoadLinkData.HIGHWAY if tool_name == "Highway" else RoadLinkData.ARTERIAL, road_waypoints, _current_day_key())
+				map_view.set_road_preview(road_start_node, road_waypoints, pending_road_preview)
+		"Interchange":
+			pending_road_preview = RoadPlanner.interchange_preview(region, node_id, -1, Vector2.ZERO, _current_day_key())
+			map_view.set_road_preview(-1, PackedVector2Array(), pending_road_preview)
+		_:
+			var node = region.road_nodes[node_id]
+			if node.neighborhood_id >= 0:
+				_on_neighborhood_selected(node.neighborhood_id)
+			else:
+				selected_road_link_id = -1
+				inspector.text = "[font_size=21][b]%s[/b][/font_size]\n\nNode %d  •  %.1f, %.1f km\nHighway access: %s" % [node.display_name(), node_id, node.position_km.x, node.position_km.y, "yes" if node.is_interchange else "no"]
+	_update_road_status()
+
+
+func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
+	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
+	if tool_name != "Junction":
+		selected_road_link_id = link_id
+		map_view.set_selected_road_link(link_id)
+		_show_road_inspector(link_id)
+	match tool_name:
+		"Junction":
+			var result: Dictionary = RoadPlanner.add_junction(region, world_position, link_id)
+			road_status_label.text = "Junction added." if result["ok"] else result["reason"]
+			if result["ok"]:
+				_rebuild_after_road_change()
+		"Interchange":
+			pending_road_preview = RoadPlanner.interchange_preview(region, -1, link_id, world_position, _current_day_key())
+			map_view.set_road_preview(-1, PackedVector2Array(), pending_road_preview)
+			_update_road_status()
+		"Widen":
+			pending_road_preview = RoadPlanner.widen_preview(region, link_id, _current_day_key())
+			map_view.set_road_preview(-1, PackedVector2Array(), pending_road_preview)
+			_update_road_status()
+		"Demolish":
+			pending_road_preview = RoadPlanner.demolish_preview(region, link_id)
+			map_view.set_road_preview(-1, PackedVector2Array(), pending_road_preview)
+			_update_road_status()
+		_:
+			_update_road_status()
+
+
+func _on_road_empty_clicked(world_position: Vector2) -> void:
+	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
+	if tool_name == "Junction":
+		var result: Dictionary = RoadPlanner.add_junction(region, world_position)
+		road_status_label.text = "Junction added." if result["ok"] else result["reason"]
+		if result["ok"]:
+			_rebuild_after_road_change()
+	elif (tool_name == "Arterial" or tool_name == "Highway") and road_start_node >= 0:
+		road_waypoints.append(world_position)
+		map_view.set_road_preview(road_start_node, road_waypoints, {})
+		_update_road_status()
+
+
+func _on_road_build_pressed() -> void:
+	if pending_road_preview.get("kind", "") == RoadPlanner.DEMOLISH:
+		var result: Dictionary = RoadPlanner.demolish(region, pending_road_preview["target_link_id"])
+		if not result["ok"]:
+			road_status_label.text = result["reason"]
+			return
+		selected_road_link_id = -1
+		map_view.set_selected_road_link(-1)
+		_cancel_road_preview()
+		_rebuild_after_road_change()
+		road_status_label.text = "Road demolished. %d neighborhood road group%s remain." % [result["components_after"], "s" if result["components_after"] != 1 else ""]
+		return
+	var result: Dictionary = RoadPlanner.commit(region, pending_road_preview, _current_day_key())
+	if not result["ok"]:
+		road_status_label.text = result["reason"]
+		return
+	var project = result["project"]
+	_cancel_road_preview()
+	map_view.queue_redraw()
+	_refresh_region_summary()
+	road_status_label.text = "%s funded. Opens in %d days." % [project.kind, project.days_remaining(_current_day_key())]
+
+
+func _cancel_road_preview() -> void:
+	road_start_node = -1
+	road_waypoints.clear()
+	pending_road_preview.clear()
+	if map_view != null:
+		map_view.set_road_preview(-1, PackedVector2Array(), {})
+	_update_road_status()
+
+
+func _update_road_status() -> void:
+	if road_status_label == null or region == null:
+		return
+	road_build_button.disabled = pending_road_preview.is_empty() or not pending_road_preview.get("ok", false) or region.treasury < float(pending_road_preview.get("cost", 0))
+	if not pending_road_preview.is_empty():
+		if not pending_road_preview.get("ok", false):
+			road_status_label.text = pending_road_preview["reason"]
+			return
+		if pending_road_preview.get("kind", "") == RoadPlanner.DEMOLISH:
+			road_status_label.text = "Remove %.1f km %s  •  No refund  •  Save $%s/day  •  %d road group%s after" % [
+				pending_road_preview["length_km"], pending_road_preview["road_class"], _format_count(roundi(pending_road_preview["upkeep_saved"])), pending_road_preview["components_after"], "s" if pending_road_preview["components_after"] != 1 else ""]
+			return
+		pending_road_preview["open_day_key"] = _current_day_key() + int(pending_road_preview["days"])
+		var opening: Dictionary = Time.get_datetime_dict_from_unix_time(int(pending_road_preview["open_day_key"]) * 86400)
+		road_status_label.text = "$%s  •  Opens %d/%d/%d  •  %d days%s" % [
+			_format_count(pending_road_preview["cost"]), opening["year"], opening["month"], opening["day"], pending_road_preview["days"], "  •  Insufficient funds" if road_build_button.disabled else ""]
+	elif road_start_node >= 0:
+		road_status_label.text = "Click another node to finish; click empty map for a waypoint. Esc cancels."
+	elif road_tool_selector.get_item_text(road_tool_selector.selected) == "Demolish":
+		road_status_label.text = "Click an open road to preview demolition."
+	else:
+		road_status_label.text = "Draw roads between nodes  •  Junctions connect arterials  •  Highways need interchanges"
+
+
+func _rebuild_after_road_change() -> void:
+	AccessibilityCalculator.recalculate(region)
+	var day_result: Dictionary = RoadTrafficCalculator.build_day(region, calendar_clock.unix_seconds, flow_profile)
+	flow_profile = day_result["flow"]
+	traffic_profile = day_result["traffic"]
+	NeighborhoodDynamics.refresh_desirability(region)
+	_refresh_region_summary()
+	next_day_profile = null
+	next_traffic_profile = null
+	map_view.set_flow_profile(flow_profile)
+	map_view.set_traffic_profile(traffic_profile)
+	flow_timeline.set_profile(flow_profile)
+	_ensure_day_profiles()
+	_refresh_inspector(false)
+	map_view.queue_redraw()
+
+
+func _refresh_inspector(reset_scroll: bool = true) -> void:
+	if selected_road_link_id >= 0 and map_mode_selector.selected == 0:
+		_show_road_inspector(selected_road_link_id)
+	else:
+		_on_neighborhood_selected(map_view.selected_id, reset_scroll)
+
+
+func _show_road_inspector(link_id: int) -> void:
+	var index: int = -1
+	for link_index in range(region.road_links.size()):
+		if region.road_links[link_index].id == link_id:
+			index = link_index
+			break
+	if index < 0:
+		return
+	var link = region.road_links[index]
+	var hour: int = calendar_clock.get_hour()
+	var volume: Vector2 = traffic_profile.interpolated_volume(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
+	var time: Vector2 = traffic_profile.interpolated_link_time(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
+	var capacity: float = (1800.0 if link.road_class == RoadLinkData.HIGHWAY else 900.0) * link.lanes_per_direction
+	var project_text := ""
+	for project in region.road_projects:
+		if project.target_link_id == link_id:
+			project_text += "\n%s: %d days left" % [project.kind, project.days_remaining(_current_day_key())]
+	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\n\n[color=#78c8dc][b]CURRENT HOUR[/b][/color]\nForward: %s vehicles/h (%.0f%%)\nReverse: %s vehicles/h (%.0f%%)\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
+		link.road_class, link.id, link.length_km, link.lanes_per_direction, _format_count(roundi(capacity)),
+		_format_count(roundi(volume.x)), 100.0 * volume.x / capacity, _format_count(roundi(volume.y)), 100.0 * volume.y / capacity,
+		time.x, time.y, link.length_km * 60.0 / (90.0 if link.road_class == RoadLinkData.HIGHWAY else 50.0),
+		_format_count(roundi(link.length_km * link.lanes_per_direction * (600.0 if link.road_class == RoadLinkData.HIGHWAY else 200.0))), project_text]
 
 
 func _format_count(value: int) -> String:
