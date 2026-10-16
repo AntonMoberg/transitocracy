@@ -1,6 +1,6 @@
 extends SceneTree
 
-var failures: int = 0
+var failures := 0
 
 
 func _initialize() -> void:
@@ -8,170 +8,80 @@ func _initialize() -> void:
 
 
 func _run_checks() -> void:
-	var main_scene: PackedScene = load("res://scenes/main.tscn")
-	var main = main_scene.instantiate()
+	var main = load("res://scenes/main.tscn").instantiate()
 	root.add_child(main)
 	main._on_play_pressed()
-	main.get_window().mode = Window.MODE_WINDOWED
-	main.get_window().size = Vector2i(1024, 700)
-	main.get_window().content_scale_size = Vector2i(1024, 700)
 	await process_frame
-	_check(main.map_view.size.x > 0 and main.map_view.size.y > 0, "map must have visible layout size")
-	_check(main.flow_timeline.size.x > 0 and main.flow_timeline.size.y > 0, "hour chart must have visible layout size")
-	_check(main.region.cities.size() == 8 and main.region.neighborhoods.size() == 64, "main scene must generate eight cities with eight neighborhoods each")
-	_check(main.purpose_selector.get_item_text(0) == "All" and main.purpose_selector.get_item_text(1) == "Work" and main.purpose_selector.get_item_text(2) == "Commercial" and main.purpose_selector.get_item_text(3) == "Social", "flow filter must expose the four requested purposes")
-	_check(main.calendar_label.text.contains("2030") and main.calendar_label.text.contains("07:00"), "calendar must display its initial date and hour")
-	_send_key(main, KEY_SPACE)
-	_check(main.playing and main.play_button.text == "Pause", "Space must resume the simulation")
-	main._process(0.5)
-	_check(main.calendar_clock.get_hour() == 7 and main.calendar_clock.get_minute() == 30, "half a second at 1× must advance the clock by 30 minutes")
-	_check(main.calendar_label.text.contains("07:30") and is_equal_approx(main.map_view.hour_fraction, 0.5), "clock and map must show the interpolated half-hour")
-	_send_key(main, KEY_SPACE)
-	_check(not main.playing and main.play_button.text == "Play", "Space must pause at the current minute")
-	main._process(10.0)
-	_check(main.calendar_clock.get_minute() == 30, "paused time must remain frozen")
-	_send_key(main, KEY_SPACE, true)
-	_check(not main.playing, "holding Space must not repeatedly toggle playback")
-	_send_key(main, KEY_2)
-	_check(is_equal_approx(main.speed_multiplier, 4.0) and main.speed_selector.selected == 1 and not main.playing, "2 must select 4× speed without resuming")
-	_send_key(main, KEY_3)
-	_check(is_equal_approx(main.speed_multiplier, 16.0) and main.speed_selector.selected == 2, "3 must select 16× speed")
-	_send_key(main, KEY_4)
-	_check(is_equal_approx(main.speed_multiplier, 64.0) and main.speed_selector.selected == 3 and not main.playing, "4 must select 64× speed without resuming")
-	_send_key(main, KEY_KP_5)
-	_check(is_equal_approx(main.speed_multiplier, 256.0) and main.speed_selector.selected == 4, "5 and keypad 5 must select 256× speed")
-	_send_key(main, KEY_KP_1)
-	_check(is_equal_approx(main.speed_multiplier, 1.0) and main.speed_selector.selected == 0, "1 must select normal speed")
-	_send_key(main, KEY_SPACE)
-	_check(main.playing and main.play_button.text == "Pause", "Space must resume the simulation")
-	main._process(0.25)
-	_check(main.calendar_clock.get_hour() == 7 and main.calendar_clock.get_minute() == 45, "resuming must continue from the paused minute")
-	_send_key(main, KEY_2)
-	main._process(0.0625)
-	_check(main.calendar_clock.get_hour() == 8 and main.calendar_clock.get_minute() == 0, "4× playback must advance from the current minute without resetting it")
-	_send_key(main, KEY_1)
-	main.seed_input.get_line_edit().grab_focus()
-	_send_key(main, KEY_5)
-	_send_key(main, KEY_SPACE)
-	_check(is_equal_approx(main.speed_multiplier, 1.0) and main.playing, "shortcuts must not interfere with seed entry")
-	main.seed_input.get_line_edit().release_focus()
-	main.calendar_clock.set_time(23, 30)
-	main._sync_clock_view()
-	var tomorrow_profile = main.next_day_profile
-	main._process(0.5)
-	_check(main.calendar_clock.get_hour() == 0 and main.calendar_clock.get_minute() == 0 and main.flow_profile != tomorrow_profile and main.flow_profile.active_day_key == tomorrow_profile.active_day_key, "midnight must rebuild tomorrow's flow from updated neighborhood statistics")
-	_check(main.dynamics_label.text.contains("Today:") and main.inspector.text.contains("Desirability:"), "daily migration and desirability must be visible")
-	var earlier_desirability: float = main.region.neighborhoods[0].desirability
-	main.tax_input.value = 40
-	_check(is_equal_approx(main.region.income_tax_rate, 0.4) and main.region.neighborhoods[0].desirability < earlier_desirability, "tax control must update neighborhood desirability immediately")
-	main.tax_input.value = 10
-	_send_key(main, KEY_SPACE)
-	main._on_purpose_selected(1)
-	main.map_view.set_hour(8)
-	var morning_flows: Array[Dictionary] = main.map_view._get_net_flows()
-	var has_outgoing_dash := false
-	for flow in morning_flows:
-		if main.map_view._is_outgoing_from_selected(flow):
-			has_outgoing_dash = true
-	main.map_view.set_hour(17)
-	var evening_flows: Array[Dictionary] = main.map_view._get_net_flows()
-	var has_incoming_solid := false
-	for flow in evening_flows:
-		if flow["destination"] == main.map_view.selected_id and not main.map_view._is_outgoing_from_selected(flow):
-			has_incoming_solid = true
-	var evening_by_pair: Dictionary = {}
-	for flow in evening_flows:
-		evening_by_pair[flow["pair_key"]] = flow
-	_check(morning_flows.size() > 0, "map must display net commute arrows at the morning peak")
-	_check(has_outgoing_dash and has_incoming_solid, "outbound and inbound routes must receive different line styles")
-	var matched_pairs := 0
-	for flow in morning_flows:
-		if not evening_by_pair.has(flow["pair_key"]):
-			continue
-		matched_pairs += 1
-		var reverse_flow: Dictionary = evening_by_pair[flow["pair_key"]]
-		_check(flow["origin"] == reverse_flow["destination"] and flow["destination"] == reverse_flow["origin"], "map arrows must reverse at the evening peak")
-	_check(matched_pairs > 0, "map must show the same neighborhood pairs at both rush hours")
-	main._on_purpose_selected(2)
-	_check(main.map_view.selected_purpose == "Commercial" and main.map_view._get_net_flows().size() > 0, "commercial filter must display trips to retail destinations")
-	_check(main.flow_timeline.selected_purpose == "Commercial" and main.flow_detail_label.text.contains("Commercial"), "chart and neighborhood counts must follow the selected purpose")
-	_check(is_equal_approx(main.flow_timeline._hourly_values("Commercial")[12], main.flow_profile.get_hourly_total(12, "Commercial")), "commercial chart must plot only commercial trips")
-	main._on_purpose_selected(3)
-	main.map_view.set_hour(7)
-	var early_social_flows: Array[Dictionary] = main.map_view._get_net_flows()
-	_check(early_social_flows.size() > main.region.neighborhoods.size(), "quiet-hour social travel must still show multiple residential routes")
-	early_social_flows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["trips"] > b["trips"])
-	var displayed_social_flows: Array[Dictionary] = main.map_view._choose_flows_for_display(early_social_flows)
-	var covered_neighborhoods: Dictionary = {}
-	for flow in displayed_social_flows:
-		covered_neighborhoods[flow["origin"]] = true
-		covered_neighborhoods[flow["destination"]] = true
-	for neighborhood in main.region.neighborhoods:
-		if neighborhood.population > 0:
-			_check(covered_neighborhoods.has(neighborhood.id), "social arrows should reach every populated neighborhood")
-	main.map_view.set_hour(20)
-	var evening_social_flows: Array[Dictionary] = main.map_view._get_net_flows()
-	evening_social_flows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["trips"] > b["trips"])
-	_check(main.map_view.selected_purpose == "Social" and evening_social_flows.size() > 0, "social filter must display residential visit flows")
-	_check(main.map_view._choose_flows_for_display(evening_social_flows).size() > displayed_social_flows.size(), "social map must show more routes at the evening peak than at the quiet morning hour")
-	_check(main.flow_detail_label.text.contains("Social") and main.hourly_trip_label.text.contains("social"), "social counts must appear in the inspector and hourly summary")
-	_check(main.flow_timeline.selected_purpose == "Social" and is_equal_approx(main.flow_timeline._hourly_values("Social")[20], main.flow_profile.get_hourly_total(20, "Social")), "social filter must show only the social line")
-	main._on_purpose_selected(0)
-	main.map_view.set_hour(17)
-	var all_map_purposes: Dictionary = {}
-	for flow in main.map_view._get_net_flows():
-		all_map_purposes[flow["purpose"]] = true
-	_check(all_map_purposes.has("Work") and all_map_purposes.has("Commercial") and all_map_purposes.has("Social"), "All map must preserve each trip type for purpose colors")
-	_check(main.map_view._purpose_color("Work") != main.map_view._purpose_color("Commercial") and main.map_view._purpose_color("Commercial") != main.map_view._purpose_color("Social"), "trip types must have distinct map colors")
-	var total_chart_value: float = main.flow_timeline._hourly_values("All")[20]
-	var combined_value: float = main.flow_profile.get_hourly_total(20, "Work") + main.flow_profile.get_hourly_total(20, "Commercial") + main.flow_profile.get_hourly_total(20, "Social")
-	_check(main.flow_timeline.selected_purpose == "All" and absf(total_chart_value - combined_value) < 0.01, "All chart must combine all three trip purposes")
-	for neighborhood in main.region.neighborhoods:
-		main.map_view.neighborhood_selected.emit(neighborhood.id)
-		_check(main.inspector.text.contains(neighborhood.name), "selection must update the inspector for %s" % neighborhood.name)
-		_check(main.inspector.autowrap_mode == TextServer.AUTOWRAP_OFF, "inspector stats must keep fixed line breaks")
-		for line in main.inspector.get_parsed_text().split("\n"):
-			var font_size := 22 if line == neighborhood.name else 14
-			var line_width: float = main.inspector.get_theme_default_font().get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
-			_check(line_width + 18.0 <= main.inspector.size.x, "inspector line must fit without clipping: %s" % line)
-	_check(main.flow_detail_label.autowrap_mode == TextServer.AUTOWRAP_OFF, "flow summary must keep fixed line breaks")
-	for line in main.flow_detail_label.text.split("\n"):
-		var line_width: float = main.flow_detail_label.get_theme_default_font().get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
-		_check(line_width + 18.0 <= main.flow_detail_label.size.x, "flow summary line must fit without clipping: %s" % line)
-	var inspector_scroll: VScrollBar = main.inspector.get_v_scroll_bar()
-	_check(inspector_scroll.max_value > inspector_scroll.page, "minimum window size must keep inspector stats scrollable")
-	inspector_scroll.value = maxf(0.0, (inspector_scroll.max_value - inspector_scroll.page) * 0.5)
-	var previous_scroll: float = inspector_scroll.value
-	main._on_neighborhood_selected(main.map_view.selected_id, false)
-	_check(is_equal_approx(inspector_scroll.value, previous_scroll), "daily stat refresh must keep the inspector scroll position")
-	var tax_worker: Thread = main.pending_day_thread
-	main.tax_input.value = 12.0
-	_check(main.pending_day_thread != null and main.pending_day_thread != tax_worker and main.pending_day_key == main.last_dynamics_day_key + 1, "tax changes must replace the queued next-day calculation")
+	_check(main.region.region_ids.size() == 4 and main.region.county_ids.size() == 8 and main.region.cities.size() == 16 and main.region.neighborhoods.size() == 96, "main scene must generate the state hierarchy")
+	_check(main.flow_timeline.size.x > 0 and main.map_view.size.y > 0, "timeline and map must be visible")
+	_check(main.selected_jurisdiction_id == 0 and main.map_view.detail_level == "Neighborhood" and main.inspector.text.contains("REGIONS"), "the full map must start with the state inspector")
+	_check(main.state_tax_controls.visible and not main.jurisdiction_policy_controls.visible and not main.toll_controls.visible and not main.flow_detail_label.visible, "only controls for the selected scope and map mode should be visible")
+	_check(main.purpose_selector.item_count == 4 and main.purpose_selector.get_item_text(3) == "Social", "purpose filter must retain all trip types")
+	var first_region_id: int = main.region.region_ids[0]
+	var region_label: Rect2 = main.map_view._jurisdiction_label_rect(main.region.jurisdictions[first_region_id])
+	_check(main.map_view._hit_jurisdiction_label(region_label.get_center()) == first_region_id, "region labels must be clickable on the full map")
+	_check(main.map_view._hit_jurisdiction_border(main.map_view._world_to_screen(Vector2(120, 24))) >= 0, "region borders must be selectable")
+	var mouse_click := InputEventMouseButton.new()
+	mouse_click.button_index = MOUSE_BUTTON_LEFT
+	mouse_click.position = region_label.get_center()
+	mouse_click.pressed = true
+	main.map_view._gui_input(mouse_click)
+	mouse_click.pressed = false
+	main.map_view._gui_input(mouse_click)
+	_check(main.selected_jurisdiction_id == first_region_id and main.map_view.detail_level == "Neighborhood" and main.fiscal_label.text.contains("funds"), "clicking a region label must show its finances without changing the map")
+	_check(main.inspector.text.contains("jurisdiction:%d" % main.region.jurisdictions[first_region_id].child_ids[0]), "the selected region must list its counties")
+	var distant_neighborhood = main.region.neighborhoods[-1]
+	_check(main.map_view._hit_test(main.map_view._world_to_screen(distant_neighborhood.position_km)) == distant_neighborhood.id, "selecting a region must leave distant neighborhoods visible and clickable")
+	var current_time: int = main.calendar_clock.unix_seconds
 	main.flow_timeline.time_selected.emit(17, 30)
-	_check(main.calendar_clock.get_hour() == 17 and main.calendar_clock.get_minute() == 30 and not main.playing, "chart scrubbing must set the minute and pause playback")
-	var half_hour_x: float = main.flow_timeline.LEFT_MARGIN + 17.5 * (main.flow_timeline.size.x - main.flow_timeline.LEFT_MARGIN - main.flow_timeline.RIGHT_MARGIN) / 24.0
-	_check(main.flow_timeline._time_at(half_hour_x) == Vector2i(17, 30), "chart position must map to the corresponding minute")
-	main._on_speed_selected(2)
-	_check(is_equal_approx(main.speed_multiplier, 16.0), "16× speed must advance sixteen hours per second")
-	var before_day: int = main.last_dynamics_day_key
-	var before_population: int = main.region.get_region_totals()["population"]
-	_send_key(main, KEY_4)
-	_check(is_equal_approx(main.speed_multiplier, 64.0) and main.speed_selector.get_item_text(3) == "64×", "4 must expose 64× speed in the selector")
+	_check(main.calendar_clock.unix_seconds == current_time and not main.playing and main.inspected_hour == 17 and main.calendar_label.text.contains("forecast"), "chart scrubbing must inspect future demand without advancing the clock")
 	main._on_play_pressed()
-	main._process(0.125)
-	_check(main.calendar_clock.get_hour() == 1 and main.calendar_clock.get_minute() == 30 and main.last_dynamics_day_key == before_day + 1, "64× speed must advance eight simulated hours and process midnight")
-	_check(is_equal_approx(main.region.income_tax_rate, 0.12), "queued midnight must use the edited tax rate")
+	main._sync_clock_view()
+	_check(main.playing and main.inspected_hour == -1, "Play must return to the actual time")
 	main._on_play_pressed()
-	_send_key(main, KEY_5)
-	_check(is_equal_approx(main.speed_multiplier, 256.0) and main.speed_selector.get_item_text(4) == "256×" and not main.playing, "5 must expose 256× speed without resuming")
-	main._on_play_pressed()
-	main._process(0.125)
-	_check(main.calendar_clock.get_hour() == 9 and main.calendar_clock.get_minute() == 30, "256× speed must advance 32 simulated hours in one eighth of a second")
-	_check(main.last_dynamics_day_key == before_day + 2 and main.region.get_region_totals()["population"] != before_population, "higher speeds must apply daily migration across each midnight")
-	main.seed_input.value = 1730
-	main._on_generate_pressed()
-	_check(main.region.generation_seed == 1730, "Generate must use the entered seed")
-	_check(main.map_view.selected_id == 0, "regeneration must select the first neighborhood")
+	main._discard_pending_traffic()
+	var frontier_bin: int = main.traffic_state.next_bin
+	_check(frontier_bin > main.traffic_state.first_recorded_bin and frontier_bin < 96, "a completed bin must exist before testing a traffic wait")
+	main.calendar_clock.set_time(frontier_bin / 4, frontier_bin % 4 * 15)
+	main._sync_clock_view()
+	var displayed_bin: int = main.map_view.selected_hour * 4 + floori(main.map_view.hour_fraction * 4.0)
+	_check(main.map_view._is_recorded_time() and displayed_bin == frontier_bin - 1, "a waiting clock must keep showing the last completed road state")
+	_check(main.flow_timeline.actual_hour * 4 + floori(main.flow_timeline.actual_fraction * 4.0) == frontier_bin, "the timeline must keep the actual clock position")
+	main.inspected_hour = frontier_bin / 4
+	main.inspected_minute = frontier_bin % 4 * 15
+	main._sync_clock_view()
+	_check(not main.map_view._is_recorded_time(), "explicit inspection of an uncalculated bin must stay marked as a forecast")
+	main.inspected_hour = -1
+	main._sync_clock_view()
+	main.scope_breadcrumb.meta_clicked.emit("jurisdiction:0")
+	main.tax_input.value = 12.0
+	_check(is_equal_approx(main.region.jurisdictions[0].income_tax_rate, 0.10) and not main.region.pending_policy_changes.is_empty(), "state tax edits must wait until midnight")
+	var county_id: int = main.region.county_ids[0]
+	main.inspector.meta_clicked.emit("jurisdiction:%d" % first_region_id)
+	main.inspector.meta_clicked.emit("jurisdiction:%d" % county_id)
+	_check(main.selected_jurisdiction_id == county_id and main.map_view.detail_level == "Neighborhood" and not main.state_tax_controls.visible and main.jurisdiction_policy_controls.visible, "clicking a county must reveal its policies without changing map detail")
+	var county_label: Rect2 = main.map_view._jurisdiction_label_rect(main.region.jurisdictions[county_id])
+	_check(main.map_view._hit_jurisdiction_label(county_label.get_center()) == county_id, "county labels must be clickable")
+	main.policy_input.value = 8.0
+	_check(main.region.pending_policy_changes.any(func(change: Dictionary) -> bool: return int(change.get("jurisdiction_id", -1)) == county_id and change["property"] == "income_tax_rate"), "county policy control must queue an independent tax")
+	var city_id: int = main.region.city_jurisdiction_ids[0]
+	main.inspector.meta_clicked.emit("jurisdiction:%d" % city_id)
+	_check(main.selected_jurisdiction_id == city_id and main.map_view.detail_level == "Neighborhood" and main.inspector.text.contains("NEIGHBORHOODS"), "clicking a city must reveal its neighborhoods without filtering the map")
+	var city_label: Rect2 = main.map_view._jurisdiction_label_rect(main.region.jurisdictions[city_id])
+	_check(main.map_view._hit_jurisdiction_label(city_label.get_center()) == city_id, "city labels must be clickable")
+	var neighborhood_area_id: int = main.region.jurisdictions[city_id].child_ids[0]
+	main.inspector.meta_clicked.emit("jurisdiction:%d" % neighborhood_area_id)
+	_check(main.selected_jurisdiction_id == neighborhood_area_id and main.map_view.detail_level == "Neighborhood" and main.inspector.text.contains("HOUSING & WEALTH"), "clicking a neighborhood must open its statistics on the full map")
+	main.scope_breadcrumb.meta_clicked.emit("jurisdiction:%d" % city_id)
+	_check(main.selected_jurisdiction_id == city_id, "the breadcrumb must return from a neighborhood to its city")
+	main.policy_input.value = 5.0
+	_check(main.region.pending_policy_changes.any(func(change: Dictionary) -> bool: return int(change.get("jurisdiction_id", -1)) == city_id and change["property"] == "parking_fee"), "city fee control must queue a parking fee")
+	var link = main.region.road_links[0]
+	main._on_road_link_clicked(link.id, link.points[0].lerp(link.points[-1], 0.5))
+	_check(main.toll_forward_input.editable and main.toll_controls.visible and not main.jurisdiction_policy_controls.visible and not main.scope_breadcrumb.visible and main.toll_label.text.contains("Road"), "road selection must expose its toll controls without unrelated policies")
+	main.toll_forward_input.value = 7.0
+	_check(main.region.pending_policy_changes.any(func(change: Dictionary) -> bool: return int(change.get("link_id", -1)) == link.id and change["property"] == "toll_forward"), "road toll edit must be queued for the next checkpoint")
+	_check(main.inspector.text.contains("Owner:") and (main.inspector.text.contains("Forward queue:") or main.inspector.text.contains("still uncalculated")), "road inspector must show ownership and clearly mark traffic that is recalculating")
 	if failures == 0:
 		print("UI smoke checks passed.")
 	quit(1 if failures > 0 else 0)
@@ -181,11 +91,3 @@ func _check(condition: bool, description: String) -> void:
 	if not condition:
 		failures += 1
 		push_error(description)
-
-
-func _send_key(main, keycode: Key, repeated: bool = false) -> void:
-	var event := InputEventKey.new()
-	event.keycode = keycode
-	event.pressed = true
-	event.echo = repeated
-	main._input(event)

@@ -13,16 +13,18 @@ func _initialize() -> void:
 	var low_tax = _new_region()
 	var high_tax = _new_region()
 	var repeat = _new_region()
-	low_tax.income_tax_rate = 0.0
-	high_tax.income_tax_rate = 0.4
-	repeat.income_tax_rate = 0.0
+	low_tax.jurisdictions[0].income_tax_rate = 0.0
+	high_tax.jurisdictions[0].income_tax_rate = 0.4
+	repeat.jurisdictions[0].income_tax_rate = 0.0
 	NeighborhoodDynamics.refresh_desirability(low_tax)
 	NeighborhoodDynamics.refresh_desirability(high_tax)
 	NeighborhoodDynamics.refresh_desirability(repeat)
 	_check(low_tax.neighborhoods[0].desirability > high_tax.neighborhoods[0].desirability, "higher income tax must lower affordability and desirability")
 	var original_population: int = baseline.get_region_totals()["population"]
 	var original_profile = TripFlowCalculator.build(baseline)
-	for _day in range(90):
+	for day_index in range(90):
+		for area in [low_tax, high_tax, repeat]:
+			area.current_day_key = 21915 + day_index
 		NeighborhoodDynamics.advance_day(low_tax)
 		NeighborhoodDynamics.advance_day(high_tax)
 		NeighborhoodDynamics.advance_day(repeat)

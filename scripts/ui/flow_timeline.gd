@@ -12,6 +12,8 @@ var next_day_profile
 var selected_purpose: String = FlowProfile.ALL
 var selected_hour: int = 8
 var hour_fraction: float = 0.0
+var actual_hour: int = 8
+var actual_fraction: float = 0.0
 var weekend: bool = false
 
 
@@ -47,6 +49,12 @@ func set_time(hour: int, fraction: float) -> void:
 	queue_redraw()
 
 
+func set_clock_time(hour: int, fraction: float) -> void:
+	actual_hour = clampi(hour, 0, 23)
+	actual_fraction = clampf(fraction, 0.0, 1.0)
+	queue_redraw()
+
+
 func set_weekend(value: bool) -> void:
 	weekend = value
 	queue_redraw()
@@ -66,6 +74,9 @@ func _draw() -> void:
 	var slot_width: float = chart_width / 24.0
 	var baseline: float = size.y - 22.0
 	var chart_height: float = maxf(1.0, baseline - 32.0)
+	var actual_x: float = LEFT_MARGIN + (actual_hour + actual_fraction) * slot_width
+	draw_rect(Rect2(Vector2(actual_x, 27.0), Vector2(maxf(0.0, size.x - RIGHT_MARGIN - actual_x), baseline - 25.0)), Color(0.50, 0.64, 0.80, 0.08))
+	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 185.0, 32.0), "Forecast →", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("9bb3c5"))
 	var values: PackedFloat32Array = _hourly_values(selected_purpose)
 	var peak: float = 1.0
 	for hour in range(25):
@@ -76,6 +87,7 @@ func _draw() -> void:
 		draw_line(Vector2(LEFT_MARGIN, guide_y), Vector2(size.x - RIGHT_MARGIN, guide_y), Color(0.65, 0.78, 0.89, 0.13), 1.0)
 	var points: PackedVector2Array = _curve_points(values, peak, baseline, chart_height, slot_width)
 	draw_polyline(points, line_color, 3.0, true)
+	draw_line(Vector2(actual_x, 27.0), Vector2(actual_x, baseline + 2.0), Color("f2b678", 0.8), 1.0)
 	var marker_x: float = LEFT_MARGIN + (selected_hour + hour_fraction) * slot_width
 	draw_line(Vector2(marker_x, 27), Vector2(marker_x, baseline + 2.0), Color(1.0, 1.0, 1.0, 0.78), 2.0)
 	for labeled_hour in [0, 6, 12, 18, 24]:

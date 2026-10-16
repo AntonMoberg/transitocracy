@@ -2,6 +2,9 @@ extends RefCounted
 
 var id: int = -1
 var city_id: int = -1
+var county_id: int = -1
+var region_id: int = -1
+var jurisdiction_id: int = -1
 var name: String = ""
 var position_km: Vector2 = Vector2.ZERO
 var land_area_ha: float = 0.0
@@ -18,6 +21,7 @@ var jobs: int = 0
 var jobs_by_skill: Dictionary = {"Entry": 0, "Skilled": 0, "Professional": 0}
 var shopping_attraction: float = 0.0 # Retail-equivalent occupied jobs in Commercial and Mixed zones.
 var monthly_rent: int = 0
+var assessed_home_value: float = 0.0
 
 # Aggregate household finances and migration state; no individual households are simulated.
 var average_monthly_income: int = 0

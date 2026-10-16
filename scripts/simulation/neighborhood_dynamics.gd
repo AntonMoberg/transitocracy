@@ -1,5 +1,7 @@
 extends RefCounted
 
+const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
+
 # One aggregate update per simulated day. Income is a proxy derived from the
 # local job mix; tax, housing costs, job access and amenities affect migration.
 const JOB_MONTHLY_INCOME = {"Entry": 3000.0, "Skilled": 4300.0, "Professional": 6500.0}
@@ -27,34 +29,38 @@ static func initialize(region) -> void:
 		neighborhood.last_population_change = 0
 	region.last_population_change = 0
 	region.last_household_change = 0
+	FiscalCalculator.assess_homes(region)
 	refresh_desirability(region)
 
 
 static func refresh_desirability(region) -> void:
 	var max_access := _maximum_access(region)
-	region.daily_tax_revenue = 0.0
+	FiscalCalculator.refresh_tax_estimates(region)
 	for neighborhood in region.neighborhoods:
-		var after_tax_income: float = float(neighborhood.average_monthly_income) * (1.0 - region.income_tax_rate)
-		var rent_burden: float = float(neighborhood.monthly_rent) / maxf(1.0, after_tax_income)
+		var after_tax_income: float = FiscalCalculator.after_income_tax(region, neighborhood)
+		var rent_burden: float = (float(neighborhood.monthly_rent) + FiscalCalculator.property_cost_monthly(region, neighborhood)) / maxf(1.0, after_tax_income)
 		var affordability: float = clampf((0.55 - rent_burden) / 0.35, 0.0, 1.0)
 		var wealth_buffer: float = clampf(neighborhood.average_household_wealth / maxf(1.0, float(neighborhood.average_monthly_income) * 4.0), 0.0, 1.0)
 		var vacancy: float = clampf(float(neighborhood.housing_capacity - neighborhood.households) / maxf(1.0, float(neighborhood.housing_capacity)) / 0.25, 0.0, 1.0)
 		var amenities: float = clampf((float(neighborhood.zone_shares.get("Commercial", 0)) + 0.5 * float(neighborhood.zone_shares.get("Mixed", 0))) / 40.0, 0.0, 1.0)
 		var access: float = region.accessibility[neighborhood.id] / max_access
-		neighborhood.desirability = clampf(10.0 + 30.0 * access + 25.0 * affordability + 10.0 * wealth_buffer + 10.0 * vacancy + 10.0 * amenities - 30.0 * region.income_tax_rate, 0.0, 100.0)
-		region.daily_tax_revenue += float(neighborhood.households * neighborhood.average_monthly_income) * region.income_tax_rate / 30.0
+		var county = region.jurisdiction_for_neighborhood(neighborhood.id, "County")
+		neighborhood.desirability = clampf(10.0 + 30.0 * access + 25.0 * affordability + 10.0 * wealth_buffer + 10.0 * vacancy + 10.0 * amenities - 30.0 * (region.jurisdictions[0].income_tax_rate + county.income_tax_rate), 0.0, 100.0)
 
 
 static func advance_day(region) -> void:
 	region.last_household_change = 0
 	region.last_population_change = 0
 	# Calculate each neighborhood against the same opening-day state.
+	var date: Dictionary = Time.get_datetime_dict_from_unix_time(region.current_day_key * 86400)
+	if int(date["day"]) == 1:
+		FiscalCalculator.assess_homes(region)
 	refresh_desirability(region)
 	for neighborhood in region.neighborhoods:
 		var old_households: int = neighborhood.households
 		var old_population: int = neighborhood.population
-		var after_tax_income: float = float(neighborhood.average_monthly_income) * (1.0 - region.income_tax_rate)
-		var monthly_surplus: float = after_tax_income - float(neighborhood.monthly_rent) - 0.35 * float(neighborhood.average_monthly_income) - 500.0
+		var after_tax_income: float = FiscalCalculator.after_income_tax(region, neighborhood)
+		var monthly_surplus: float = after_tax_income - float(neighborhood.monthly_rent) - FiscalCalculator.property_cost_monthly(region, neighborhood) - 0.35 * float(neighborhood.average_monthly_income) - 500.0
 		neighborhood.average_household_wealth = clampf(neighborhood.average_household_wealth + monthly_surplus / 30.0 * 0.35, 0.0, float(neighborhood.average_monthly_income) * 12.0)
 
 		var migration_pressure: float = (neighborhood.desirability - NEUTRAL_DESIRABILITY) / NEUTRAL_DESIRABILITY

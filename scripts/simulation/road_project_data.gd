@@ -18,6 +18,7 @@ var position_km: Vector2 = Vector2.ZERO
 var cost: int = 0
 var start_day_key: int = 0
 var open_day_key: int = 0
+var owner_jurisdiction_id: int = 0
 
 
 func days_remaining(day_key: int) -> int:

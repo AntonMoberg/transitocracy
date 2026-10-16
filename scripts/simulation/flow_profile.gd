@@ -23,6 +23,12 @@ var hourly_od: Array = []
 var hourly_work_od: Array = []
 var hourly_shopping_od: Array = []
 var hourly_social_od: Array = []
+var hourly_work_outbound_od: Array = []
+var hourly_work_return_od: Array = []
+var hourly_shopping_outbound_od: Array = []
+var hourly_shopping_return_od: Array = []
+var hourly_social_outbound_od: Array = []
+var hourly_social_return_od: Array = []
 var hourly_trips: PackedFloat32Array = PackedFloat32Array()
 var hourly_work_trips: PackedFloat32Array = PackedFloat32Array()
 var hourly_shopping_trips: PackedFloat32Array = PackedFloat32Array()
@@ -60,6 +66,22 @@ func get_interpolated_hour_matrix(hour: int, fraction: float, purpose: String = 
 			row[destination_id] = lerpf(current_matrix[origin_id][destination_id], next_matrix[origin_id][destination_id], blend)
 		blended_matrix.append(row)
 	return blended_matrix
+
+
+func get_interpolated_neighborhood_totals(neighborhood_id: int, hour: int, fraction: float, purpose: String = ALL, next_day_profile = null) -> Vector3:
+	var current_matrix: Array = get_hour_matrix(hour, purpose)
+	var next_matrix: Array = next_day_profile.get_hour_matrix(0, purpose) if hour == 23 and next_day_profile != null else get_hour_matrix((hour + 1) % 24, purpose)
+	var current_out := 0.0
+	var current_in := 0.0
+	var next_out := 0.0
+	var next_in := 0.0
+	for other_id in range(current_matrix.size()):
+		current_out += current_matrix[neighborhood_id][other_id]
+		current_in += current_matrix[other_id][neighborhood_id]
+		next_out += next_matrix[neighborhood_id][other_id]
+		next_in += next_matrix[other_id][neighborhood_id]
+	var blend: float = clampf(fraction, 0.0, 1.0)
+	return Vector3(lerpf(current_out, next_out, blend), lerpf(current_in, next_in, blend), lerpf(current_matrix[neighborhood_id][neighborhood_id], next_matrix[neighborhood_id][neighborhood_id], blend))
 
 
 func get_hourly_total(hour: int, purpose: String = ALL) -> float:

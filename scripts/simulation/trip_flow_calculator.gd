@@ -1,5 +1,7 @@
 extends RefCounted
 
+const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
+
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 
@@ -170,7 +172,11 @@ static func _build_shopping_od(region, visits_per_person: float) -> Array[Packed
 		row.resize(count)
 		var row_weight := 0.0
 		for destination_id in range(count):
-			row[destination_id] = attractiveness[destination_id] * exp(-region.travel_times[origin_id][destination_id] / TRAVEL_TIME_DECAY_MINUTES)
+			var county = region.jurisdiction_for_neighborhood(destination_id, "County")
+			var city = region.jurisdiction_for_neighborhood(destination_id, "City")
+			var district = region.jurisdiction_for_neighborhood(destination_id, "Neighborhood")
+			var extra_cost: float = FiscalCalculator.shopping_spend(region, origin_id) * (county.sales_tax_rate if county != null else 0.0) + (city.parking_fee if city != null else 0.0) + (district.parking_fee if district != null else 0.0)
+			row[destination_id] = attractiveness[destination_id] * exp(-(region.travel_times[origin_id][destination_id] + extra_cost / 0.40) / TRAVEL_TIME_DECAY_MINUTES)
 			row_weight += row[destination_id]
 		if row_weight > 0.0:
 			var visits: float = region.neighborhoods[origin_id].population * visits_per_person
@@ -190,7 +196,10 @@ static func _build_social_od(region, visits_per_person: float) -> Array[PackedFl
 		for destination_id in range(count):
 			var destination_population: float = region.neighborhoods[destination_id].population
 			var local_weight := LOCAL_SOCIAL_DESTINATION_WEIGHT if origin_id == destination_id else 1.0
-			row[destination_id] = destination_population * exp(-region.travel_times[origin_id][destination_id] / TRAVEL_TIME_DECAY_MINUTES) * local_weight
+			var city = region.jurisdiction_for_neighborhood(destination_id, "City")
+			var district = region.jurisdiction_for_neighborhood(destination_id, "Neighborhood")
+			var extra_cost: float = (city.parking_fee if city != null else 0.0) + (district.parking_fee if district != null else 0.0)
+			row[destination_id] = destination_population * exp(-(region.travel_times[origin_id][destination_id] + extra_cost / 0.40) / TRAVEL_TIME_DECAY_MINUTES) * local_weight
 			row_weight += row[destination_id]
 		if row_weight > 0.0:
 			var visits: float = region.neighborhoods[origin_id].population * visits_per_person
@@ -264,6 +273,12 @@ static func _fill_hourly_matrices(profile, shopping_od: Array[PackedFloat32Array
 	profile.hourly_work_od.clear()
 	profile.hourly_shopping_od.clear()
 	profile.hourly_social_od.clear()
+	profile.hourly_work_outbound_od.clear()
+	profile.hourly_work_return_od.clear()
+	profile.hourly_shopping_outbound_od.clear()
+	profile.hourly_shopping_return_od.clear()
+	profile.hourly_social_outbound_od.clear()
+	profile.hourly_social_return_od.clear()
 	profile.hourly_trips.resize(24)
 	profile.hourly_work_trips.resize(24)
 	profile.hourly_shopping_trips.resize(24)
@@ -303,6 +318,12 @@ static func _fill_hourly_matrices(profile, shopping_od: Array[PackedFloat32Array
 		profile.hourly_work_od.append(result["work_matrix"])
 		profile.hourly_shopping_od.append(result["shopping_matrix"])
 		profile.hourly_social_od.append(result["social_matrix"])
+		profile.hourly_work_outbound_od.append(result["work_out_matrix"])
+		profile.hourly_work_return_od.append(result["work_return_matrix"])
+		profile.hourly_shopping_outbound_od.append(result["shopping_out_matrix"])
+		profile.hourly_shopping_return_od.append(result["shopping_return_matrix"])
+		profile.hourly_social_outbound_od.append(result["social_out_matrix"])
+		profile.hourly_social_return_od.append(result["social_return_matrix"])
 		profile.hourly_od.append(result["all_matrix"])
 		profile.hourly_work_trips[hour] = result["work_total"]
 		profile.hourly_shopping_trips[hour] = result["shopping_total"]
@@ -330,6 +351,12 @@ static func _build_hour(daily_work_od: Array[PackedFloat32Array], hour: int, cou
 	var work_matrix: Array[PackedFloat32Array] = []
 	var shopping_matrix: Array[PackedFloat32Array] = []
 	var social_matrix: Array[PackedFloat32Array] = []
+	var work_out_matrix: Array[PackedFloat32Array] = []
+	var work_return_matrix: Array[PackedFloat32Array] = []
+	var shopping_out_matrix: Array[PackedFloat32Array] = []
+	var shopping_return_matrix: Array[PackedFloat32Array] = []
+	var social_out_matrix: Array[PackedFloat32Array] = []
+	var social_return_matrix: Array[PackedFloat32Array] = []
 	var work_total := 0.0
 	var shopping_total := 0.0
 	var social_total := 0.0
@@ -346,14 +373,32 @@ static func _build_hour(daily_work_od: Array[PackedFloat32Array], hour: int, cou
 		var work_row := PackedFloat32Array()
 		var shopping_row := PackedFloat32Array()
 		var social_row := PackedFloat32Array()
+		var work_out_row := PackedFloat32Array()
+		var work_return_row := PackedFloat32Array()
+		var shopping_out_row := PackedFloat32Array()
+		var shopping_return_row := PackedFloat32Array()
+		var social_out_row := PackedFloat32Array()
+		var social_return_row := PackedFloat32Array()
 		all_row.resize(count)
 		work_row.resize(count)
 		shopping_row.resize(count)
 		social_row.resize(count)
+		work_out_row.resize(count)
+		work_return_row.resize(count)
+		shopping_out_row.resize(count)
+		shopping_return_row.resize(count)
+		social_out_row.resize(count)
+		social_return_row.resize(count)
 		for destination_id in range(count):
-			var work_trips: float = (daily_work_od[origin_id][destination_id] * work_outbound[hour] + daily_work_od[destination_id][origin_id] * work_return[hour]) * work_scale
-			var shopping_trips: float = shopping_od[origin_id][destination_id] * shopping_outbound[hour] + shopping_od[destination_id][origin_id] * shopping_return[hour]
-			var social_trips: float = social_od[origin_id][destination_id] * social_departures[hour] + social_od[destination_id][origin_id] * social_return_today + previous_social_od[destination_id][origin_id] * social_return_previous
+			work_out_row[destination_id] = daily_work_od[origin_id][destination_id] * work_outbound[hour] * work_scale
+			work_return_row[destination_id] = daily_work_od[destination_id][origin_id] * work_return[hour] * work_scale
+			shopping_out_row[destination_id] = shopping_od[origin_id][destination_id] * shopping_outbound[hour]
+			shopping_return_row[destination_id] = shopping_od[destination_id][origin_id] * shopping_return[hour]
+			social_out_row[destination_id] = social_od[origin_id][destination_id] * social_departures[hour]
+			social_return_row[destination_id] = social_od[destination_id][origin_id] * social_return_today + previous_social_od[destination_id][origin_id] * social_return_previous
+			var work_trips: float = work_out_row[destination_id] + work_return_row[destination_id]
+			var shopping_trips: float = shopping_out_row[destination_id] + shopping_return_row[destination_id]
+			var social_trips: float = social_out_row[destination_id] + social_return_row[destination_id]
 			work_row[destination_id] = work_trips
 			shopping_row[destination_id] = shopping_trips
 			social_row[destination_id] = social_trips
@@ -364,6 +409,12 @@ static func _build_hour(daily_work_od: Array[PackedFloat32Array], hour: int, cou
 		work_matrix.append(work_row)
 		shopping_matrix.append(shopping_row)
 		social_matrix.append(social_row)
+		work_out_matrix.append(work_out_row)
+		work_return_matrix.append(work_return_row)
+		shopping_out_matrix.append(shopping_out_row)
+		shopping_return_matrix.append(shopping_return_row)
+		social_out_matrix.append(social_out_row)
+		social_return_matrix.append(social_return_row)
 		all_matrix.append(all_row)
 	var peak_all := 1.0
 	var peak_work := 1.0
@@ -375,4 +426,4 @@ static func _build_hour(daily_work_od: Array[PackedFloat32Array], hour: int, cou
 			peak_work = maxf(peak_work, absf(work_matrix[first_id][second_id] - work_matrix[second_id][first_id]))
 			peak_shopping = maxf(peak_shopping, absf(shopping_matrix[first_id][second_id] - shopping_matrix[second_id][first_id]))
 			peak_social = maxf(peak_social, maxf(social_matrix[first_id][second_id], social_matrix[second_id][first_id]))
-	return {"all_matrix": all_matrix, "work_matrix": work_matrix, "shopping_matrix": shopping_matrix, "social_matrix": social_matrix, "work_total": work_total, "shopping_total": shopping_total, "social_total": social_total, "peak_all": peak_all, "peak_work": peak_work, "peak_shopping": peak_shopping, "peak_social": peak_social}
+	return {"all_matrix": all_matrix, "work_matrix": work_matrix, "shopping_matrix": shopping_matrix, "social_matrix": social_matrix, "work_out_matrix": work_out_matrix, "work_return_matrix": work_return_matrix, "shopping_out_matrix": shopping_out_matrix, "shopping_return_matrix": shopping_return_matrix, "social_out_matrix": social_out_matrix, "social_return_matrix": social_return_matrix, "work_total": work_total, "shopping_total": shopping_total, "social_total": social_total, "peak_all": peak_all, "peak_work": peak_work, "peak_shopping": peak_shopping, "peak_social": peak_social}

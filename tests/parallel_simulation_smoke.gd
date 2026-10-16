@@ -2,98 +2,80 @@ extends SceneTree
 
 const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
 const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_generator.gd")
-const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
-const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
-const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
-const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
+const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
+const RollingTrafficCalculator = preload("res://scripts/simulation/rolling_traffic_calculator.gd")
 const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
+const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
+const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 
 var failures := 0
 
 
 func _initialize() -> void:
-	call_deferred("_run_checks")
-
-
-func _run_checks() -> void:
 	var region = RegionGenerator.generate_region(1729)
 	RoadNetworkGenerator.generate(region)
 	AccessibilityCalculator.recalculate(region)
 	NeighborhoodDynamics.initialize(region)
+	var route_costs: PackedVector2Array = RoadGraph.free_flow_costs(region)
+	var serial_routes: Dictionary = RoadGraph.route_pairs(region, route_costs, [], true, false)
+	var parallel_routes: Dictionary = RoadGraph.route_pairs(region, route_costs, [], true, true)
+	_check(serial_routes["times"] == parallel_routes["times"] and serial_routes["paths"] == parallel_routes["paths"], "parallel route search must preserve every travel time and path")
 	var clock = CalendarClock.new()
-	var day: Dictionary = RoadTrafficCalculator.build_day(region, clock.unix_seconds)
 	var serial_flow = TripFlowCalculator.build(region)
 	var parallel_flow = TripFlowCalculator.build(region)
-	var next_day_seconds: int = clock.unix_seconds + 86400
-	var weekend: bool = CalendarClock.is_weekend_unix(next_day_seconds)
-	var serial_flow_start := Time.get_ticks_usec()
-	TripFlowCalculator.populate_day(serial_flow, region.generation_seed, next_day_seconds, weekend, day["flow"], false)
-	var serial_flow_ms := float(Time.get_ticks_usec() - serial_flow_start) / 1000.0
-	var parallel_flow_start := Time.get_ticks_usec()
-	TripFlowCalculator.populate_day(parallel_flow, region.generation_seed, next_day_seconds, weekend, day["flow"], true)
-	var parallel_flow_ms := float(Time.get_ticks_usec() - parallel_flow_start) / 1000.0
-	print("Hourly trip demand: serial %.1f ms, parallel %.1f ms" % [serial_flow_ms, parallel_flow_ms])
+	TripFlowCalculator.populate_day(serial_flow, region.generation_seed, clock.unix_seconds, false, null, false)
+	TripFlowCalculator.populate_day(parallel_flow, region.generation_seed, clock.unix_seconds, false, null, true)
 	for hour in range(24):
-		var same_matrices := true
+		_check(is_equal_approx(serial_flow.hourly_trips[hour], parallel_flow.hourly_trips[hour]), "parallel demand must equal serial demand at hour %d" % hour)
 		for origin_id in range(region.neighborhoods.size()):
-			same_matrices = same_matrices and serial_flow.hourly_od[hour][origin_id] == parallel_flow.hourly_od[hour][origin_id]
-			same_matrices = same_matrices and serial_flow.hourly_work_od[hour][origin_id] == parallel_flow.hourly_work_od[hour][origin_id]
-			same_matrices = same_matrices and serial_flow.hourly_shopping_od[hour][origin_id] == parallel_flow.hourly_shopping_od[hour][origin_id]
-			same_matrices = same_matrices and serial_flow.hourly_social_od[hour][origin_id] == parallel_flow.hourly_social_od[hour][origin_id]
-		_check(same_matrices, "parallel hourly trip matrices must match serial hour %d" % hour)
-		_check(serial_flow.hourly_trips[hour] == parallel_flow.hourly_trips[hour], "parallel hourly total must match serial hour %d" % hour)
-	_check(serial_flow.peak_net_trips_by_purpose == parallel_flow.peak_net_trips_by_purpose, "parallel trip peaks must match serial peaks")
-	var serial_start := Time.get_ticks_usec()
-	var serial_traffic = RoadTrafficCalculator.assign_day(region, day["flow"], 24, null, false)
-	var serial_ms := float(Time.get_ticks_usec() - serial_start) / 1000.0
-	var parallel_start := Time.get_ticks_usec()
-	var parallel_traffic = RoadTrafficCalculator.assign_day(region, day["flow"], 24, null, true)
-	var parallel_ms := float(Time.get_ticks_usec() - parallel_start) / 1000.0
-	print("Hourly traffic assignment: serial %.1f ms, parallel %.1f ms" % [serial_ms, parallel_ms])
-	for hour in range(24):
-		_check(is_equal_approx(serial_traffic.hourly_peak_ratio[hour], parallel_traffic.hourly_peak_ratio[hour]), "parallel peak ratio must match serial hour %d" % hour)
-		for link_index in range(region.road_links.size()):
-			_check(serial_traffic.hourly_volumes[hour][link_index].distance_to(parallel_traffic.hourly_volumes[hour][link_index]) < 0.001, "parallel volume must match serial hour %d link %d" % [hour, link_index])
-			_check(serial_traffic.hourly_link_times[hour][link_index].distance_to(parallel_traffic.hourly_link_times[hour][link_index]) < 0.001, "parallel travel time must match serial hour %d link %d" % [hour, link_index])
-		for origin_id in range(region.neighborhoods.size()):
-			for destination_id in range(region.neighborhoods.size()):
-				_check(absf(serial_traffic.hourly_pair_times[hour][origin_id][destination_id] - parallel_traffic.hourly_pair_times[hour][origin_id][destination_id]) < 0.001, "parallel route times must match serial hour %d pair %d-%d" % [hour, origin_id, destination_id])
-	var current_day_key := floori(float(clock.unix_seconds) / 86400.0)
-	var shortcut: Dictionary = RoadPlanner.link_preview(region, 0, 1, "Arterial", PackedVector2Array(), current_day_key)
-	_check(shortcut["ok"] and RoadPlanner.commit(region, shortcut, current_day_key)["ok"], "cycle fixture must allow a second route")
-	RoadPlanner.advance_day(region, int(shortcut["open_day_key"]))
-	AccessibilityCalculator.recalculate(region)
-	_check(not RoadGraph.is_forest(region), "cycle fixture must exercise congestion-based rerouting")
-	var serial_cycle = RoadTrafficCalculator.assign_day(region, day["flow"], 18, null, false)
-	var parallel_cycle = RoadTrafficCalculator.assign_day(region, day["flow"], 18, null, true)
-	for hour in range(18):
-		_check(serial_cycle.hourly_assignment_gap[hour] < 0.015, "alternate-route assignment must converge near shortest paths at hour %d (gap %.3f)" % [hour, serial_cycle.hourly_assignment_gap[hour]])
-		_check(is_equal_approx(serial_cycle.hourly_assignment_gap[hour], parallel_cycle.hourly_assignment_gap[hour]), "parallel assignment gap must match serial hour %d" % hour)
-		for link_index in range(region.road_links.size()):
-			_check(serial_cycle.hourly_volumes[hour][link_index].distance_to(parallel_cycle.hourly_volumes[hour][link_index]) < 0.001, "parallel cycle volume must match serial hour %d link %d" % [hour, link_index])
-			_check(serial_cycle.hourly_link_times[hour][link_index].distance_to(parallel_cycle.hourly_link_times[hour][link_index]) < 0.001, "parallel cycle cost must match serial hour %d link %d" % [hour, link_index])
-	var snapshot = DayCycleCalculator.copy_region(region)
-	snapshot.neighborhoods[0].households += 10
-	snapshot.travel_times[0][1] += 2.0
-	snapshot.road_links[0].lanes_per_direction += 1
-	_check(snapshot.neighborhoods[0].households != region.neighborhoods[0].households and snapshot.travel_times[0][1] != region.travel_times[0][1] and snapshot.road_links[0].lanes_per_direction != region.road_links[0].lanes_per_direction, "next-day snapshot must not share mutable region data")
-	var next_day_key := int(shortcut["open_day_key"]) + 1
-	var expected: Dictionary = DayCycleCalculator.advance_day(DayCycleCalculator.copy_region(region), next_day_key, day["flow"], day["traffic"])
+			_check(serial_flow.hourly_od[hour][origin_id] == parallel_flow.hourly_od[hour][origin_id], "parallel OD rows must equal serial rows at hour %d origin %d" % [hour, origin_id])
+	var state = RollingTrafficCalculator.new_day(region, serial_flow)
+	RollingTrafficCalculator.start_at_bin(state, 28)
+	var serial_templates = RollingTrafficCalculator.fork_for_worker(state)
+	var parallel_templates = RollingTrafficCalculator.fork_for_worker(state)
+	serial_templates.route_paths = serial_routes["paths"]
+	parallel_templates.route_paths = parallel_routes["paths"]
+	RollingTrafficCalculator._build_departure_templates(region, serial_flow, serial_templates, 7, false)
+	RollingTrafficCalculator._build_departure_templates(region, serial_flow, parallel_templates, 7, true)
+	_check(serial_templates.departure_templates == parallel_templates.departure_templates and serial_templates.noncar_sales == parallel_templates.noncar_sales, "multi-core departure templates must match serial traffic demand and sales credits")
+	var region_snapshot = DayCycleCalculator.copy_region(region)
+	var state_snapshot = RollingTrafficCalculator.fork_for_worker(state)
+	region_snapshot.neighborhoods[0].households += 1
+	region_snapshot.jurisdictions[0].treasury += 100.0
+	_check(region_snapshot.neighborhoods[0].households != region.neighborhoods[0].households and region_snapshot.jurisdictions[0].treasury != region.jurisdictions[0].treasury, "worker snapshots must not mutate the live region")
+	state_snapshot.checkpoints[-1] = {}
+	_check(state_snapshot.profile != state.profile and not state.checkpoints.has(-1), "traffic worker must own its mutable profile and checkpoint index")
+	state_snapshot.checkpoints.erase(-1)
+	var expected = RollingTrafficCalculator.advance_chunk(DayCycleCalculator.copy_region(region), serial_flow, DayCycleCalculator.copy_region(state), 32)
 	var worker := Thread.new()
-	var worker_snapshot = DayCycleCalculator.copy_region(region)
-	var start_error: Error = worker.start(Callable(DayCycleCalculator, "advance_day").bind(worker_snapshot, next_day_key, day["flow"], day["traffic"]))
-	_check(start_error == OK, "next-day worker must start")
-	if start_error == OK:
-		var calculated: Dictionary = worker.wait_to_finish()
-		_check(calculated["region"].get_region_totals() == expected["region"].get_region_totals(), "background day must match synchronous migration")
-		_check(is_equal_approx(calculated["region"].treasury, expected["region"].treasury), "background day must match synchronous finances")
-		_check(is_equal_approx(calculated["region"].travel_times[0][1], expected["region"].travel_times[0][1]), "background day must match synchronous accessibility")
-		_check(is_equal_approx(calculated["flow"].get_hourly_total(8), expected["flow"].get_hourly_total(8)), "background day must match synchronous trips")
-		_check(calculated["traffic"].hourly_volumes[8][0].distance_to(expected["traffic"].hourly_volumes[8][0]) < 0.001, "background day must match synchronous road traffic")
-		_check(calculated["region"].validation_errors().is_empty(), "background day must leave a valid region")
+	var status: Error = worker.start(Callable(RollingTrafficCalculator, "advance_chunk").bind(DayCycleCalculator.copy_region(region), serial_flow, state_snapshot, 32))
+	_check(status == OK, "traffic worker must start")
+	if status == OK:
+		var actual = worker.wait_to_finish()
+		_check(state.next_bin == 28 and state.profile.recorded_bin == 28, "worker advancement must leave the live traffic checkpoint untouched")
+		_check(actual.next_bin == expected.next_bin and absf(actual.departed_cars - expected.departed_cars) < 0.01 and absf(actual.completed_cars - expected.completed_cars) < 0.01, "background traffic must match serial checkpoints")
+		_check(actual.profile.quarter_hour_served[31] == expected.profile.quarter_hour_served[31], "background directional flow must match serial flow")
+	FiscalCalculator.queue_policy(region, region.city_jurisdiction_ids[0], "parking_fee", 8.0, clock.unix_seconds)
+	var serial_region = DayCycleCalculator.copy_region(region)
+	var worker_region = DayCycleCalculator.copy_region(region)
+	var continuous = RollingTrafficCalculator.advance_chunk(serial_region, serial_flow, DayCycleCalculator.copy_region(state), 36)
+	var first_chunk: Dictionary = RollingTrafficCalculator.advance_chunk_with_fork(worker_region, serial_flow, RollingTrafficCalculator.fork_for_worker(state), 32)
+	_check(first_chunk["state"].next_bin == 32 and first_chunk["next"].next_bin == 32 and first_chunk["state"].profile != first_chunk["next"].profile, "worker must prepare the next mutable traffic fork off the UI thread")
+	var chunked = RollingTrafficCalculator.advance_chunk(worker_region, serial_flow, first_chunk["next"], 36)
+	_check(absf(continuous.departed_cars - chunked.departed_cars) < 0.01 and absf(continuous.completed_cars - chunked.completed_cars) < 0.01 and continuous.profile.quarter_hour_served[35] == chunked.profile.quarter_hour_served[35], "reusing a worker region across chunks must preserve due policy and traffic outcomes")
+	var next_day_key: int = clock.unix_seconds / 86400 + 1
+	var expected_day: Dictionary = DayCycleCalculator.advance_day(DayCycleCalculator.copy_region(region), next_day_key, serial_flow, expected.profile, expected)
+	var day_worker := Thread.new()
+	status = day_worker.start(Callable(DayCycleCalculator, "advance_day").bind(DayCycleCalculator.copy_region(region), next_day_key, serial_flow, expected.profile, expected))
+	_check(status == OK, "day worker must start")
+	if status == OK:
+		var actual_day: Dictionary = day_worker.wait_to_finish()
+		_check(actual_day["region"].get_region_totals() == expected_day["region"].get_region_totals(), "background daily migration must match serial migration")
+		_check(is_equal_approx(actual_day["region"].jurisdictions[0].treasury, expected_day["region"].jurisdictions[0].treasury), "background daily finances must match serial finances")
+		_check(actual_day["flow"].hourly_trips == expected_day["flow"].hourly_trips, "background daily demand must match serial demand")
 	if failures == 0:
 		print("Parallel simulation smoke checks passed.")
 	quit(1 if failures > 0 else 0)

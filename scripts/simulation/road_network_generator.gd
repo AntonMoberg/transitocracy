@@ -11,7 +11,6 @@ static func generate(region) -> void:
 	region.neighborhood_gateway_node_ids.clear()
 	region.next_road_link_id = 0
 	region.next_road_project_id = 0
-	region.treasury = 100000000.0
 	for neighborhood in region.neighborhoods:
 		var node = RoadNodeData.new()
 		node.id = region.road_nodes.size()
@@ -62,4 +61,5 @@ static func _add_link(region, from_id: int, to_id: int, road_class: String, lane
 	link.lanes_per_direction = lanes
 	link.points = PackedVector2Array([region.road_nodes[from_id].position_km, region.road_nodes[to_id].position_km])
 	link.recalculate_length()
+	link.owner_jurisdiction_id = region.road_owner_for_points(link.points)
 	region.road_links.append(link)

@@ -14,6 +14,8 @@ const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
+const RollingTrafficCalculator = preload("res://scripts/simulation/rolling_traffic_calculator.gd")
 
 const DEFAULT_SEED = 1729
 
@@ -22,9 +24,24 @@ var flow_profile
 var next_day_profile
 var traffic_profile
 var next_traffic_profile
+var traffic_state
+var traffic_region_snapshot
+var preforked_traffic_state
+var pending_traffic_thread: Thread
+var retired_traffic_threads: Array[Thread] = []
+var traffic_worker_retry_at_msec: int = 0
+var last_applied_bin: int = -1
+var committed_traffic_checkpoint: Dictionary = {}
+var inspected_hour: int = -1
+var inspected_minute: int = 0
 var pending_day_thread: Thread
 var pending_day_key: int = -1
+var pending_day_result: Dictionary = {}
+var pending_day_result_key: int = -1
 var retired_day_threads: Array[Thread] = []
+var retired_data_threads: Array[Thread] = []
+var retired_data_backlog: Array[Dictionary] = []
+var day_worker_retry_at_msec: int = 0
 var last_dynamics_day_key: int = -1
 var flow_purpose: String = FlowProfile.ALL
 var calendar_clock
@@ -36,9 +53,19 @@ var seed_input: SpinBox
 var summary_label: Label
 var dynamics_label: Label
 var tax_input: SpinBox
+var state_tax_controls: HBoxContainer
+var jurisdiction_policy_controls: HBoxContainer
+var selected_jurisdiction_id: int = 0
+var policy_selector: OptionButton
+var policy_input: SpinBox
+var fiscal_label: Label
+var scope_breadcrumb: RichTextLabel
+var policy_options: Array[Dictionary] = []
+var suppress_policy_input: bool = false
 var calendar_label: Label
 var hourly_trip_label: Label
 var flow_detail_label: Label
+var flow_detail_separator: HSeparator
 var play_button: Button
 var speed_selector: OptionButton
 var purpose_selector: OptionButton
@@ -46,6 +73,11 @@ var inspector: RichTextLabel
 var map_mode_selector: OptionButton
 var road_tool_selector: OptionButton
 var road_build_button: Button
+var toll_forward_input: SpinBox
+var toll_reverse_input: SpinBox
+var toll_label: Label
+var toll_controls: HBoxContainer
+var suppress_toll_input: bool = false
 var road_status_label: Label
 var pending_road_preview: Dictionary = {}
 var road_start_node: int = -1
@@ -61,16 +93,40 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	_discard_pending_day()
+	_discard_pending_traffic()
 	for worker in retired_day_threads:
 		worker.wait_to_finish()
 	retired_day_threads.clear()
+	for worker in retired_data_threads:
+		worker.wait_to_finish()
+	retired_data_threads.clear()
+	for worker in retired_traffic_threads:
+		worker.wait_to_finish()
+	retired_traffic_threads.clear()
 
 
 func _process(delta: float) -> void:
 	_reap_finished_day_threads()
+	_reap_finished_data_threads()
+	_poll_day_worker()
+	_reap_finished_traffic_threads()
+	_poll_traffic_chunk()
+	_queue_traffic_chunk()
 	if not playing or calendar_clock == null:
 		return
-	calendar_clock.advance_simulation_seconds(delta * 3600.0 * speed_multiplier)
+	var day_key: int = _current_day_key()
+	var available_seconds: int = day_key * 86400 + traffic_state.next_bin * 900
+	if traffic_state.next_bin >= 96 and pending_day_result_key != day_key + 1:
+		available_seconds = mini(available_seconds, (day_key + 1) * 86400 - 1)
+	var requested_seconds: float = delta * 3600.0 * speed_multiplier
+	calendar_clock.advance_simulation_seconds(minf(requested_seconds, maxf(0.0, float(available_seconds - calendar_clock.unix_seconds))))
+	if _current_day_key() > day_key:
+		_apply_revenue_to_bin(95)
+	else:
+		_apply_revenue_through_clock()
+	if FiscalCalculator.apply_due_policies(region, calendar_clock.unix_seconds):
+		_refresh_fiscal_controls()
+	inspected_hour = -1
 	_sync_clock_view()
 
 
@@ -164,26 +220,9 @@ func _build_interface() -> void:
 	summary_label.add_theme_font_size_override("font_size", 14)
 	summary_label.add_theme_color_override("font_color", Color("b5cad9"))
 	layout.add_child(summary_label)
-	var policy_controls := HBoxContainer.new()
-	policy_controls.add_theme_constant_override("separation", 10)
-	layout.add_child(policy_controls)
-	var tax_label := Label.new()
-	tax_label.text = "Income tax"
-	tax_label.add_theme_color_override("font_color", Color("b8c9d6"))
-	policy_controls.add_child(tax_label)
-	tax_input = SpinBox.new()
-	tax_input.min_value = 0
-	tax_input.max_value = 40
-	tax_input.step = 1
-	tax_input.suffix = "%"
-	tax_input.value = 10
-	tax_input.custom_minimum_size = Vector2(94, 0)
-	tax_input.tooltip_text = "Regional income tax; changes household finances and migration each day"
-	tax_input.value_changed.connect(_on_tax_changed)
-	policy_controls.add_child(tax_input)
 	dynamics_label = Label.new()
 	dynamics_label.add_theme_color_override("font_color", Color("93b9ac"))
-	policy_controls.add_child(dynamics_label)
+	layout.add_child(dynamics_label)
 
 	var clock_controls := HBoxContainer.new()
 	clock_controls.add_theme_constant_override("separation", 12)
@@ -249,6 +288,36 @@ func _build_interface() -> void:
 	road_status_label.clip_text = true
 	road_status_label.add_theme_color_override("font_color", Color("a9c8d8"))
 	road_controls.add_child(road_status_label)
+	toll_controls = HBoxContainer.new()
+	toll_controls.add_theme_constant_override("separation", 8)
+	layout.add_child(toll_controls)
+	toll_controls.visible = false
+	toll_label = Label.new()
+	toll_label.text = "Select a road to set directional tolls"
+	toll_label.custom_minimum_size.x = 260
+	toll_controls.add_child(toll_label)
+	var forward_label := Label.new()
+	forward_label.text = "Forward toll"
+	toll_controls.add_child(forward_label)
+	toll_forward_input = SpinBox.new()
+	toll_forward_input.min_value = 0
+	toll_forward_input.max_value = 50
+	toll_forward_input.step = 0.25
+	toll_forward_input.suffix = "$"
+	toll_forward_input.editable = false
+	toll_forward_input.value_changed.connect(func(value: float) -> void: _on_toll_changed("toll_forward", value))
+	toll_controls.add_child(toll_forward_input)
+	var reverse_label := Label.new()
+	reverse_label.text = "Reverse toll"
+	toll_controls.add_child(reverse_label)
+	toll_reverse_input = SpinBox.new()
+	toll_reverse_input.min_value = 0
+	toll_reverse_input.max_value = 50
+	toll_reverse_input.step = 0.25
+	toll_reverse_input.suffix = "$"
+	toll_reverse_input.editable = false
+	toll_reverse_input.value_changed.connect(func(value: float) -> void: _on_toll_changed("toll_reverse", value))
+	toll_controls.add_child(toll_reverse_input)
 
 	var timeline_panel := PanelContainer.new()
 	timeline_panel.add_theme_stylebox_override("panel", _panel_style(Color("152235"), 0))
@@ -271,6 +340,7 @@ func _build_interface() -> void:
 	map_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	map_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	map_view.neighborhood_selected.connect(_on_neighborhood_selected)
+	map_view.jurisdiction_selected.connect(_on_map_jurisdiction_selected)
 	map_view.road_node_clicked.connect(_on_road_node_clicked)
 	map_view.road_link_clicked.connect(_on_road_link_clicked)
 	map_view.road_empty_clicked.connect(_on_road_empty_clicked)
@@ -291,10 +361,52 @@ func _build_interface() -> void:
 	flow_detail_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	flow_detail_label.custom_minimum_size.y = 58
 	inspector_layout.add_child(flow_detail_label)
+	flow_detail_separator = HSeparator.new()
+	inspector_layout.add_child(flow_detail_separator)
+	flow_detail_label.visible = false
+	flow_detail_separator.visible = false
+	scope_breadcrumb = RichTextLabel.new()
+	scope_breadcrumb.bbcode_enabled = true
+	scope_breadcrumb.scroll_active = false
+	scope_breadcrumb.custom_minimum_size.y = 44
+	scope_breadcrumb.meta_clicked.connect(_on_inspector_meta_clicked)
+	inspector_layout.add_child(scope_breadcrumb)
+	fiscal_label = Label.new()
+	fiscal_label.clip_text = true
+	fiscal_label.add_theme_color_override("font_color", Color("93b9ac"))
+	inspector_layout.add_child(fiscal_label)
+	state_tax_controls = HBoxContainer.new()
+	state_tax_controls.add_theme_constant_override("separation", 8)
+	inspector_layout.add_child(state_tax_controls)
+	var tax_label := Label.new()
+	tax_label.text = "State income tax"
+	state_tax_controls.add_child(tax_label)
+	tax_input = SpinBox.new()
+	tax_input.min_value = 0
+	tax_input.max_value = 40
+	tax_input.step = 1
+	tax_input.suffix = "%"
+	tax_input.value = 10
+	tax_input.custom_minimum_size.x = 94
+	tax_input.tooltip_text = "Changes at the next midnight"
+	tax_input.value_changed.connect(_on_tax_changed)
+	state_tax_controls.add_child(tax_input)
+	jurisdiction_policy_controls = HBoxContainer.new()
+	jurisdiction_policy_controls.add_theme_constant_override("separation", 8)
+	inspector_layout.add_child(jurisdiction_policy_controls)
+	policy_selector = OptionButton.new()
+	policy_selector.custom_minimum_size.x = 175
+	policy_selector.item_selected.connect(_on_policy_selected)
+	jurisdiction_policy_controls.add_child(policy_selector)
+	policy_input = SpinBox.new()
+	policy_input.custom_minimum_size.x = 105
+	policy_input.value_changed.connect(_on_policy_changed)
+	jurisdiction_policy_controls.add_child(policy_input)
 	inspector_layout.add_child(HSeparator.new())
 	inspector = RichTextLabel.new()
 	inspector.bbcode_enabled = true
 	inspector.selection_enabled = true
+	inspector.meta_clicked.connect(_on_inspector_meta_clicked)
 	inspector.autowrap_mode = TextServer.AUTOWRAP_OFF
 	inspector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	inspector.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -323,6 +435,8 @@ func _on_quit_pressed() -> void:
 
 func _on_play_pressed() -> void:
 	playing = not playing
+	if playing:
+		inspected_hour = -1
 	play_button.text = "Pause" if playing else "Play"
 
 
@@ -341,7 +455,8 @@ func _on_purpose_selected(index: int) -> void:
 
 
 func _on_time_selected(hour: int, minute: int) -> void:
-	calendar_clock.set_time(hour, minute)
+	inspected_hour = hour
+	inspected_minute = minute
 	playing = false
 	play_button.text = "Play"
 	_sync_clock_view()
@@ -351,32 +466,200 @@ func _on_tax_changed(value: float) -> void:
 	if region == null:
 		return
 	_discard_pending_day()
-	region.income_tax_rate = value / 100.0
-	NeighborhoodDynamics.refresh_desirability(region)
+	FiscalCalculator.queue_policy(region, 0, "income_tax_rate", value / 100.0, calendar_clock.unix_seconds)
+	_invalidate_traffic_forecast()
 	_queue_next_day(last_dynamics_day_key)
-	_refresh_region_summary()
-	_on_neighborhood_selected(map_view.selected_id, false)
+	_refresh_fiscal_controls()
+	_refresh_inspector(false)
+
+
+func _on_jurisdiction_selected(area_id: int) -> void:
+	if region == null or area_id < 0 or area_id >= region.jurisdictions.size():
+		return
+	selected_jurisdiction_id = area_id
+	var area = region.jurisdictions[area_id]
+	_cancel_road_preview()
+	selected_road_link_id = -1
+	_refresh_toll_controls()
+	map_view.set_selected_road_link(-1)
+	map_view.set_selected_jurisdiction(area.id)
+	map_view.set_selected(-1)
+	policy_options.clear()
+	policy_selector.clear()
+	match area.kind:
+		"County":
+			policy_options = [
+				{"label": "Income tax", "property": "income_tax_rate", "max": 30.0, "step": 0.5, "percent": true},
+				{"label": "Property tax", "property": "property_tax_rate", "max": 2.0, "step": 0.1, "percent": true},
+				{"label": "Sales tax", "property": "sales_tax_rate", "max": 15.0, "step": 0.5, "percent": true},
+			]
+		"City":
+			policy_options = [
+				{"label": "Parking fee", "property": "parking_fee", "max": 50.0, "step": 0.25, "percent": false},
+				{"label": "Congestion fee", "property": "congestion_fee", "max": 50.0, "step": 0.25, "percent": false},
+				{"label": "Charge starts", "property": "congestion_start_hour", "max": 23.0, "step": 1.0, "percent": false},
+				{"label": "Charge ends", "property": "congestion_end_hour", "max": 23.0, "step": 1.0, "percent": false},
+			]
+		"Neighborhood":
+			policy_options = [{"label": "Parking fee", "property": "parking_fee", "max": 50.0, "step": 0.25, "percent": false}]
+	for option in policy_options:
+		policy_selector.add_item(option["label"])
+	state_tax_controls.visible = area.kind == "State"
+	jurisdiction_policy_controls.visible = not policy_options.is_empty()
+	_on_policy_selected(0)
+	_refresh_fiscal_controls()
+	_refresh_scope_breadcrumb()
+	_update_flow_detail()
+	if area.kind == "Neighborhood":
+		_on_neighborhood_selected(area.neighborhood_ids[0])
+	else:
+		_show_jurisdiction_inspector()
+
+
+func _on_policy_selected(index: int) -> void:
+	if region == null or policy_options.is_empty():
+		return
+	var option: Dictionary = policy_options[index]
+	var area = region.jurisdictions[selected_jurisdiction_id]
+	suppress_policy_input = true
+	policy_input.min_value = 0.0
+	policy_input.max_value = option["max"]
+	policy_input.step = option["step"]
+	policy_input.suffix = "%" if option["percent"] else ("h" if str(option["property"]).contains("hour") else "$")
+	policy_input.value = float(area.get(option["property"])) * (100.0 if option["percent"] else 1.0)
+	suppress_policy_input = false
+
+
+func _on_policy_changed(value: float) -> void:
+	if suppress_policy_input or region == null or policy_options.is_empty():
+		return
+	var option: Dictionary = policy_options[policy_selector.selected]
+	var policy_value: float = value / 100.0 if option["percent"] else value
+	_discard_pending_day()
+	FiscalCalculator.queue_policy(region, selected_jurisdiction_id, option["property"], policy_value, calendar_clock.unix_seconds)
+	_invalidate_traffic_forecast()
+	_queue_next_day(last_dynamics_day_key)
+	_refresh_fiscal_controls()
+
+
+func _refresh_fiscal_controls() -> void:
+	if region == null or selected_jurisdiction_id < 0 or selected_jurisdiction_id >= region.jurisdictions.size():
+		return
+	var area = region.jurisdictions[selected_jurisdiction_id]
+	var pending_text := ""
+	for policy in region.pending_policy_changes:
+		if int(policy.get("jurisdiction_id", -1)) == area.id:
+			var effective: Dictionary = Time.get_datetime_dict_from_unix_time(int(policy["effective_seconds"]))
+			pending_text = "  •  Next change %02d:%02d" % [effective["hour"], effective["minute"]]
+	var balance: float = area.treasury
+	var income: float = area.daily_income_revenue
+	var property: float = area.daily_property_revenue
+	var sales: float = area.daily_sales_revenue
+	var fees: float = area.daily_fee_revenue
+	var upkeep: float = area.daily_road_upkeep
+	if area.kind == "Region":
+		balance = 0.0
+		income = 0.0
+		property = 0.0
+		sales = 0.0
+		fees = 0.0
+		upkeep = 0.0
+		var stack: Array = area.child_ids.duplicate()
+		while not stack.is_empty():
+			var child = region.jurisdictions[stack.pop_back()]
+			balance += child.treasury
+			income += child.daily_income_revenue
+			property += child.daily_property_revenue
+			sales += child.daily_sales_revenue
+			fees += child.daily_fee_revenue
+			upkeep += child.daily_road_upkeep
+			stack.append_array(child.child_ids)
+	var totals: Dictionary = region.get_jurisdiction_totals(area.id)
+	fiscal_label.text = "%s  •  $%s funds  •  $%s/day net%s" % [area.name, _format_count(roundi(balance)), _format_count(roundi(income + property + sales + fees - upkeep)), pending_text]
+	fiscal_label.tooltip_text = "%s: %s people, %s jobs\nTreasury $%s\nIncome $%s/day  •  Property $%s/day\nSales $%s today  •  Fees $%s today\nRoad upkeep $%s/day" % [
+		area.name, _format_count(totals["population"]), _format_count(totals["jobs"]), _format_count(roundi(balance)),
+		_format_count(roundi(income)), _format_count(roundi(property)),
+		_format_count(roundi(sales)), _format_count(roundi(fees)), _format_count(roundi(upkeep))]
+
+
+func _refresh_scope_breadcrumb() -> void:
+	var area = region.jurisdictions[selected_jurisdiction_id]
+	if area.parent_id >= 0:
+		var parent = region.jurisdictions[area.parent_id]
+		scope_breadcrumb.text = "[url=jurisdiction:%d]← %s[/url]\n[b]%s · %s[/b]" % [parent.id, parent.name, area.kind, area.name]
+	else:
+		scope_breadcrumb.text = "[b]%s · %s[/b]" % [area.kind, area.name]
+
+
+func _on_inspector_meta_clicked(meta: Variant) -> void:
+	var link: String = str(meta)
+	if not link.begins_with("jurisdiction:"):
+		return
+	var id_text: String = link.trim_prefix("jurisdiction:")
+	if id_text.is_valid_int():
+		_on_jurisdiction_selected(int(id_text))
+
+
+func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
+	var area = region.jurisdictions[selected_jurisdiction_id]
+	if area.kind == "Neighborhood":
+		_on_neighborhood_selected(area.neighborhood_ids[0], reset_scroll)
+		return
+	var totals: Dictionary = region.get_jurisdiction_totals(area.id)
+	var lines := PackedStringArray()
+	lines.append("[font_size=22][b]%s[/b][/font_size]" % area.name)
+	lines.append("[color=#91abc0]%s[/color]" % area.kind)
+	lines.append("")
+	lines.append("Population: %s" % _format_count(totals["population"]))
+	lines.append("Households: %s / %s homes" % [_format_count(totals["households"]), _format_count(totals["housing_capacity"])])
+	lines.append("Jobs: %s / %s capacity" % [_format_count(totals["jobs"]), _format_count(totals["job_capacity"])])
+	if not area.child_ids.is_empty():
+		var child_kind: String = region.jurisdictions[area.child_ids[0]].kind
+		var child_heading: String = {"County": "COUNTIES", "City": "CITIES"}.get(child_kind, child_kind.to_upper() + "S")
+		lines.append("")
+		lines.append("[color=#78c8dc][b]%s · CLICK A NAME TO OPEN[/b][/color]" % child_heading)
+		for child_id in area.child_ids:
+			var child = region.jurisdictions[child_id]
+			var child_totals: Dictionary = region.get_jurisdiction_totals(child_id)
+			lines.append("[url=jurisdiction:%d][color=#9bd3ef]%s[/color][/url]" % [child_id, child.name])
+			lines.append("  %s people  •  %s jobs" % [_format_count(child_totals["population"]), _format_count(child_totals["jobs"])])
+	var previous_scroll: float = inspector.get_v_scroll_bar().value
+	inspector.text = "\n".join(lines)
+	if reset_scroll:
+		inspector.scroll_to_line(0)
+	else:
+		inspector.get_v_scroll_bar().value = previous_scroll
 
 
 func _generate_region(seed_value: int) -> void:
 	_discard_pending_day()
+	_discard_pending_traffic()
 	region = RegionGenerator.generate_region(seed_value)
 	RoadNetworkGenerator.generate(region)
 	AccessibilityCalculator.recalculate(region)
-	region.income_tax_rate = tax_input.value / 100.0
+	region.jurisdictions[0].income_tax_rate = tax_input.value / 100.0
 	NeighborhoodDynamics.initialize(region)
-	region.daily_road_upkeep = RoadPlanner.calculate_upkeep(region)
+	RoadPlanner.refresh_upkeep(region)
 	calendar_clock = CalendarClock.new()
 	last_dynamics_day_key = floori(float(calendar_clock.unix_seconds) / 86400.0)
-	var day_result: Dictionary = RoadTrafficCalculator.build_day(region, calendar_clock.unix_seconds)
-	flow_profile = day_result["flow"]
-	traffic_profile = day_result["traffic"]
+	region.current_day_key = last_dynamics_day_key
+	flow_profile = TripFlowCalculator.build(region)
+	TripFlowCalculator.populate_day(flow_profile, region.generation_seed, calendar_clock.unix_seconds, calendar_clock.is_weekend())
+	traffic_state = RollingTrafficCalculator.new_day(region, flow_profile)
+	preforked_traffic_state = null
+	RollingTrafficCalculator.start_at_bin(traffic_state, calendar_clock.get_hour() * 4)
+	RollingTrafficCalculator.advance_chunk(region, flow_profile, traffic_state, calendar_clock.get_hour() * 4 + 1)
+	traffic_profile = traffic_state.profile
+	last_applied_bin = calendar_clock.get_hour() * 4 - 1
+	committed_traffic_checkpoint = traffic_state.checkpoints[calendar_clock.get_hour() * 4]
+	inspected_hour = -1
 	NeighborhoodDynamics.refresh_desirability(region)
 	var errors: PackedStringArray = region.validation_errors()
 	if not errors.is_empty():
 		push_error("Invalid generated region: " + "; ".join(errors))
 		inspector.text = "[color=#ff8c8c]Region generation failed validation.[/color]"
 		return
+	traffic_region_snapshot = DayCycleCalculator.copy_region(region)
 	next_day_profile = null
 	next_traffic_profile = null
 	road_start_node = -1
@@ -397,58 +680,83 @@ func _generate_region(seed_value: int) -> void:
 	map_view.set_purpose(flow_purpose)
 	flow_timeline.set_purpose(flow_purpose)
 	_refresh_region_summary()
-	_on_neighborhood_selected(0)
+	_on_jurisdiction_selected(0)
 	_sync_clock_view()
+	_queue_traffic_chunk()
 	playing = true
 	play_button.text = "Pause"
 
 
 func _refresh_region_summary() -> void:
 	var totals: Dictionary = region.get_region_totals()
-	summary_label.text = "%s  ›  %s  ›  %s     •     %d cities     •     %d neighborhoods     •     %s people     •     %s jobs" % [
-		region.state_name, region.region_name, region.county_name,
-		region.cities.size(), region.neighborhoods.size(),
+	summary_label.text = "%s  •  %d regions  •  %d counties  •  %d cities  •  %d neighborhoods  •  %s people  •  %s jobs" % [
+		region.state_name, region.region_ids.size(), region.county_ids.size(), region.cities.size(), region.neighborhoods.size(),
 		_format_count(totals["population"]), _format_count(totals["jobs"]),
 	]
-	dynamics_label.text = "Today: %+d households / %+d people  •  Treasury $%s  •  Net $%s/day" % [
-		region.last_household_change, region.last_population_change, _format_count(roundi(region.treasury)), _format_count(roundi(region.daily_tax_revenue - region.daily_road_upkeep))
+	var balance := 0.0
+	var net := 0.0
+	for area in region.jurisdictions:
+		if area.kind == "Region":
+			continue
+		balance += area.treasury
+		net += area.daily_revenue() - area.daily_road_upkeep
+	dynamics_label.text = "Today: %+d households / %+d people  •  Total funds $%s  •  Net $%s/day" % [
+		region.last_household_change, region.last_population_change, _format_count(roundi(balance)), _format_count(roundi(net))
 	]
+	_refresh_fiscal_controls()
 
 
 func _ensure_day_profiles() -> void:
 	var day_key := floori(float(calendar_clock.unix_seconds) / 86400.0)
 	var dynamics_advanced := false
+	var retired_data: Dictionary = {}
 	if day_key > last_dynamics_day_key:
-		for crossed_day in range(last_dynamics_day_key + 1, day_key + 1):
-			var day_result: Dictionary
-			if pending_day_thread != null and pending_day_key == crossed_day:
-				day_result = pending_day_thread.wait_to_finish()
-				pending_day_thread = null
-				pending_day_key = -1
-				region = day_result["region"]
-				map_view.region = region
-			else:
-				_discard_pending_day()
-				day_result = DayCycleCalculator.advance_day(region, crossed_day, flow_profile, traffic_profile)
-			flow_profile = day_result["flow"]
-			traffic_profile = day_result["traffic"]
-			if crossed_day < day_key:
-				_queue_next_day(crossed_day)
+		_discard_pending_traffic()
+		var day_result: Dictionary
+		if pending_day_result_key == day_key:
+			day_result = pending_day_result
+			pending_day_result = {}
+			pending_day_result_key = -1
+		else:
+			_discard_pending_day()
+			day_result = DayCycleCalculator.advance_day(region, day_key, flow_profile, traffic_profile, traffic_state)
+		# Keep the old day alive until every UI reference has been replaced. Its
+		# large checkpoint and flow trees are released by a worker below.
+		retired_data = {
+			"region": region,
+			"flow": flow_profile,
+			"traffic_state": traffic_state,
+			"traffic_profile": traffic_profile,
+			"traffic_region_snapshot": traffic_region_snapshot,
+			"checkpoint": committed_traffic_checkpoint,
+		}
+		region = day_result["region"]
+		map_view.region = region
+		flow_profile = day_result["flow"]
+		traffic_state = day_result["traffic_state"]
+		preforked_traffic_state = null
+		traffic_region_snapshot = DayCycleCalculator.copy_region(region)
+		traffic_profile = traffic_state.profile
+		last_applied_bin = -1
+		committed_traffic_checkpoint = traffic_state.checkpoints[0]
 		last_dynamics_day_key = day_key
 		next_day_profile = null
 		next_traffic_profile = null
+		map_view.set_next_day_profile(null)
+		map_view.set_next_traffic_profile(null)
+		flow_timeline.set_next_day_profile(null)
 		dynamics_advanced = true
 	if dynamics_advanced:
 		map_view.set_flow_profile(flow_profile)
 		map_view.set_traffic_profile(traffic_profile)
 		flow_timeline.set_profile(flow_profile)
+		_retire_simulation_data(retired_data)
+		_queue_traffic_chunk()
 	_queue_next_day(day_key)
-	if next_day_profile == null or next_day_profile.active_day_key != day_key + 1:
-		var next_day_seconds: int = (day_key + 1) * 86400
-		next_day_profile = TripFlowCalculator.copy_for_day(flow_profile, region.generation_seed, next_day_seconds, CalendarClock.is_weekend_unix(next_day_seconds))
-		next_traffic_profile = RoadTrafficCalculator.assign_day(region, next_day_profile, 1, traffic_profile)
+	if next_day_profile == null and pending_day_result_key == day_key + 1:
+		next_day_profile = pending_day_result["flow"]
 		map_view.set_next_day_profile(next_day_profile)
-		map_view.set_next_traffic_profile(next_traffic_profile)
+		map_view.set_next_traffic_profile(null)
 		flow_timeline.set_next_day_profile(next_day_profile)
 	if dynamics_advanced:
 		_refresh_region_summary()
@@ -456,20 +764,62 @@ func _ensure_day_profiles() -> void:
 		_update_road_status()
 
 
+func _retire_simulation_data(payload: Dictionary) -> void:
+	var worker := Thread.new()
+	if worker.start(Callable(DayCycleCalculator, "release_retired_data").bind(payload), Thread.PRIORITY_LOW) == OK:
+		retired_data_threads.append(worker)
+	else:
+		# Keep the payload alive and retry on a later frame if a thread cannot start.
+		retired_data_backlog.append(payload)
+
+
+func _reap_finished_data_threads() -> void:
+	for index in range(retired_data_threads.size() - 1, -1, -1):
+		if not retired_data_threads[index].is_alive():
+			retired_data_threads[index].wait_to_finish()
+			retired_data_threads.remove_at(index)
+	if not retired_data_backlog.is_empty():
+		var payload: Dictionary = retired_data_backlog.pop_back()
+		_retire_simulation_data(payload)
+
+
 func _queue_next_day(current_day_key: int) -> void:
+	if traffic_state == null or traffic_state.next_bin < 96 or Time.get_ticks_msec() < day_worker_retry_at_msec:
+		return
 	var target_day_key := current_day_key + 1
+	if pending_day_result_key == target_day_key:
+		return
 	if pending_day_thread != null:
 		if pending_day_key == target_day_key:
 			return
 		_discard_pending_day()
 	var snapshot = DayCycleCalculator.copy_region(region)
+	for bin_index in range(last_applied_bin + 1, 96):
+		for area_id in traffic_state.revenue_by_bin.get(bin_index, {}):
+			var revenue: Dictionary = traffic_state.revenue_by_bin[bin_index][area_id]
+			snapshot.jurisdictions[area_id].daily_sales_revenue += float(revenue.get("sales", 0.0))
+			snapshot.jurisdictions[area_id].daily_fee_revenue += float(revenue.get("fee", 0.0))
 	var worker := Thread.new()
-	var task := Callable(DayCycleCalculator, "advance_day").bind(snapshot, target_day_key, flow_profile, traffic_profile)
+	var task := Callable(DayCycleCalculator, "advance_day").bind(snapshot, target_day_key, flow_profile, traffic_profile, traffic_state)
 	if worker.start(task, Thread.PRIORITY_LOW) != OK:
-		push_warning("Could not start next-day simulation worker; midnight will calculate on the main thread.")
+		day_worker_retry_at_msec = Time.get_ticks_msec() + 1000
+		push_warning("Could not start next-day simulation worker; simulation will wait and retry.")
 		return
 	pending_day_thread = worker
 	pending_day_key = target_day_key
+
+
+func _poll_day_worker() -> void:
+	if pending_day_thread == null or pending_day_thread.is_alive():
+		return
+	pending_day_result = pending_day_thread.wait_to_finish()
+	pending_day_result_key = pending_day_key
+	pending_day_thread = null
+	pending_day_key = -1
+	if pending_day_result_key == _current_day_key() + 1:
+		next_day_profile = pending_day_result["flow"]
+		map_view.set_next_day_profile(next_day_profile)
+		flow_timeline.set_next_day_profile(next_day_profile)
 
 
 func _discard_pending_day() -> void:
@@ -477,6 +827,8 @@ func _discard_pending_day() -> void:
 		retired_day_threads.append(pending_day_thread)
 		pending_day_thread = null
 		pending_day_key = -1
+	pending_day_result = {}
+	pending_day_result_key = -1
 	_reap_finished_day_threads()
 
 
@@ -487,12 +839,111 @@ func _reap_finished_day_threads() -> void:
 			retired_day_threads.remove_at(index)
 
 
+func _queue_traffic_chunk() -> void:
+	if traffic_state == null or pending_traffic_thread != null or traffic_state.next_bin >= 96 or Time.get_ticks_msec() < traffic_worker_retry_at_msec:
+		return
+	var current_bin: int = clampi((calendar_clock.unix_seconds - _current_day_key() * 86400) / 900, 0, 95)
+	var lookahead: int = 96 if speed_multiplier >= 64.0 else (32 if speed_multiplier >= 16.0 else 16)
+	var desired_bin: int = mini(96, current_bin + lookahead)
+	if traffic_state.next_bin >= desired_bin:
+		return
+	var state_snapshot = preforked_traffic_state if preforked_traffic_state != null and preforked_traffic_state.next_bin == traffic_state.next_bin else RollingTrafficCalculator.fork_for_worker(traffic_state)
+	preforked_traffic_state = null
+	var target_bin: int = mini(desired_bin, traffic_state.next_bin + 8)
+	var worker := Thread.new()
+	var task := Callable(RollingTrafficCalculator, "advance_chunk_with_fork").bind(traffic_region_snapshot, flow_profile, state_snapshot, target_bin)
+	if worker.start(task, Thread.PRIORITY_LOW) != OK:
+		preforked_traffic_state = state_snapshot
+		traffic_worker_retry_at_msec = Time.get_ticks_msec() + 1000
+		push_warning("Could not start traffic worker; simulation will wait and retry.")
+		return
+	pending_traffic_thread = worker
+
+
+func _poll_traffic_chunk() -> void:
+	if pending_traffic_thread == null or pending_traffic_thread.is_alive():
+		return
+	var result: Dictionary = pending_traffic_thread.wait_to_finish()
+	traffic_state = result["state"]
+	preforked_traffic_state = result["next"]
+	pending_traffic_thread = null
+	traffic_profile = traffic_state.profile
+	map_view.set_traffic_profile(traffic_profile)
+	if traffic_state.next_bin >= 96:
+		_queue_next_day(_current_day_key())
+
+
+func _discard_pending_traffic() -> void:
+	preforked_traffic_state = null
+	if pending_traffic_thread != null:
+		retired_traffic_threads.append(pending_traffic_thread)
+		pending_traffic_thread = null
+	_reap_finished_traffic_threads()
+
+
+func _invalidate_traffic_forecast() -> void:
+	_discard_pending_traffic()
+	if traffic_state == null or committed_traffic_checkpoint.is_empty():
+		return
+	RollingTrafficCalculator.restore_checkpoint(region, traffic_state, committed_traffic_checkpoint)
+	traffic_region_snapshot = DayCycleCalculator.copy_region(region)
+	traffic_profile = traffic_state.profile
+	map_view.set_traffic_profile(traffic_profile)
+	next_day_profile = null
+	next_traffic_profile = null
+	map_view.set_next_day_profile(null)
+	map_view.set_next_traffic_profile(null)
+	flow_timeline.set_next_day_profile(null)
+	_queue_traffic_chunk()
+
+
+func _reap_finished_traffic_threads() -> void:
+	for index in range(retired_traffic_threads.size() - 1, -1, -1):
+		if not retired_traffic_threads[index].is_alive():
+			retired_traffic_threads[index].wait_to_finish()
+			retired_traffic_threads.remove_at(index)
+
+
+func _apply_revenue_through_clock() -> void:
+	if traffic_state == null or calendar_clock == null:
+		return
+	var day_start: int = _current_day_key() * 86400
+	var completed_bin: int = clampi((calendar_clock.unix_seconds - day_start) / 900 - 1, -1, 95)
+	_apply_revenue_to_bin(completed_bin)
+
+
+func _apply_revenue_to_bin(completed_bin: int) -> void:
+	var changed := false
+	for bin_index in range(last_applied_bin + 1, mini(completed_bin, traffic_state.next_bin - 1) + 1):
+		for area_id in traffic_state.revenue_by_bin.get(bin_index, {}):
+			var entry: Dictionary = traffic_state.revenue_by_bin[bin_index][area_id]
+			region.jurisdictions[area_id].daily_sales_revenue += float(entry.get("sales", 0.0))
+			region.jurisdictions[area_id].daily_fee_revenue += float(entry.get("fee", 0.0))
+		last_applied_bin = bin_index
+		if traffic_state.checkpoints.has(bin_index + 1):
+			committed_traffic_checkpoint = traffic_state.checkpoints[bin_index + 1]
+			traffic_state.checkpoints.erase(bin_index)
+		changed = true
+	if changed:
+		_refresh_region_summary()
+
+
 func _sync_clock_view() -> void:
 	_ensure_day_profiles()
-	var hour: int = calendar_clock.get_hour()
-	var fraction: float = calendar_clock.get_hour_fraction()
+	var hour: int = inspected_hour if inspected_hour >= 0 else calendar_clock.get_hour()
+	var fraction: float = float(inspected_minute) / 60.0 if inspected_hour >= 0 else calendar_clock.get_hour_fraction()
 	var weekend: bool = calendar_clock.is_weekend()
+	var forecast: bool = inspected_hour >= 0 and hour * 60 + inspected_minute > calendar_clock.get_hour() * 60 + calendar_clock.get_minute()
+	var requested_bin: int = hour * 4 + floori(fraction * 4.0)
+	var traffic_ready: bool = requested_bin >= traffic_state.first_recorded_bin and requested_bin < traffic_state.next_bin
+	var traffic_display_time: Vector2 = _display_traffic_time(hour, fraction)
+	var inspection_status: String = ("uncalculated forecast" if forecast else "scheduled demand") if not traffic_ready else ("forecast" if forecast else "history")
+	var next_day_pending: bool = traffic_state.next_bin >= 96 and pending_day_result_key != _current_day_key() + 1
 	calendar_label.text = calendar_clock.get_display_text()
+	if inspected_hour >= 0:
+		calendar_label.text += "  •  Inspecting %02d:%02d %s" % [hour, inspected_minute, inspection_status]
+	if next_day_pending:
+		calendar_label.text += "  •  Preparing next day"
 	hourly_trip_label.text = "%s trips/h  •  %s work  •  %s commercial  •  %s social" % [
 		_format_count(roundi(flow_profile.get_interpolated_hourly_total(hour, fraction, FlowProfile.ALL, next_day_profile))),
 		_format_count(roundi(flow_profile.get_interpolated_hourly_total(hour, fraction, FlowProfile.WORK, next_day_profile))),
@@ -500,44 +951,62 @@ func _sync_clock_view() -> void:
 		_format_count(roundi(flow_profile.get_interpolated_hourly_total(hour, fraction, FlowProfile.SOCIAL, next_day_profile))),
 	]
 	flow_timeline.set_time(hour, fraction)
+	flow_timeline.set_clock_time(calendar_clock.get_hour(), calendar_clock.get_hour_fraction())
 	flow_timeline.set_weekend(weekend)
-	map_view.set_time(hour, fraction)
+	map_view.set_time(int(traffic_display_time.x), traffic_display_time.y)
+	map_view.set_recorded_bin(traffic_state.next_bin, traffic_state.first_recorded_bin)
 	_update_flow_detail()
 	if selected_road_link_id >= 0 and map_mode_selector.selected == 0:
 		_show_road_inspector(selected_road_link_id)
 
 
+func _display_traffic_time(hour: int, fraction: float) -> Vector2:
+	var requested_bin: int = hour * 4 + floori(fraction * 4.0)
+	if inspected_hour >= 0 or requested_bin < traffic_state.next_bin or traffic_state.next_bin <= traffic_state.first_recorded_bin:
+		return Vector2(hour, fraction)
+	var last_bin: int = traffic_state.next_bin - 1
+	return Vector2(last_bin / 4, (float(last_bin % 4) + 0.999) / 4.0)
+
+
 func _update_flow_detail() -> void:
 	if flow_profile == null or calendar_clock == null:
 		return
-	var hour: int = calendar_clock.get_hour()
-	var minute: int = calendar_clock.get_minute()
-	var fraction: float = calendar_clock.get_hour_fraction()
+	var hour: int = inspected_hour if inspected_hour >= 0 else calendar_clock.get_hour()
+	var minute: int = inspected_minute if inspected_hour >= 0 else calendar_clock.get_minute()
+	var fraction: float = float(minute) / 60.0 if inspected_hour >= 0 else calendar_clock.get_hour_fraction()
 	var neighborhood_id: int = map_view.selected_id
 	if neighborhood_id < 0:
 		flow_detail_label.text = "%02d:%02d  •  %s\nRegion: %s trips/h" % [hour, minute, flow_purpose, _format_count(roundi(flow_profile.get_interpolated_hourly_total(hour, fraction, flow_purpose, next_day_profile)))]
 		return
-	var matrix: Array = flow_profile.get_interpolated_hour_matrix(hour, fraction, flow_purpose, next_day_profile)
-	var outgoing := 0.0
-	var incoming := 0.0
-	for trips in matrix[neighborhood_id]:
-		outgoing += trips
-	for row in matrix:
-		incoming += row[neighborhood_id]
-	var local_trips: float = matrix[neighborhood_id][neighborhood_id]
+	var totals: Vector3 = flow_profile.get_interpolated_neighborhood_totals(neighborhood_id, hour, fraction, flow_purpose, next_day_profile)
 	flow_detail_label.text = "%02d:%02d  •  %s\nOut: %s/h     In: %s/h\nLocal: %s/h" % [
-		hour, minute, flow_purpose, _format_count(roundi(outgoing)), _format_count(roundi(incoming)), _format_count(roundi(local_trips))
+		hour, minute, flow_purpose, _format_count(roundi(totals.x)), _format_count(roundi(totals.y)), _format_count(roundi(totals.z))
 	]
 
 
 func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) -> void:
 	selected_road_link_id = -1
+	_refresh_toll_controls()
 	map_view.set_selected_road_link(-1)
-	map_view.set_selected(neighborhood_id)
-	_update_flow_detail()
 	if neighborhood_id < 0:
-		inspector.text = "[font_size=21][b]Neighborhood inspector[/b][/font_size]\n\nSelect a neighborhood to inspect its statistics."
+		var current = region.jurisdictions[selected_jurisdiction_id]
+		if current.kind == "Neighborhood":
+			_on_jurisdiction_selected(current.parent_id)
+		else:
+			_show_jurisdiction_inspector(reset_scroll)
 		return
+	map_view.set_selected(neighborhood_id)
+	selected_jurisdiction_id = region.neighborhoods[neighborhood_id].jurisdiction_id
+	map_view.set_selected_jurisdiction(selected_jurisdiction_id)
+	_refresh_scope_breadcrumb()
+	state_tax_controls.visible = false
+	jurisdiction_policy_controls.visible = true
+	policy_options = [{"label": "Parking fee", "property": "parking_fee", "max": 50.0, "step": 0.25, "percent": false}]
+	policy_selector.clear()
+	policy_selector.add_item("Parking fee")
+	_on_policy_selected(0)
+	_refresh_fiscal_controls()
+	_update_flow_detail()
 	var neighborhood = region.neighborhoods[neighborhood_id]
 	var city_totals: Dictionary = region.get_city_totals(neighborhood.city_id)
 	var region_totals: Dictionary = region.get_region_totals()
@@ -558,7 +1027,8 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	text_lines.append("[color=#78c8dc][b]HOUSING & WEALTH[/b][/color]")
 	text_lines.append("Rent: $%s/mo" % _format_count(neighborhood.monthly_rent))
 	text_lines.append("Income: $%s/mo" % _format_count(neighborhood.average_monthly_income))
-	text_lines.append("After tax: $%s/mo" % _format_count(roundi(float(neighborhood.average_monthly_income) * (1.0 - region.income_tax_rate))))
+	text_lines.append("After income tax: $%s/mo" % _format_count(roundi(FiscalCalculator.after_income_tax(region, neighborhood))))
+	text_lines.append("Property tax in housing cost: $%s/mo" % _format_count(roundi(FiscalCalculator.property_cost_monthly(region, neighborhood))))
 	text_lines.append("Wealth: $%s/household" % _format_count(roundi(neighborhood.average_household_wealth)))
 	text_lines.append("")
 	text_lines.append("[color=#78c8dc][b]DESIRABILITY[/b][/color]")
@@ -604,8 +1074,18 @@ func _current_day_key() -> int:
 
 func _on_map_mode_selected(index: int) -> void:
 	map_view.set_map_mode("Roads" if index == 0 else "Trips")
+	flow_detail_label.visible = index == 1
+	flow_detail_separator.visible = index == 1
 	_cancel_road_preview()
+	if index == 1:
+		selected_road_link_id = -1
+		map_view.set_selected_road_link(-1)
+		_refresh_toll_controls()
 	_refresh_inspector(false)
+
+
+func _on_map_jurisdiction_selected(area_id: int) -> void:
+	_on_jurisdiction_selected(area_id)
 
 
 func _on_road_tool_selected(index: int) -> void:
@@ -644,6 +1124,7 @@ func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
 	if tool_name != "Junction":
 		selected_road_link_id = link_id
+		_refresh_toll_controls()
 		map_view.set_selected_road_link(link_id)
 		_show_road_inspector(link_id)
 	match tool_name:
@@ -688,6 +1169,7 @@ func _on_road_build_pressed() -> void:
 			road_status_label.text = result["reason"]
 			return
 		selected_road_link_id = -1
+		_refresh_toll_controls()
 		map_view.set_selected_road_link(-1)
 		_cancel_road_preview()
 		_rebuild_after_road_change()
@@ -718,7 +1200,8 @@ func _cancel_road_preview() -> void:
 func _update_road_status() -> void:
 	if road_status_label == null or region == null:
 		return
-	road_build_button.disabled = pending_road_preview.is_empty() or not pending_road_preview.get("ok", false) or region.treasury < float(pending_road_preview.get("cost", 0))
+	var owner_id: int = int(pending_road_preview.get("owner_id", 0))
+	road_build_button.disabled = pending_road_preview.is_empty() or not pending_road_preview.get("ok", false) or region.jurisdictions[owner_id].treasury < float(pending_road_preview.get("cost", 0))
 	if not pending_road_preview.is_empty():
 		if not pending_road_preview.get("ok", false):
 			road_status_label.text = pending_road_preview["reason"]
@@ -729,8 +1212,8 @@ func _update_road_status() -> void:
 			return
 		pending_road_preview["open_day_key"] = _current_day_key() + int(pending_road_preview["days"])
 		var opening: Dictionary = Time.get_datetime_dict_from_unix_time(int(pending_road_preview["open_day_key"]) * 86400)
-		road_status_label.text = "$%s  •  Opens %d/%d/%d  •  %d days%s" % [
-			_format_count(pending_road_preview["cost"]), opening["year"], opening["month"], opening["day"], pending_road_preview["days"], "  •  Insufficient funds" if road_build_button.disabled else ""]
+		road_status_label.text = "$%s  •  %s pays  •  Opens %d/%d/%d  •  %d days%s" % [
+			_format_count(pending_road_preview["cost"]), region.jurisdictions[owner_id].name, opening["year"], opening["month"], opening["day"], pending_road_preview["days"], "  •  Insufficient funds" if road_build_button.disabled else ""]
 	elif road_start_node >= 0:
 		road_status_label.text = "Click another node to finish; click empty map for a waypoint. Esc cancels."
 	elif road_tool_selector.get_item_text(road_tool_selector.selected) == "Demolish":
@@ -741,18 +1224,27 @@ func _update_road_status() -> void:
 
 func _rebuild_after_road_change() -> void:
 	_discard_pending_day()
+	_discard_pending_traffic()
 	AccessibilityCalculator.recalculate(region)
-	var day_result: Dictionary = RoadTrafficCalculator.build_day(region, calendar_clock.unix_seconds, flow_profile)
-	flow_profile = day_result["flow"]
-	traffic_profile = day_result["traffic"]
+	var previous_state = traffic_state
+	flow_profile = TripFlowCalculator.build(region)
+	TripFlowCalculator.populate_day(flow_profile, region.generation_seed, calendar_clock.unix_seconds, calendar_clock.is_weekend())
+	traffic_state = RollingTrafficCalculator.after_network_edit(region, flow_profile, previous_state, committed_traffic_checkpoint)
+	traffic_region_snapshot = DayCycleCalculator.copy_region(region)
+	committed_traffic_checkpoint = traffic_state.checkpoints[last_applied_bin + 1]
+	traffic_profile = traffic_state.profile
 	NeighborhoodDynamics.refresh_desirability(region)
 	_refresh_region_summary()
 	next_day_profile = null
 	next_traffic_profile = null
+	map_view.set_next_day_profile(null)
+	map_view.set_next_traffic_profile(null)
+	flow_timeline.set_next_day_profile(null)
 	map_view.set_flow_profile(flow_profile)
 	map_view.set_traffic_profile(traffic_profile)
 	flow_timeline.set_profile(flow_profile)
 	_ensure_day_profiles()
+	_queue_traffic_chunk()
 	_refresh_inspector(false)
 	map_view.queue_redraw()
 
@@ -761,7 +1253,46 @@ func _refresh_inspector(reset_scroll: bool = true) -> void:
 	if selected_road_link_id >= 0 and map_mode_selector.selected == 0:
 		_show_road_inspector(selected_road_link_id)
 	else:
-		_on_neighborhood_selected(map_view.selected_id, reset_scroll)
+		_show_jurisdiction_inspector(reset_scroll)
+
+
+func _refresh_toll_controls() -> void:
+	if toll_label == null:
+		return
+	var selected_link = null
+	if region != null:
+		for link in region.road_links:
+			if link.id == selected_road_link_id:
+				selected_link = link
+				break
+	toll_controls.visible = selected_link != null
+	if region != null and state_tax_controls != null:
+		scope_breadcrumb.visible = selected_link == null
+		fiscal_label.visible = selected_link == null
+		state_tax_controls.visible = selected_link == null and region.jurisdictions[selected_jurisdiction_id].kind == "State"
+		jurisdiction_policy_controls.visible = selected_link == null and not policy_options.is_empty()
+	suppress_toll_input = true
+	toll_forward_input.editable = selected_link != null
+	toll_reverse_input.editable = selected_link != null
+	if selected_link == null:
+		toll_label.text = "Select a road to set directional tolls"
+		toll_forward_input.value = 0
+		toll_reverse_input.value = 0
+	else:
+		toll_label.text = "Road %d  •  %s" % [selected_link.id, region.jurisdictions[selected_link.owner_jurisdiction_id].name]
+		toll_forward_input.value = selected_link.toll_forward
+		toll_reverse_input.value = selected_link.toll_reverse
+	suppress_toll_input = false
+
+
+func _on_toll_changed(property_name: String, value: float) -> void:
+	if suppress_toll_input or selected_road_link_id < 0 or region == null:
+		return
+	_discard_pending_day()
+	FiscalCalculator.queue_toll(region, selected_road_link_id, property_name, value, calendar_clock.unix_seconds)
+	_invalidate_traffic_forecast()
+	road_status_label.text = "Toll change begins at the next 15-minute checkpoint."
+	_show_road_inspector(selected_road_link_id)
 
 
 func _show_road_inspector(link_id: int) -> void:
@@ -773,18 +1304,29 @@ func _show_road_inspector(link_id: int) -> void:
 	if index < 0:
 		return
 	var link = region.road_links[index]
-	var hour: int = calendar_clock.get_hour()
-	var volume: Vector2 = traffic_profile.interpolated_volume(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
-	var served: Vector2 = traffic_profile.interpolated_served_rate(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
-	var queue: Vector2 = traffic_profile.interpolated_queue(index, hour, calendar_clock.get_hour_fraction())
-	var time: Vector2 = traffic_profile.interpolated_link_time(index, hour, calendar_clock.get_hour_fraction(), next_traffic_profile)
+	var hour: int = inspected_hour if inspected_hour >= 0 else calendar_clock.get_hour()
+	var fraction: float = float(inspected_minute) / 60.0 if inspected_hour >= 0 else calendar_clock.get_hour_fraction()
+	var traffic_display_time: Vector2 = _display_traffic_time(hour, fraction)
+	hour = int(traffic_display_time.x)
+	fraction = traffic_display_time.y
+	var requested_bin: int = hour * 4 + floori(fraction * 4.0)
+	if requested_bin < traffic_state.first_recorded_bin or requested_bin >= traffic_state.next_bin:
+		inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#78c8dc]Directional road traffic for this time is still uncalculated.[/color]\nThe chart shows scheduled trip demand." % [
+			link.road_class, link.id, link.length_km, link.lanes_per_direction,
+			region.jurisdictions[link.owner_jurisdiction_id].name, link.toll_forward, link.toll_reverse]
+		return
+	var volume: Vector2 = traffic_profile.interpolated_volume(index, hour, fraction, next_traffic_profile)
+	var served: Vector2 = traffic_profile.interpolated_served_rate(index, hour, fraction, next_traffic_profile)
+	var queue: Vector2 = traffic_profile.interpolated_queue(index, hour, fraction)
+	var time: Vector2 = traffic_profile.interpolated_link_time(index, hour, fraction, next_traffic_profile)
 	var capacity: float = (1800.0 if link.road_class == RoadLinkData.HIGHWAY else 900.0) * link.lanes_per_direction
 	var project_text := ""
 	for project in region.road_projects:
 		if project.target_link_id == link_id:
 			project_text += "\n%s: %d days left" % [project.kind, project.days_remaining(_current_day_key())]
-	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\n\n[color=#78c8dc][b]CURRENT TIME[/b][/color]\nForward demand: %s vehicles/h (%.0f%%)\nReverse demand: %s vehicles/h (%.0f%%)\nForward flow: %s vehicles/h\nReverse flow: %s vehicles/h\nForward queue: %s vehicles\nReverse queue: %s vehicles\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
+	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#78c8dc][b]SELECTED TIME[/b][/color]\nForward demand: %s vehicles/h (%.0f%%)\nReverse demand: %s vehicles/h (%.0f%%)\nForward flow: %s vehicles/h\nReverse flow: %s vehicles/h\nForward queue: %s vehicles\nReverse queue: %s vehicles\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
 		link.road_class, link.id, link.length_km, link.lanes_per_direction, _format_count(roundi(capacity)),
+		region.jurisdictions[link.owner_jurisdiction_id].name, link.toll_forward, link.toll_reverse,
 		_format_count(roundi(volume.x)), 100.0 * volume.x / capacity, _format_count(roundi(volume.y)), 100.0 * volume.y / capacity,
 		_format_count(roundi(served.x)), _format_count(roundi(served.y)),
 		_format_count(roundi(queue.x)), _format_count(roundi(queue.y)),

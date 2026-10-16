@@ -5,10 +5,11 @@ signal road_node_clicked(node_id: int)
 signal road_link_clicked(link_id: int, world_position: Vector2)
 signal road_empty_clicked(world_position: Vector2)
 signal road_cancel_requested
+signal jurisdiction_selected(jurisdiction_id: int)
 
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
-const WORLD_CENTER = Vector2(35.0, 29.0)
-const WORLD_SIZE = Vector2(70.0, 58.0)
+const WORLD_CENTER = Vector2(120.0, 80.0)
+const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
 const CITY_COLORS = [
 	Color("4b8fbf"),
@@ -27,6 +28,7 @@ var next_day_profile
 var traffic_profile
 var next_traffic_profile
 var map_mode: String = "Roads"
+var detail_level: String = "Neighborhood"
 var road_tool: String = "Inspect"
 var selected_road_link_id: int = -1
 var preview_start_node: int = -1
@@ -35,9 +37,17 @@ var road_preview: Dictionary = {}
 var hover_world_position: Vector2 = Vector2.ZERO
 var selected_hour: int = 8
 var hour_fraction: float = 0.0
+var recorded_bin: int = 0
+var first_recorded_bin: int = 0
 var selected_purpose: String = FlowProfile.ALL
 var selected_id: int = -1
+var selected_jurisdiction_id: int = -1
 var hovered_id: int = -1
+var aggregate_cache_region
+var aggregate_cache_level: String = ""
+var aggregate_neighborhood_groups: PackedInt32Array = PackedInt32Array()
+var aggregate_node_groups: PackedInt32Array = PackedInt32Array()
+var aggregate_flow_cache: Dictionary = {}
 var zoom: float = 1.0
 var pan: Vector2 = Vector2.ZERO
 var pointer_down: bool = false
@@ -64,6 +74,7 @@ func set_region(new_region) -> void:
 
 func set_flow_profile(new_profile) -> void:
 	flow_profile = new_profile
+	aggregate_flow_cache.clear()
 	queue_redraw()
 
 
@@ -84,6 +95,13 @@ func set_next_traffic_profile(new_profile) -> void:
 
 func set_map_mode(mode: String) -> void:
 	map_mode = mode
+	queue_redraw()
+
+
+func set_detail_level(level: String) -> void:
+	detail_level = level
+	aggregate_cache_level = ""
+	aggregate_flow_cache.clear()
 	queue_redraw()
 
 
@@ -114,6 +132,12 @@ func set_time(hour: int, fraction: float) -> void:
 	queue_redraw()
 
 
+func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
+	recorded_bin = bin_index
+	first_recorded_bin = first_bin
+	queue_redraw()
+
+
 func set_purpose(purpose: String) -> void:
 	selected_purpose = purpose
 	queue_redraw()
@@ -124,16 +148,208 @@ func set_selected(neighborhood_id: int) -> void:
 	queue_redraw()
 
 
+func set_selected_jurisdiction(jurisdiction_id: int) -> void:
+	selected_jurisdiction_id = jurisdiction_id
+	queue_redraw()
+
+
+func _aggregate_kind() -> String:
+	match detail_level:
+		"State":
+			return "Region"
+		"Region":
+			return "County"
+		"County":
+			return "City"
+		_:
+			return "Neighborhood"
+
+
+func _visible_areas() -> Array:
+	var areas: Array = []
+	var filter_parent: int = -1
+	if selected_jurisdiction_id >= 0 and region.jurisdictions[selected_jurisdiction_id].kind == detail_level:
+		filter_parent = selected_jurisdiction_id
+	for area in region.jurisdictions:
+		if area.kind == _aggregate_kind() and (filter_parent < 0 or area.parent_id == filter_parent):
+			areas.append(area)
+	return areas
+
+
+func _group_for_neighborhood(neighborhood_id: int) -> int:
+	_ensure_aggregate_cache()
+	return aggregate_neighborhood_groups[neighborhood_id]
+
+
+func _ensure_aggregate_cache() -> void:
+	if aggregate_cache_region == region and aggregate_cache_level == detail_level and aggregate_node_groups.size() == region.road_nodes.size():
+		return
+	aggregate_cache_region = region
+	aggregate_cache_level = detail_level
+	aggregate_flow_cache.clear()
+	aggregate_neighborhood_groups.resize(region.neighborhoods.size())
+	for neighborhood in region.neighborhoods:
+		aggregate_neighborhood_groups[neighborhood.id] = region.jurisdiction_for_neighborhood(neighborhood.id, _aggregate_kind()).id
+	aggregate_node_groups.resize(region.road_nodes.size())
+	for node in region.road_nodes:
+		aggregate_node_groups[node.id] = aggregate_neighborhood_groups[region.nearest_neighborhood_id(node.position_km)]
+
+
+func _aggregate_flow_matrix(profile, hour: int, purpose: String) -> Dictionary:
+	var cache_key: String = "%d:%d:%s" % [profile.get_instance_id(), hour, purpose]
+	if aggregate_flow_cache.has(cache_key):
+		return aggregate_flow_cache[cache_key]
+	var matrix: Array = profile.get_hour_matrix(hour, purpose)
+	var grouped: Dictionary = {}
+	for origin_id in range(aggregate_neighborhood_groups.size()):
+		var from_group: int = aggregate_neighborhood_groups[origin_id]
+		for destination_id in range(aggregate_neighborhood_groups.size()):
+			var to_group: int = aggregate_neighborhood_groups[destination_id]
+			if from_group == to_group:
+				continue
+			var key := Vector2i(from_group, to_group)
+			grouped[key] = float(grouped.get(key, 0.0)) + matrix[origin_id][destination_id]
+	aggregate_flow_cache[cache_key] = grouped
+	return grouped
+
+
+func _draw_aggregate_roads() -> void:
+	_ensure_aggregate_cache()
+	var corridors: Dictionary = {}
+	var visible_ids: Dictionary = {}
+	for area in _visible_areas():
+		visible_ids[area.id] = true
+	var local_km := 0.0
+	for index in range(region.road_links.size()):
+		var link = region.road_links[index]
+		var first_group: int = aggregate_node_groups[link.from_node_id]
+		var second_group: int = aggregate_node_groups[link.to_node_id]
+		if not visible_ids.has(first_group) or not visible_ids.has(second_group):
+			continue
+		if first_group == second_group:
+			local_km += link.length_km
+			continue
+		var first_id: int = mini(first_group, second_group)
+		var second_id: int = maxi(first_group, second_group)
+		var key: Vector2i = Vector2i(first_id, second_id)
+		if not corridors.has(key):
+			corridors[key] = {"capacity": 0.0, "forward": 0.0, "reverse": 0.0, "queue_forward": 0.0, "queue_reverse": 0.0}
+		var corridor: Dictionary = corridors[key]
+		corridor["capacity"] += (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
+		if traffic_profile != null and index < traffic_profile.link_ids.size():
+			var served: Vector2 = traffic_profile.interpolated_served_rate(index, selected_hour, hour_fraction, next_traffic_profile)
+			var queue: Vector2 = traffic_profile.interpolated_queue(index, selected_hour, hour_fraction)
+			corridor["forward"] += served.x if first_group == first_id else served.y
+			corridor["reverse"] += served.y if first_group == first_id else served.x
+			corridor["queue_forward"] += queue.x if first_group == first_id else queue.y
+			corridor["queue_reverse"] += queue.y if first_group == first_id else queue.x
+	for key in corridors:
+		var corridor: Dictionary = corridors[key]
+		var capacity: float = maxf(1.0, corridor["capacity"])
+		var forward_color: Color = _congestion_color(maxf(corridor["forward"] / capacity, corridor["queue_forward"] / (capacity * 0.5)))
+		var reverse_color: Color = _congestion_color(maxf(corridor["reverse"] / capacity, corridor["queue_reverse"] / (capacity * 0.5)))
+		if not _is_recorded_time():
+			forward_color = Color("647687")
+			reverse_color = forward_color
+		if map_mode == "Trips":
+			forward_color.a = 0.25
+			reverse_color.a = 0.25
+		_draw_active_road(PackedVector2Array([_world_to_screen(region.jurisdictions[key.x].center_km), _world_to_screen(region.jurisdictions[key.y].center_km)]), 1, forward_color, reverse_color, false)
+	var font := get_theme_default_font()
+	draw_string(font, Vector2(18, size.y - 18), "%s view  •  %.0f km of local roads summarized" % [detail_level, local_km], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("aec5d4"))
+
+
+func _draw_aggregate_flows() -> void:
+	if flow_profile == null:
+		return
+	_ensure_aggregate_cache()
+	var visible_ids: Dictionary = {}
+	for area in _visible_areas():
+		visible_ids[area.id] = true
+	var purposes: Array = [FlowProfile.WORK, FlowProfile.COMMERCIAL, FlowProfile.SOCIAL] if selected_purpose == FlowProfile.ALL else [selected_purpose]
+	var flows: Array[Dictionary] = []
+	for purpose in purposes:
+		var current_grouped: Dictionary = _aggregate_flow_matrix(flow_profile, selected_hour, purpose)
+		var next_profile = next_day_profile if selected_hour == 23 and next_day_profile != null else flow_profile
+		var next_hour: int = 0 if selected_hour == 23 else selected_hour + 1
+		var next_grouped: Dictionary = _aggregate_flow_matrix(next_profile, next_hour, purpose)
+		var keys: Dictionary = {}
+		for key in current_grouped:
+			keys[key] = true
+		for key in next_grouped:
+			keys[key] = true
+		for key in keys:
+			if not visible_ids.has(key.x) or not visible_ids.has(key.y):
+				continue
+			var reverse_key: Vector2i = Vector2i(key.y, key.x)
+			var trips: float = lerpf(float(current_grouped.get(key, 0.0)), float(next_grouped.get(key, 0.0)), hour_fraction)
+			if purpose != FlowProfile.SOCIAL:
+				trips -= lerpf(float(current_grouped.get(reverse_key, 0.0)), float(next_grouped.get(reverse_key, 0.0)), hour_fraction)
+			if trips > 0.1:
+				flows.append({"from": key.x, "to": key.y, "purpose": purpose, "trips": trips})
+	flows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["trips"] > b["trips"])
+	var peak: float = float(flows[0]["trips"]) if not flows.is_empty() else 1.0
+	for index in range(mini(30, flows.size())):
+		var flow: Dictionary = flows[index]
+		var start_point: Vector2 = _world_to_screen(region.jurisdictions[flow["from"]].center_km)
+		var end_point: Vector2 = _world_to_screen(region.jurisdictions[flow["to"]].center_km)
+		var direction: Vector2 = (end_point - start_point).normalized()
+		start_point += direction * 17.0
+		end_point -= direction * 17.0
+		var strength: float = sqrt(float(flow["trips"]) / maxf(1.0, peak))
+		var color: Color = _purpose_color(flow["purpose"])
+		color.a = 0.2 + 0.65 * strength
+		_draw_flow_stroke(start_point, end_point, color, 1.0 + 5.0 * strength, flow["from"] == selected_jurisdiction_id)
+		var side: Vector2 = Vector2(-direction.y, direction.x) * (2.0 + 2.0 * strength)
+		draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
+
+
+func _draw_aggregate_nodes() -> void:
+	var font := get_theme_default_font()
+	for area in _visible_areas():
+		var center: Vector2 = _world_to_screen(area.center_km)
+		var population := 0
+		for neighborhood_id in area.neighborhood_ids:
+			population += region.neighborhoods[neighborhood_id].population
+		var radius: float = clampf(8.0 + sqrt(float(population)) * 0.03, 12.0, 23.0)
+		draw_circle(center, radius + 3.0, Color("0b1421"))
+		draw_circle(center, radius, Color("4b9fbd"))
+		draw_arc(center, radius + 3.0, 0.0, TAU, 32, Color("f5d482") if area.id == selected_jurisdiction_id else Color("b7d6e5"), 2.0, true)
+		var label: String = area.name
+		var label_width: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+		draw_string(font, center + Vector2(-label_width * 0.5, -radius - 9.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("d9e9f2"))
+
+
+func _hit_aggregate_node(screen_position: Vector2) -> int:
+	if region == null:
+		return -1
+	var font := get_theme_default_font()
+	for area in _visible_areas():
+		var center: Vector2 = _world_to_screen(area.center_km)
+		var population := 0
+		for neighborhood_id in area.neighborhood_ids:
+			population += region.neighborhoods[neighborhood_id].population
+		var radius: float = clampf(8.0 + sqrt(float(population)) * 0.03, 12.0, 23.0)
+		var label_width: float = font.get_string_size(area.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+		var label_rect := Rect2(center + Vector2(-label_width * 0.5, -radius - 22.0), Vector2(label_width, 17.0))
+		if screen_position.distance_to(center) < 26.0 or label_rect.has_point(screen_position):
+			return area.id
+	return -1
+
+
 func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), Color("101b2b"))
 	_draw_grid()
 	if region == null:
 		return
+	_draw_boundaries()
 	_draw_cities()
 	_draw_roads()
 	if map_mode == "Trips":
 		_draw_hourly_flows()
 	_draw_neighborhoods()
+	_draw_jurisdiction_labels()
+	_draw_jurisdiction_key()
 	if map_mode == "Roads":
 		_draw_road_nodes()
 		_draw_road_preview()
@@ -147,7 +363,10 @@ func _draw_roads() -> void:
 		var link = region.road_links[link_index]
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
-		if map_mode == "Roads" and traffic_profile != null:
+		if map_mode == "Roads" and not _is_recorded_time():
+			forward_color = Color("647687")
+			reverse_color = forward_color
+		elif map_mode == "Roads" and traffic_profile != null:
 			var served: Vector2 = traffic_profile.interpolated_served_rate(link_index, selected_hour, hour_fraction, next_traffic_profile)
 			var queue: Vector2 = traffic_profile.interpolated_queue(link_index, selected_hour, hour_fraction)
 			var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
@@ -321,23 +540,117 @@ func _draw_road_legend() -> void:
 
 func _draw_grid() -> void:
 	var grid_color := Color(0.32, 0.47, 0.60, 0.15)
-	for x in range(0, 71, 10):
+	for x in range(0, 241, 20):
 		draw_line(_world_to_screen(Vector2(x, 0)), _world_to_screen(Vector2(x, WORLD_SIZE.y)), grid_color, 1.0)
-	for y in range(0, 59, 10):
+	for y in range(0, 161, 20):
 		draw_line(_world_to_screen(Vector2(0, y)), _world_to_screen(Vector2(WORLD_SIZE.x, y)), grid_color, 1.0)
 
 
-func _draw_cities() -> void:
+func _draw_boundaries() -> void:
+	if selected_jurisdiction_id >= 0:
+		var selected = region.jurisdictions[selected_jurisdiction_id]
+		if selected.kind in ["Region", "County", "City"]:
+			draw_rect(_jurisdiction_screen_rect(selected), Color("e5d69a", 0.055))
+	# Draw the smaller divisions first so the broader borders stay legible where they coincide.
+	for kind in ["City", "County", "Region"]:
+		for area in region.jurisdictions:
+			if area.kind != kind:
+				continue
+			var color: Color = _jurisdiction_color(kind)
+			color.a = {"City": 0.46, "County": 0.72, "Region": 0.92}[kind]
+			draw_rect(_jurisdiction_screen_rect(area), color, false, {"City": 1.0, "County": 2.0, "Region": 3.0}[kind])
+	if selected_jurisdiction_id >= 0:
+		var selected = region.jurisdictions[selected_jurisdiction_id]
+		if selected.kind in ["Region", "County", "City"]:
+			draw_rect(_jurisdiction_screen_rect(selected), Color("fff0b0", 0.95), false, 3.5)
+
+
+func _jurisdiction_screen_rect(area) -> Rect2:
+	var upper_left: Vector2 = _world_to_screen(area.bounds_km.position)
+	return Rect2(upper_left, _world_to_screen(area.bounds_km.end) - upper_left)
+
+
+func _jurisdiction_color(kind: String) -> Color:
+	match kind:
+		"Region":
+			return Color("63c6e5")
+		"County":
+			return Color("e4be75")
+		_:
+			return Color("b5a9e8")
+
+
+func _jurisdiction_label_text(area) -> String:
+	var space: float = _jurisdiction_screen_rect(area).size.x
+	match area.kind:
+		"Region":
+			return ("REGION · " if space >= 200.0 else "") + area.name.to_upper()
+		"County":
+			return ("COUNTY · " + area.name.to_upper()) if space >= 150.0 else area.name.trim_suffix(" County").to_upper()
+		_:
+			return ("CITY · " if space >= 140.0 else "") + area.name.to_upper()
+
+
+func _jurisdiction_label_rect(area) -> Rect2:
+	var bounds: Rect2 = _jurisdiction_screen_rect(area)
 	var font := get_theme_default_font()
+	var font_size := 11 if area.kind == "Region" else (10 if area.kind == "County" else 9)
+	var width: float = minf(font.get_string_size(_jurisdiction_label_text(area), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + 8.0, bounds.size.x - 6.0)
+	var top: float = bounds.position.y + 7.0
+	if area.kind == "County":
+		top = bounds.position.y + bounds.size.y * 0.5 + 3.0
+	elif area.kind == "City":
+		top = bounds.end.y - 14.0
+	return Rect2(Vector2(bounds.position.x + 3.0, top), Vector2(maxf(20.0, width), 14.0 if area.kind == "City" else 18.0))
+
+
+func _draw_jurisdiction_labels() -> void:
+	var font := get_theme_default_font()
+	for kind in ["Region", "County", "City"]:
+		for area in region.jurisdictions:
+			if area.kind != kind:
+				continue
+			var rect: Rect2 = _jurisdiction_label_rect(area)
+			var color: Color = _jurisdiction_color(kind)
+			var selected: bool = area.id == selected_jurisdiction_id
+			draw_rect(rect, Color("0b1927", 0.82 if kind == "City" else 0.94))
+			draw_rect(Rect2(rect.position, Vector2(3.0, rect.size.y)), Color("fff0b0") if selected else color)
+			if selected:
+				draw_rect(rect, Color("fff0b0"), false, 1.0)
+			var label: String = _jurisdiction_label_text(area)
+			var font_size := 11 if kind == "Region" else (10 if kind == "County" else 9)
+			while label.length() > 2 and font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x > rect.size.x - 8.0:
+				label = label.substr(0, label.length() - 2) + "…"
+			draw_string(font, rect.position + Vector2(6.0, 10.0 if kind == "City" else 13.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color("fff0b0") if selected else color)
+
+
+func _draw_jurisdiction_key() -> void:
+	var font := get_theme_default_font()
+	var start := Vector2(size.x - 249.0, 10.0)
+	draw_rect(Rect2(start, Vector2(239.0, 25.0)), Color("0b1927", 0.94))
+	for item in [
+		{"kind": "Region", "label": "Region", "offset": 9.0},
+		{"kind": "County", "label": "County", "offset": 85.0},
+		{"kind": "City", "label": "City", "offset": 165.0},
+	]:
+		var x: float = start.x + item["offset"]
+		var color: Color = _jurisdiction_color(item["kind"])
+		draw_line(Vector2(x, start.y + 13.0), Vector2(x + 12.0, start.y + 13.0), color, 3.0, true)
+		draw_string(font, Vector2(x + 17.0, start.y + 17.0), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 11, color)
+
+
+func _is_recorded_time() -> bool:
+	var requested_bin: int = selected_hour * 4 + floori(hour_fraction * 4.0)
+	return requested_bin >= first_recorded_bin and requested_bin < recorded_bin
+
+
+func _draw_cities() -> void:
 	for city in region.cities:
 		var center: Vector2 = _world_to_screen(city["center_km"])
 		var color: Color = CITY_COLORS[int(city["id"]) % CITY_COLORS.size()]
 		var radius: float = 7.5 * _map_scale() * zoom
 		draw_circle(center, radius, Color(color.r, color.g, color.b, 0.08))
 		draw_arc(center, radius, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.28), 1.0, true)
-		var label: String = str(city["name"]).to_upper()
-		var label_width: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-		draw_string(font, center + Vector2(-label_width * 0.5, -radius - 12), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(color.r, color.g, color.b, 0.80))
 
 
 func _draw_neighborhoods() -> void:
@@ -583,13 +896,15 @@ func _get_net_flows() -> Array[Dictionary]:
 
 func _flows_for_purpose(purpose: String) -> Array[Dictionary]:
 	var net_flows: Array[Dictionary] = []
-	var matrix: Array = flow_profile.get_interpolated_hour_matrix(selected_hour, hour_fraction, purpose, next_day_profile)
+	var current_matrix: Array = flow_profile.get_hour_matrix(selected_hour, purpose)
+	var next_profile = next_day_profile if selected_hour == 23 and next_day_profile != null else flow_profile
+	var next_matrix: Array = next_profile.get_hour_matrix(0 if selected_hour == 23 else selected_hour + 1, purpose)
 	var count: int = region.neighborhoods.size()
 	for first_id in range(count):
 		for second_id in range(first_id + 1, count):
 			if purpose == FlowProfile.SOCIAL:
 				for endpoints in [[first_id, second_id], [second_id, first_id]]:
-					var trips: float = matrix[endpoints[0]][endpoints[1]]
+					var trips: float = lerpf(current_matrix[endpoints[0]][endpoints[1]], next_matrix[endpoints[0]][endpoints[1]], hour_fraction)
 					if trips < MIN_VISIBLE_SOCIAL_TRIPS:
 						continue
 					net_flows.append({
@@ -600,7 +915,9 @@ func _flows_for_purpose(purpose: String) -> Array[Dictionary]:
 						"pair_key": "%s:%d:%d" % [purpose, first_id * count + second_id, int(endpoints[0] == second_id)],
 					})
 				continue
-			var net_trips: float = matrix[first_id][second_id] - matrix[second_id][first_id]
+			var current_net: float = current_matrix[first_id][second_id] - current_matrix[second_id][first_id]
+			var next_net: float = next_matrix[first_id][second_id] - next_matrix[second_id][first_id]
+			var net_trips: float = lerpf(current_net, next_net, hour_fraction)
 			if absf(net_trips) < 1.0:
 				continue
 			net_flows.append({
@@ -650,7 +967,7 @@ func _gui_input(event: InputEvent) -> void:
 		var mouse_button := event as InputEventMouseButton
 		if mouse_button.pressed and (mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP or mouse_button.button_index == MOUSE_BUTTON_WHEEL_DOWN):
 			var old_zoom := zoom
-			zoom = clampf(zoom * (1.12 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.12), 0.6, 2.8)
+			zoom = clampf(zoom * (1.12 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.12), 1.0, 2.8)
 			var ratio := zoom / old_zoom
 			pan = mouse_button.position - size * 0.5 - (mouse_button.position - size * 0.5 - pan) * ratio
 			queue_redraw()
@@ -663,6 +980,12 @@ func _gui_input(event: InputEvent) -> void:
 				pointer_start = mouse_button.position
 			else:
 				if pointer_down and not pointer_dragged:
+					var label_area_id: int = _hit_jurisdiction_label(mouse_button.position)
+					if label_area_id >= 0:
+						jurisdiction_selected.emit(label_area_id)
+						pointer_down = false
+						accept_event()
+						return
 					if map_mode == "Roads":
 						var node_id := _hit_road_node(mouse_button.position)
 						var link_id := _hit_road_link(mouse_button.position)
@@ -671,9 +994,25 @@ func _gui_input(event: InputEvent) -> void:
 						elif link_id >= 0:
 							road_link_clicked.emit(link_id, _screen_to_world(mouse_button.position))
 						else:
-							road_empty_clicked.emit(_screen_to_world(mouse_button.position))
+							var road_area_id: int = -1
+							if road_tool == "Inspect":
+								road_area_id = _hit_jurisdiction_border(mouse_button.position)
+								if road_area_id < 0:
+									road_area_id = _jurisdiction_at(mouse_button.position)
+							if road_area_id >= 0:
+								jurisdiction_selected.emit(road_area_id)
+							else:
+								road_empty_clicked.emit(_screen_to_world(mouse_button.position))
 					else:
-						neighborhood_selected.emit(_hit_test(mouse_button.position))
+						var neighborhood_id: int = _hit_test(mouse_button.position)
+						if neighborhood_id >= 0:
+							neighborhood_selected.emit(neighborhood_id)
+						else:
+							var trip_area_id: int = _hit_jurisdiction_border(mouse_button.position)
+							if trip_area_id < 0:
+								trip_area_id = _jurisdiction_at(mouse_button.position)
+							if trip_area_id >= 0:
+								jurisdiction_selected.emit(trip_area_id)
 				pointer_down = false
 			accept_event()
 		elif mouse_button.button_index == MOUSE_BUTTON_RIGHT and mouse_button.pressed and map_mode == "Roads":
@@ -689,7 +1028,11 @@ func _gui_input(event: InputEvent) -> void:
 				pan += motion.relative
 				queue_redraw()
 		else:
-			var new_hover := _hit_test(motion.position)
+			var new_hover: int = _hit_test(motion.position)
+			var hovered_area_id: int = _hit_jurisdiction_label(motion.position)
+			if hovered_area_id < 0 and (map_mode == "Trips" or road_tool == "Inspect"):
+				hovered_area_id = _hit_jurisdiction_border(motion.position)
+			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if hovered_area_id >= 0 or new_hover >= 0 else Control.CURSOR_ARROW
 			if new_hover != hovered_id:
 				hovered_id = new_hover
 				queue_redraw()
@@ -741,6 +1084,44 @@ func _hit_test(screen_position: Vector2) -> int:
 			closest_id = neighborhood.id
 			closest_distance = distance
 	return closest_id
+
+
+func _hit_jurisdiction_label(screen_position: Vector2) -> int:
+	if region == null:
+		return -1
+	for kind in ["City", "County", "Region"]:
+		for area in region.jurisdictions:
+			if area.kind == kind and _jurisdiction_label_rect(area).has_point(screen_position):
+				return area.id
+	return -1
+
+
+func _hit_jurisdiction_border(screen_position: Vector2) -> int:
+	if region == null:
+		return -1
+	for kind in ["Region", "County", "City"]:
+		for area in region.jurisdictions:
+			if area.kind != kind:
+				continue
+			var bounds: Rect2 = _jurisdiction_screen_rect(area)
+			if screen_position.x >= bounds.position.x - 4.0 and screen_position.x <= bounds.end.x + 4.0 and screen_position.y >= bounds.position.y - 4.0 and screen_position.y <= bounds.end.y + 4.0:
+				var edge_distance: float = minf(minf(absf(screen_position.x - bounds.position.x), absf(screen_position.x - bounds.end.x)), minf(absf(screen_position.y - bounds.position.y), absf(screen_position.y - bounds.end.y)))
+				if edge_distance <= 4.0:
+					return area.id
+	return -1
+
+
+func _jurisdiction_at(screen_position: Vector2) -> int:
+	if region == null:
+		return -1
+	var selected_kind: String = region.jurisdictions[selected_jurisdiction_id].kind if selected_jurisdiction_id >= 0 else "State"
+	var target_kind: String = {"State": "Region", "Region": "County", "County": "City", "City": "City", "Neighborhood": "City"}.get(selected_kind, "City")
+	if selected_kind in ["Region", "County"] and not _jurisdiction_screen_rect(region.jurisdictions[selected_jurisdiction_id]).has_point(screen_position):
+		target_kind = selected_kind
+	for area in region.jurisdictions:
+		if area.kind == target_kind and _jurisdiction_screen_rect(area).has_point(screen_position):
+			return area.id
+	return -1
 
 
 func _map_scale() -> float:

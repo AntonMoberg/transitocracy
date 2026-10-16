@@ -8,7 +8,7 @@ const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const INTERCHANGE_COST = 10000000
 const INTERCHANGE_UPKEEP = 1000.0
 const BUILD_TIME_DIVISOR = 10.0
-const WORLD_SIZE = Vector2(70.0, 58.0)
+const WORLD_SIZE = Vector2(240.0, 160.0)
 const DEMOLISH = "Demolish"
 
 
@@ -35,7 +35,7 @@ static func link_preview(region, from_id: int, to_id: int, road_class: String, w
 	var cost := roundi(length * lanes * (1800000.0 if road_class == RoadLinkData.HIGHWAY else 600000.0))
 	var base_days := maxi(45, ceili(20.0 + 4.0 * length)) if road_class == RoadLinkData.HIGHWAY else maxi(14, ceili(7.0 + 2.0 * length))
 	var days := _construction_days(base_days)
-	return {"ok": true, "kind": RoadProjectData.NEW_LINK, "from": from_id, "to": to_id, "road_class": road_class, "lanes": lanes, "points": points, "length_km": length, "cost": cost, "days": days, "open_day_key": day_key + days}
+	return {"ok": true, "kind": RoadProjectData.NEW_LINK, "from": from_id, "to": to_id, "road_class": road_class, "lanes": lanes, "points": points, "length_km": length, "cost": cost, "days": days, "open_day_key": day_key + days, "owner_id": region.road_owner_for_points(points)}
 
 
 static func widen_preview(region, link_id: int, day_key: int) -> Dictionary:
@@ -52,7 +52,7 @@ static func widen_preview(region, link_id: int, day_key: int) -> Dictionary:
 	var cost := roundi(link.length_km * (1800000.0 if link.road_class == RoadLinkData.HIGHWAY else 600000.0))
 	var full_days := maxi(45, ceili(20.0 + 4.0 * link.length_km)) if link.road_class == RoadLinkData.HIGHWAY else maxi(14, ceili(7.0 + 2.0 * link.length_km))
 	var days := _construction_days(maxi(7, ceili(float(full_days) * 0.5)))
-	return {"ok": true, "kind": RoadProjectData.WIDEN, "target_link_id": link_id, "cost": cost, "days": days, "open_day_key": day_key + days, "lanes": link.lanes_per_direction + 1}
+	return {"ok": true, "kind": RoadProjectData.WIDEN, "target_link_id": link_id, "cost": cost, "days": days, "open_day_key": day_key + days, "lanes": link.lanes_per_direction + 1, "owner_id": link.owner_jurisdiction_id}
 
 
 static func demolish_preview(region, link_id: int) -> Dictionary:
@@ -81,7 +81,7 @@ static func demolish(region, link_id: int) -> Dictionary:
 		return preview
 	var index: int = RoadGraph.link_index(region, link_id)
 	region.road_links.remove_at(index)
-	region.daily_road_upkeep = calculate_upkeep(region)
+	refresh_upkeep(region)
 	return preview
 
 
@@ -93,7 +93,9 @@ static func interchange_preview(region, node_id: int, link_id: int, point: Vecto
 			if project.target_node_id == node_id and project.kind == RoadProjectData.INTERCHANGE_NODE:
 				return {"ok": false, "reason": "An interchange is already being built here."}
 		var days := _construction_days(45)
-		return {"ok": true, "kind": RoadProjectData.INTERCHANGE_NODE, "target_node_id": node_id, "cost": INTERCHANGE_COST, "days": days, "open_day_key": day_key + days}
+		var node_point: Vector2 = region.road_nodes[node_id].position_km
+		var owner_id: int = region.jurisdiction_for_neighborhood(region.nearest_neighborhood_id(node_point), "City").id
+		return {"ok": true, "kind": RoadProjectData.INTERCHANGE_NODE, "target_node_id": node_id, "cost": INTERCHANGE_COST, "days": days, "open_day_key": day_key + days, "owner_id": owner_id}
 	var index: int = RoadGraph.link_index(region, link_id)
 	if index < 0 or region.road_links[index].road_class != RoadLinkData.HIGHWAY:
 		return {"ok": false, "reason": "Choose a highway segment or a junction."}
@@ -105,7 +107,7 @@ static func interchange_preview(region, node_id: int, link_id: int, point: Vecto
 	if projected.distance_to(region.road_nodes[link.from_node_id].position_km) < 0.2 or projected.distance_to(region.road_nodes[link.to_node_id].position_km) < 0.2:
 		return {"ok": false, "reason": "Place the exit farther from an existing road node."}
 	var days := _construction_days(45)
-	return {"ok": true, "kind": RoadProjectData.INTERCHANGE_EXIT, "target_link_id": link_id, "position_km": projected, "cost": INTERCHANGE_COST, "days": days, "open_day_key": day_key + days}
+	return {"ok": true, "kind": RoadProjectData.INTERCHANGE_EXIT, "target_link_id": link_id, "position_km": projected, "cost": INTERCHANGE_COST, "days": days, "open_day_key": day_key + days, "owner_id": link.owner_jurisdiction_id}
 
 
 static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
@@ -123,7 +125,8 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 			preview = interchange_preview(region, -1, preview["target_link_id"], preview["position_km"], day_key)
 	if not preview.get("ok", false):
 		return {"ok": false, "reason": preview.get("reason", "Road network changed; choose this project again.")}
-	if region.treasury < float(preview["cost"]):
+	var owner_id: int = int(preview["owner_id"])
+	if region.jurisdictions[owner_id].treasury < float(preview["cost"]):
 		return {"ok": false, "reason": "Insufficient treasury funds."}
 	var project = RoadProjectData.new()
 	project.id = region.next_road_project_id
@@ -132,6 +135,7 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 	project.cost = preview["cost"]
 	project.start_day_key = day_key
 	project.open_day_key = day_key + int(preview["days"])
+	project.owner_jurisdiction_id = owner_id
 	match project.kind:
 		RoadProjectData.NEW_LINK:
 			project.from_node_id = preview["from"]
@@ -145,7 +149,7 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 				project.position_km = preview["position_km"]
 		RoadProjectData.INTERCHANGE_NODE:
 			project.target_node_id = preview["target_node_id"]
-	region.treasury -= float(project.cost)
+	region.jurisdictions[owner_id].treasury -= float(project.cost)
 	region.road_projects.append(project)
 	return {"ok": true, "project": project}
 
@@ -174,14 +178,18 @@ static func add_junction(region, point: Vector2, split_link_id: int = -1) -> Dic
 	region.road_nodes.append(junction)
 	if split_link_id >= 0:
 		_split_link(region, split_link_id, junction.id, point)
+	refresh_upkeep(region)
 	return {"ok": true, "node_id": junction.id}
 
 
 static func advance_day(region, day_key: int) -> bool:
 	# Yesterday's tax estimate accrues before today's migration changes households.
-	region.daily_road_upkeep = calculate_upkeep(region)
-	region.last_fiscal_change = region.daily_tax_revenue - region.daily_road_upkeep
-	region.treasury += region.last_fiscal_change
+	refresh_upkeep(region)
+	for area in region.jurisdictions:
+		area.last_fiscal_change = area.daily_revenue() - area.daily_road_upkeep
+		area.treasury += area.last_fiscal_change
+		area.daily_sales_revenue = 0.0
+		area.daily_fee_revenue = 0.0
 	var changed := false
 	var remaining: Array = []
 	for project in region.road_projects:
@@ -206,7 +214,20 @@ static func advance_day(region, day_key: int) -> bool:
 				_split_link(region, project.target_link_id, exit_node.id, project.position_km)
 		changed = true
 	region.road_projects = remaining
+	if changed:
+		refresh_upkeep(region)
 	return changed
+
+
+static func refresh_upkeep(region) -> void:
+	for area in region.jurisdictions:
+		area.daily_road_upkeep = 0.0
+	for link in region.road_links:
+		region.jurisdictions[link.owner_jurisdiction_id].daily_road_upkeep += link.length_km * link.lanes_per_direction * (600.0 if link.road_class == RoadLinkData.HIGHWAY else 200.0)
+	for node in region.road_nodes:
+		if node.is_interchange:
+			var owner_id: int = region.jurisdiction_for_neighborhood(region.nearest_neighborhood_id(node.position_km), "City").id
+			region.jurisdictions[owner_id].daily_road_upkeep += INTERCHANGE_UPKEEP
 
 
 static func calculate_upkeep(region) -> float:
@@ -254,6 +275,7 @@ static func _split_link(region, link_id: int, new_node_id: int, point: Vector2) 
 	old_link.to_node_id = new_node_id
 	old_link.points = first
 	old_link.recalculate_length()
+	old_link.owner_jurisdiction_id = region.road_owner_for_points(first)
 	_append_link(region, new_node_id, old_to, old_link.road_class, old_link.lanes_per_direction, second)
 
 
@@ -267,6 +289,7 @@ static func _append_link(region, from_id: int, to_id: int, road_class: String, l
 	link.lanes_per_direction = lanes
 	link.points = points
 	link.recalculate_length()
+	link.owner_jurisdiction_id = region.road_owner_for_points(points)
 	region.road_links.append(link)
 
 

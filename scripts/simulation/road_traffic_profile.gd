@@ -1,6 +1,8 @@
 extends RefCounted
 
 var active_day_key: int = -1
+var first_recorded_bin: int = 0
+var recorded_bin: int = 96
 var link_ids: PackedInt32Array = PackedInt32Array()
 var hourly_volumes: Array[PackedVector2Array] = []
 var hourly_link_times: Array[PackedVector2Array] = []
@@ -37,7 +39,7 @@ func interpolated_link_time(link_index: int, hour: int, fraction: float, next_pr
 		var quarter_fraction: float = fposmod(fraction * 4.0, 1.0)
 		var first_quarter: Vector2 = quarter_hour_link_times[quarter_index][link_index]
 		var second_quarter: Vector2 = first_quarter
-		if quarter_index + 1 < quarter_hour_link_times.size():
+		if quarter_index + 1 < recorded_bin:
 			second_quarter = quarter_hour_link_times[quarter_index + 1][link_index]
 		elif next_profile != null and not next_profile.quarter_hour_link_times.is_empty() and link_index < next_profile.quarter_hour_link_times[0].size():
 			second_quarter = next_profile.quarter_hour_link_times[0][link_index]
@@ -69,7 +71,7 @@ func interpolated_served_rate(link_index: int, hour: int, fraction: float, next_
 	var quarter_index: int = clampi(hour, 0, 23) * 4 + floori(quarter_position)
 	var first: Vector2 = quarter_hour_served[quarter_index][link_index]
 	var second: Vector2 = first
-	if quarter_index + 1 < quarter_hour_served.size():
+	if quarter_index + 1 < recorded_bin:
 		second = quarter_hour_served[quarter_index + 1][link_index]
 	elif next_profile != null and not next_profile.quarter_hour_served.is_empty() and link_index < next_profile.quarter_hour_served[0].size():
 		second = next_profile.quarter_hour_served[0][link_index]

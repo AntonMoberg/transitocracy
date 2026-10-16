@@ -4,16 +4,16 @@ const ZONE_TYPES = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 const DENSITY_NAMES = ["Low", "Medium", "High"]
 
 var generation_seed: int = 0
+var current_day_key: int = 0
 var state_name: String = "New Meridian"
-var region_name: String = "Central Region"
-var county_name: String = "Meridian County"
-var income_tax_rate: float = 0.10
-var daily_tax_revenue: float = 0.0
+var jurisdictions: Array = []
+var region_ids: Array[int] = []
+var county_ids: Array[int] = []
+var city_jurisdiction_ids: Array[int] = []
+var neighborhood_jurisdiction_ids: Array[int] = []
+var pending_policy_changes: Array[Dictionary] = []
 var last_population_change: int = 0
 var last_household_change: int = 0
-var treasury: float = 100000000.0
-var daily_road_upkeep: float = 0.0
-var last_fiscal_change: float = 0.0
 var next_road_link_id: int = 0
 var next_road_project_id: int = 0
 
@@ -26,6 +26,81 @@ var road_nodes: Array = []
 var road_links: Array = []
 var road_projects: Array = []
 var neighborhood_gateway_node_ids: Array[int] = []
+
+
+func jurisdiction_for_neighborhood(neighborhood_id: int, kind: String):
+	var current_id: int = neighborhoods[neighborhood_id].jurisdiction_id
+	while current_id >= 0:
+		var current = jurisdictions[current_id]
+		if current.kind == kind:
+			return current
+		current_id = current.parent_id
+	return null
+
+
+func jurisdiction_for_city(city_id: int, kind: String):
+	var current_id: int = city_jurisdiction_ids[city_id]
+	while current_id >= 0:
+		var current = jurisdictions[current_id]
+		if current.kind == kind:
+			return current
+		current_id = current.parent_id
+	return null
+
+
+func lowest_common_jurisdiction(first_id: int, second_id: int) -> int:
+	var ancestors: Dictionary = {}
+	var current_id := first_id
+	while current_id >= 0:
+		ancestors[current_id] = true
+		current_id = jurisdictions[current_id].parent_id
+	current_id = second_id
+	while current_id >= 0:
+		if ancestors.has(current_id):
+			return current_id
+		current_id = jurisdictions[current_id].parent_id
+	return 0
+
+
+func funded_jurisdiction(first_id: int, second_id: int) -> int:
+	var owner_id: int = lowest_common_jurisdiction(first_id, second_id)
+	return 0 if jurisdictions[owner_id].kind == "Region" else owner_id
+
+
+func nearest_neighborhood_id(point: Vector2) -> int:
+	var nearest_id := 0
+	var nearest_distance := INF
+	for neighborhood in neighborhoods:
+		var distance: float = point.distance_squared_to(neighborhood.position_km)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest_id = neighborhood.id
+	return nearest_id
+
+
+func jurisdiction_at_point(point: Vector2) -> int:
+	for city_id in city_jurisdiction_ids:
+		var city = jurisdictions[city_id]
+		if city.bounds_km.has_point(point):
+			var nearest_id: int = city.neighborhood_ids[0]
+			var nearest_distance := INF
+			for neighborhood_id in city.neighborhood_ids:
+				var distance: float = point.distance_squared_to(neighborhoods[neighborhood_id].position_km)
+				if distance < nearest_distance:
+					nearest_distance = distance
+					nearest_id = neighborhood_id
+			return neighborhoods[nearest_id].jurisdiction_id
+	return neighborhoods[nearest_neighborhood_id(point)].jurisdiction_id
+
+
+func road_owner_for_points(points: PackedVector2Array) -> int:
+	var owner_id: int = jurisdiction_at_point(points[0])
+	for segment in range(1, points.size()):
+		var steps: int = maxi(1, ceili(points[segment - 1].distance_to(points[segment]) / 5.0))
+		for step in range(steps + 1):
+			var point: Vector2 = points[segment - 1].lerp(points[segment], float(step) / float(steps))
+			owner_id = lowest_common_jurisdiction(owner_id, jurisdiction_at_point(point))
+	return 0 if jurisdictions[owner_id].kind == "Region" else owner_id
 
 
 func get_city_name(city_id: int) -> String:
@@ -54,8 +129,31 @@ func get_region_totals() -> Dictionary:
 	return totals
 
 
+func get_jurisdiction_totals(jurisdiction_id: int) -> Dictionary:
+	var totals := {"population": 0, "households": 0, "housing_capacity": 0, "jobs": 0, "job_capacity": 0}
+	for neighborhood_id in jurisdictions[jurisdiction_id].neighborhood_ids:
+		var neighborhood = neighborhoods[neighborhood_id]
+		for key in totals:
+			totals[key] += neighborhood.get(key)
+	return totals
+
+
 func validation_errors() -> PackedStringArray:
 	var errors := PackedStringArray()
+	if not jurisdictions.is_empty():
+		if jurisdictions[0].kind != "State":
+			errors.append("The first jurisdiction must be the state.")
+		for area_index in range(jurisdictions.size()):
+			var area = jurisdictions[area_index]
+			if area.id != area_index or (area_index > 0 and (area.parent_id < 0 or area.parent_id >= area_index)):
+				errors.append("Invalid jurisdiction parent or id at %d." % area_index)
+		for neighborhood in neighborhoods:
+			if neighborhood.jurisdiction_id < 0 or neighborhood.jurisdiction_id >= jurisdictions.size():
+				errors.append("Neighborhood %d lacks a jurisdiction." % neighborhood.id)
+				continue
+			var district = jurisdictions[neighborhood.jurisdiction_id]
+			if district.kind != "Neighborhood" or not district.neighborhood_ids.has(neighborhood.id):
+				errors.append("Neighborhood %d has an invalid fiscal district." % neighborhood.id)
 	if neighborhoods.is_empty() or cities.is_empty():
 		errors.append("Region needs cities and neighborhoods.")
 	var listed_neighborhoods := PackedByteArray()
@@ -108,4 +206,6 @@ func validation_errors() -> PackedStringArray:
 				errors.append("Invalid road link %d." % link.id)
 			elif link.road_class == "Highway" and (not road_nodes[link.from_node_id].is_interchange or not road_nodes[link.to_node_id].is_interchange):
 				errors.append("Highway %d lacks an interchange." % link.id)
+			if not jurisdictions.is_empty() and (link.owner_jurisdiction_id < 0 or link.owner_jurisdiction_id >= jurisdictions.size()):
+				errors.append("Road %d has an invalid owner." % link.id)
 	return errors
