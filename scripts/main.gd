@@ -13,6 +13,7 @@ const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_gene
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
+const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
 
 const DEFAULT_SEED = 1729
 
@@ -21,6 +22,9 @@ var flow_profile
 var next_day_profile
 var traffic_profile
 var next_traffic_profile
+var pending_day_thread: Thread
+var pending_day_key: int = -1
+var retired_day_threads: Array[Thread] = []
 var last_dynamics_day_key: int = -1
 var flow_purpose: String = FlowProfile.ALL
 var calendar_clock
@@ -55,7 +59,15 @@ func _ready() -> void:
 	_generate_region(DEFAULT_SEED)
 
 
+func _exit_tree() -> void:
+	_discard_pending_day()
+	for worker in retired_day_threads:
+		worker.wait_to_finish()
+	retired_day_threads.clear()
+
+
 func _process(delta: float) -> void:
+	_reap_finished_day_threads()
 	if not playing or calendar_clock == null:
 		return
 	calendar_clock.advance_simulation_seconds(delta * 3600.0 * speed_multiplier)
@@ -338,13 +350,16 @@ func _on_time_selected(hour: int, minute: int) -> void:
 func _on_tax_changed(value: float) -> void:
 	if region == null:
 		return
+	_discard_pending_day()
 	region.income_tax_rate = value / 100.0
 	NeighborhoodDynamics.refresh_desirability(region)
+	_queue_next_day(last_dynamics_day_key)
 	_refresh_region_summary()
 	_on_neighborhood_selected(map_view.selected_id, false)
 
 
 func _generate_region(seed_value: int) -> void:
+	_discard_pending_day()
 	region = RegionGenerator.generate_region(seed_value)
 	RoadNetworkGenerator.generate(region)
 	AccessibilityCalculator.recalculate(region)
@@ -405,16 +420,20 @@ func _ensure_day_profiles() -> void:
 	var dynamics_advanced := false
 	if day_key > last_dynamics_day_key:
 		for crossed_day in range(last_dynamics_day_key + 1, day_key + 1):
-			var prior_profile = flow_profile
-			var prior_traffic_profile = traffic_profile
-			var roads_changed: bool = RoadPlanner.advance_day(region, crossed_day)
-			if roads_changed:
-				AccessibilityCalculator.recalculate(region)
-			NeighborhoodDynamics.advance_day(region)
-			var day_result: Dictionary = RoadTrafficCalculator.build_day(region, crossed_day * 86400, prior_profile, roads_changed, prior_traffic_profile)
+			var day_result: Dictionary
+			if pending_day_thread != null and pending_day_key == crossed_day:
+				day_result = pending_day_thread.wait_to_finish()
+				pending_day_thread = null
+				pending_day_key = -1
+				region = day_result["region"]
+				map_view.region = region
+			else:
+				_discard_pending_day()
+				day_result = DayCycleCalculator.advance_day(region, crossed_day, flow_profile, traffic_profile)
 			flow_profile = day_result["flow"]
 			traffic_profile = day_result["traffic"]
-			NeighborhoodDynamics.refresh_desirability(region)
+			if crossed_day < day_key:
+				_queue_next_day(crossed_day)
 		last_dynamics_day_key = day_key
 		next_day_profile = null
 		next_traffic_profile = null
@@ -423,6 +442,7 @@ func _ensure_day_profiles() -> void:
 		map_view.set_flow_profile(flow_profile)
 		map_view.set_traffic_profile(traffic_profile)
 		flow_timeline.set_profile(flow_profile)
+	_queue_next_day(day_key)
 	if next_day_profile == null or next_day_profile.active_day_key != day_key + 1:
 		var next_day_seconds: int = (day_key + 1) * 86400
 		next_day_profile = TripFlowCalculator.copy_for_day(flow_profile, region.generation_seed, next_day_seconds, CalendarClock.is_weekend_unix(next_day_seconds))
@@ -434,6 +454,37 @@ func _ensure_day_profiles() -> void:
 		_refresh_region_summary()
 		_refresh_inspector(false)
 		_update_road_status()
+
+
+func _queue_next_day(current_day_key: int) -> void:
+	var target_day_key := current_day_key + 1
+	if pending_day_thread != null:
+		if pending_day_key == target_day_key:
+			return
+		_discard_pending_day()
+	var snapshot = DayCycleCalculator.copy_region(region)
+	var worker := Thread.new()
+	var task := Callable(DayCycleCalculator, "advance_day").bind(snapshot, target_day_key, flow_profile, traffic_profile)
+	if worker.start(task, Thread.PRIORITY_LOW) != OK:
+		push_warning("Could not start next-day simulation worker; midnight will calculate on the main thread.")
+		return
+	pending_day_thread = worker
+	pending_day_key = target_day_key
+
+
+func _discard_pending_day() -> void:
+	if pending_day_thread != null:
+		retired_day_threads.append(pending_day_thread)
+		pending_day_thread = null
+		pending_day_key = -1
+	_reap_finished_day_threads()
+
+
+func _reap_finished_day_threads() -> void:
+	for index in range(retired_day_threads.size() - 1, -1, -1):
+		if not retired_day_threads[index].is_alive():
+			retired_day_threads[index].wait_to_finish()
+			retired_day_threads.remove_at(index)
 
 
 func _sync_clock_view() -> void:
@@ -647,6 +698,8 @@ func _on_road_build_pressed() -> void:
 		road_status_label.text = result["reason"]
 		return
 	var project = result["project"]
+	_discard_pending_day()
+	_queue_next_day(last_dynamics_day_key)
 	_cancel_road_preview()
 	map_view.queue_redraw()
 	_refresh_region_summary()
@@ -687,6 +740,7 @@ func _update_road_status() -> void:
 
 
 func _rebuild_after_road_change() -> void:
+	_discard_pending_day()
 	AccessibilityCalculator.recalculate(region)
 	var day_result: Dictionary = RoadTrafficCalculator.build_day(region, calendar_clock.unix_seconds, flow_profile)
 	flow_profile = day_result["flow"]

@@ -144,6 +144,9 @@ func _run_checks() -> void:
 	var previous_scroll: float = inspector_scroll.value
 	main._on_neighborhood_selected(main.map_view.selected_id, false)
 	_check(is_equal_approx(inspector_scroll.value, previous_scroll), "daily stat refresh must keep the inspector scroll position")
+	var tax_worker: Thread = main.pending_day_thread
+	main.tax_input.value = 12.0
+	_check(main.pending_day_thread != null and main.pending_day_thread != tax_worker and main.pending_day_key == main.last_dynamics_day_key + 1, "tax changes must replace the queued next-day calculation")
 	main.flow_timeline.time_selected.emit(17, 30)
 	_check(main.calendar_clock.get_hour() == 17 and main.calendar_clock.get_minute() == 30 and not main.playing, "chart scrubbing must set the minute and pause playback")
 	var half_hour_x: float = main.flow_timeline.LEFT_MARGIN + 17.5 * (main.flow_timeline.size.x - main.flow_timeline.LEFT_MARGIN - main.flow_timeline.RIGHT_MARGIN) / 24.0
@@ -157,6 +160,7 @@ func _run_checks() -> void:
 	main._on_play_pressed()
 	main._process(0.125)
 	_check(main.calendar_clock.get_hour() == 1 and main.calendar_clock.get_minute() == 30 and main.last_dynamics_day_key == before_day + 1, "64× speed must advance eight simulated hours and process midnight")
+	_check(is_equal_approx(main.region.income_tax_rate, 0.12), "queued midnight must use the edited tax rate")
 	main._on_play_pressed()
 	_send_key(main, KEY_5)
 	_check(is_equal_approx(main.speed_multiplier, 256.0) and main.speed_selector.get_item_text(4) == "256×" and not main.playing, "5 must expose 256× speed without resuming")

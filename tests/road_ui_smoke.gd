@@ -29,8 +29,10 @@ func _run_checks() -> void:
 	_check(main.road_status_label.text.contains("Opens") and main.road_status_label.text.contains("$"), "preview must show cost and opening date")
 	var initial_links: int = main.region.road_links.size()
 	var days_until_open: int = main.pending_road_preview["days"]
+	var old_worker: Thread = main.pending_day_thread
 	main._on_road_build_pressed()
 	_check(main.region.road_projects.size() == 1 and main.region.road_links.size() == initial_links, "Build must fund a construction project without opening it early")
+	_check(main.pending_day_thread != null and main.pending_day_thread != old_worker, "funding a road must replace the queued next-day calculation")
 	main._on_speed_selected(4)
 	main._on_play_pressed()
 	main._process((float(days_until_open) * 24.0 + 1.0) / 256.0)

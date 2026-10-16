@@ -98,7 +98,7 @@ static func build(region):
 	return profile
 
 
-static func populate_day(profile, region_seed: int, unix_seconds: int, weekend: bool, previous_day_profile = null) -> void:
+static func populate_day(profile, region_seed: int, unix_seconds: int, weekend: bool, previous_day_profile = null, parallel_hours: bool = true) -> void:
 	var day_key := floori(float(unix_seconds) / 86400.0)
 	if profile.active_day_key == day_key and profile.active_weekend == weekend:
 		return
@@ -136,7 +136,7 @@ static func populate_day(profile, region_seed: int, unix_seconds: int, weekend: 
 	var social_departures: PackedFloat32Array = _social_departure_hours(day_key, region_seed, weekend)
 	var previous_social_departures: PackedFloat32Array = _social_departure_hours(day_key - 1, region_seed, previous_day_weekend)
 	var work_scale := WEEKEND_COMMUTE_FRACTION if weekend else 1.0
-	_fill_hourly_matrices(profile, shopping_od, social_od, previous_social_od, work_outbound, work_return, shopping_outbound, shopping_return, social_departures, previous_social_departures, work_scale)
+	_fill_hourly_matrices(profile, shopping_od, social_od, previous_social_od, work_outbound, work_return, shopping_outbound, shopping_return, social_departures, previous_social_departures, work_scale, parallel_hours)
 	profile.active_day_key = day_key
 	profile.active_weekend = weekend
 
@@ -259,7 +259,7 @@ static func _mix_hours(first: PackedFloat32Array, second: PackedFloat32Array, fi
 	return mixed
 
 
-static func _fill_hourly_matrices(profile, shopping_od: Array[PackedFloat32Array], social_od: Array[PackedFloat32Array], previous_social_od: Array[PackedFloat32Array], work_outbound: PackedFloat32Array, work_return: PackedFloat32Array, shopping_outbound: PackedFloat32Array, shopping_return: PackedFloat32Array, social_departures: PackedFloat32Array, previous_social_departures: PackedFloat32Array, work_scale: float) -> void:
+static func _fill_hourly_matrices(profile, shopping_od: Array[PackedFloat32Array], social_od: Array[PackedFloat32Array], previous_social_od: Array[PackedFloat32Array], work_outbound: PackedFloat32Array, work_return: PackedFloat32Array, shopping_outbound: PackedFloat32Array, shopping_return: PackedFloat32Array, social_departures: PackedFloat32Array, previous_social_departures: PackedFloat32Array, work_scale: float, parallel_hours: bool) -> void:
 	profile.hourly_od.clear()
 	profile.hourly_work_od.clear()
 	profile.hourly_shopping_od.clear()
@@ -273,58 +273,106 @@ static func _fill_hourly_matrices(profile, shopping_od: Array[PackedFloat32Array
 	var peak_work := 1.0
 	var peak_shopping := 1.0
 	var peak_social := 1.0
+	var inputs := {
+		"shopping_od": shopping_od,
+		"social_od": social_od,
+		"previous_social_od": previous_social_od,
+		"work_outbound": work_outbound,
+		"work_return": work_return,
+		"shopping_outbound": shopping_outbound,
+		"shopping_return": shopping_return,
+		"social_departures": social_departures,
+		"previous_social_departures": previous_social_departures,
+		"work_scale": work_scale,
+	}
+	var hourly_results: Array = []
+	hourly_results.resize(24)
+	# Each worker reads the same daily matrices and writes only its own hour slot.
+	if parallel_hours and count >= 32 and OS.get_processor_count() > 1:
+		var workers := mini(16, OS.get_processor_count())
+		var task_id := WorkerThreadPool.add_group_task(
+			func(hour: int) -> void:
+				hourly_results[hour] = _build_hour(profile.daily_work_od, hour, count, inputs),
+			24, workers, false, "Hourly trip demand")
+		WorkerThreadPool.wait_for_group_task_completion(task_id)
+	else:
+		for hour in range(24):
+			hourly_results[hour] = _build_hour(profile.daily_work_od, hour, count, inputs)
 	for hour in range(24):
-		var all_matrix: Array[PackedFloat32Array] = []
-		var work_matrix: Array[PackedFloat32Array] = []
-		var shopping_matrix: Array[PackedFloat32Array] = []
-		var social_matrix: Array[PackedFloat32Array] = []
-		var work_total := 0.0
-		var shopping_total := 0.0
-		var social_total := 0.0
-		var social_return_today := 0.0
-		var social_return_previous := 0.0
-		for stay_index in range(SOCIAL_STAY_HOURS.size()):
-			var departure_hour: int = hour - SOCIAL_STAY_HOURS[stay_index]
-			if departure_hour >= 0:
-				social_return_today += social_departures[departure_hour] * SOCIAL_STAY_SHARES[stay_index]
-			else:
-				social_return_previous += previous_social_departures[24 + departure_hour] * SOCIAL_STAY_SHARES[stay_index]
-		for origin_id in range(count):
-			var all_row := PackedFloat32Array()
-			var work_row := PackedFloat32Array()
-			var shopping_row := PackedFloat32Array()
-			var social_row := PackedFloat32Array()
-			all_row.resize(count)
-			work_row.resize(count)
-			shopping_row.resize(count)
-			social_row.resize(count)
-			for destination_id in range(count):
-				var work_trips: float = (profile.daily_work_od[origin_id][destination_id] * work_outbound[hour] + profile.daily_work_od[destination_id][origin_id] * work_return[hour]) * work_scale
-				var shopping_trips: float = shopping_od[origin_id][destination_id] * shopping_outbound[hour] + shopping_od[destination_id][origin_id] * shopping_return[hour]
-				var social_trips: float = social_od[origin_id][destination_id] * social_departures[hour] + social_od[destination_id][origin_id] * social_return_today + previous_social_od[destination_id][origin_id] * social_return_previous
-				work_row[destination_id] = work_trips
-				shopping_row[destination_id] = shopping_trips
-				social_row[destination_id] = social_trips
-				all_row[destination_id] = work_trips + shopping_trips + social_trips
-				work_total += work_trips
-				shopping_total += shopping_trips
-				social_total += social_trips
-			work_matrix.append(work_row)
-			shopping_matrix.append(shopping_row)
-			social_matrix.append(social_row)
-			all_matrix.append(all_row)
-		profile.hourly_work_od.append(work_matrix)
-		profile.hourly_shopping_od.append(shopping_matrix)
-		profile.hourly_social_od.append(social_matrix)
-		profile.hourly_od.append(all_matrix)
-		profile.hourly_work_trips[hour] = work_total
-		profile.hourly_shopping_trips[hour] = shopping_total
-		profile.hourly_social_trips[hour] = social_total
-		profile.hourly_trips[hour] = work_total + shopping_total + social_total
-		for first_id in range(count):
-			for second_id in range(first_id + 1, count):
-				peak_all = maxf(peak_all, absf(all_matrix[first_id][second_id] - all_matrix[second_id][first_id]))
-				peak_work = maxf(peak_work, absf(work_matrix[first_id][second_id] - work_matrix[second_id][first_id]))
-				peak_shopping = maxf(peak_shopping, absf(shopping_matrix[first_id][second_id] - shopping_matrix[second_id][first_id]))
-				peak_social = maxf(peak_social, maxf(social_matrix[first_id][second_id], social_matrix[second_id][first_id]))
+		var result: Dictionary = hourly_results[hour]
+		profile.hourly_work_od.append(result["work_matrix"])
+		profile.hourly_shopping_od.append(result["shopping_matrix"])
+		profile.hourly_social_od.append(result["social_matrix"])
+		profile.hourly_od.append(result["all_matrix"])
+		profile.hourly_work_trips[hour] = result["work_total"]
+		profile.hourly_shopping_trips[hour] = result["shopping_total"]
+		profile.hourly_social_trips[hour] = result["social_total"]
+		profile.hourly_trips[hour] = result["work_total"] + result["shopping_total"] + result["social_total"]
+		peak_all = maxf(peak_all, result["peak_all"])
+		peak_work = maxf(peak_work, result["peak_work"])
+		peak_shopping = maxf(peak_shopping, result["peak_shopping"])
+		peak_social = maxf(peak_social, result["peak_social"])
 	profile.peak_net_trips_by_purpose = {FlowProfile.ALL: peak_all, FlowProfile.WORK: peak_work, FlowProfile.COMMERCIAL: peak_shopping, FlowProfile.SOCIAL: peak_social}
+
+
+static func _build_hour(daily_work_od: Array[PackedFloat32Array], hour: int, count: int, inputs: Dictionary) -> Dictionary:
+	var shopping_od: Array[PackedFloat32Array] = inputs["shopping_od"]
+	var social_od: Array[PackedFloat32Array] = inputs["social_od"]
+	var previous_social_od: Array[PackedFloat32Array] = inputs["previous_social_od"]
+	var work_outbound: PackedFloat32Array = inputs["work_outbound"]
+	var work_return: PackedFloat32Array = inputs["work_return"]
+	var shopping_outbound: PackedFloat32Array = inputs["shopping_outbound"]
+	var shopping_return: PackedFloat32Array = inputs["shopping_return"]
+	var social_departures: PackedFloat32Array = inputs["social_departures"]
+	var previous_social_departures: PackedFloat32Array = inputs["previous_social_departures"]
+	var work_scale: float = inputs["work_scale"]
+	var all_matrix: Array[PackedFloat32Array] = []
+	var work_matrix: Array[PackedFloat32Array] = []
+	var shopping_matrix: Array[PackedFloat32Array] = []
+	var social_matrix: Array[PackedFloat32Array] = []
+	var work_total := 0.0
+	var shopping_total := 0.0
+	var social_total := 0.0
+	var social_return_today := 0.0
+	var social_return_previous := 0.0
+	for stay_index in range(SOCIAL_STAY_HOURS.size()):
+		var departure_hour: int = hour - SOCIAL_STAY_HOURS[stay_index]
+		if departure_hour >= 0:
+			social_return_today += social_departures[departure_hour] * SOCIAL_STAY_SHARES[stay_index]
+		else:
+			social_return_previous += previous_social_departures[24 + departure_hour] * SOCIAL_STAY_SHARES[stay_index]
+	for origin_id in range(count):
+		var all_row := PackedFloat32Array()
+		var work_row := PackedFloat32Array()
+		var shopping_row := PackedFloat32Array()
+		var social_row := PackedFloat32Array()
+		all_row.resize(count)
+		work_row.resize(count)
+		shopping_row.resize(count)
+		social_row.resize(count)
+		for destination_id in range(count):
+			var work_trips: float = (daily_work_od[origin_id][destination_id] * work_outbound[hour] + daily_work_od[destination_id][origin_id] * work_return[hour]) * work_scale
+			var shopping_trips: float = shopping_od[origin_id][destination_id] * shopping_outbound[hour] + shopping_od[destination_id][origin_id] * shopping_return[hour]
+			var social_trips: float = social_od[origin_id][destination_id] * social_departures[hour] + social_od[destination_id][origin_id] * social_return_today + previous_social_od[destination_id][origin_id] * social_return_previous
+			work_row[destination_id] = work_trips
+			shopping_row[destination_id] = shopping_trips
+			social_row[destination_id] = social_trips
+			all_row[destination_id] = work_trips + shopping_trips + social_trips
+			work_total += work_trips
+			shopping_total += shopping_trips
+			social_total += social_trips
+		work_matrix.append(work_row)
+		shopping_matrix.append(shopping_row)
+		social_matrix.append(social_row)
+		all_matrix.append(all_row)
+	var peak_all := 1.0
+	var peak_work := 1.0
+	var peak_shopping := 1.0
+	var peak_social := 1.0
+	for first_id in range(count):
+		for second_id in range(first_id + 1, count):
+			peak_all = maxf(peak_all, absf(all_matrix[first_id][second_id] - all_matrix[second_id][first_id]))
+			peak_work = maxf(peak_work, absf(work_matrix[first_id][second_id] - work_matrix[second_id][first_id]))
+			peak_shopping = maxf(peak_shopping, absf(shopping_matrix[first_id][second_id] - shopping_matrix[second_id][first_id]))
+			peak_social = maxf(peak_social, maxf(social_matrix[first_id][second_id], social_matrix[second_id][first_id]))
+	return {"all_matrix": all_matrix, "work_matrix": work_matrix, "shopping_matrix": shopping_matrix, "social_matrix": social_matrix, "work_total": work_total, "shopping_total": shopping_total, "social_total": social_total, "peak_all": peak_all, "peak_work": peak_work, "peak_shopping": peak_shopping, "peak_social": peak_social}
