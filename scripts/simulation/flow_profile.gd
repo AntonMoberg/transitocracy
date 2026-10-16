@@ -97,6 +97,16 @@ func get_hourly_total(hour: int, purpose: String = ALL) -> float:
 			return hourly_trips[hour_index]
 
 
+func get_daily_totals() -> Dictionary:
+	var totals := {ALL: 0.0, WORK: 0.0, COMMERCIAL: 0.0, SOCIAL: 0.0}
+	for hour in range(hourly_trips.size()):
+		totals[ALL] += hourly_trips[hour]
+		totals[WORK] += hourly_work_trips[hour]
+		totals[COMMERCIAL] += hourly_shopping_trips[hour]
+		totals[SOCIAL] += hourly_social_trips[hour]
+	return totals
+
+
 func get_interpolated_hourly_total(hour: int, fraction: float, purpose: String = ALL, next_day_profile = null) -> float:
 	var hour_index := clampi(hour, 0, 23)
 	var next_total: float = next_day_profile.get_hourly_total(0, purpose) if hour_index == 23 and next_day_profile != null else get_hourly_total((hour_index + 1) % 24, purpose)

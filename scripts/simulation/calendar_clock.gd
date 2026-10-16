@@ -61,8 +61,9 @@ static func is_weekend_unix(seconds: int) -> bool:
 	return weekday == 0 or weekday == 6
 
 
-func get_display_text() -> String:
+func get_display_text(show_seconds: bool = false) -> String:
 	var date: Dictionary = Time.get_datetime_dict_from_unix_time(unix_seconds)
-	return "%s %d %s %d  •  %02d:%02d" % [
-		WEEKDAY_NAMES[date["weekday"]], date["day"], MONTH_NAMES[date["month"] - 1], date["year"], date["hour"], date["minute"]
+	var clock_text: String = "%02d:%02d:%02d" % [date["hour"], date["minute"], date["second"]] if show_seconds else "%02d:%02d" % [date["hour"], date["minute"]]
+	return "%s %d %s %d  •  %s" % [
+		WEEKDAY_NAMES[date["weekday"]], date["day"], MONTH_NAMES[date["month"] - 1], date["year"], clock_text
 	]

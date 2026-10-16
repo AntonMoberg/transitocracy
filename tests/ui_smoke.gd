@@ -39,7 +39,6 @@ func _run_checks() -> void:
 	main._sync_clock_view()
 	_check(main.playing and main.inspected_hour == -1, "Play must return to the actual time")
 	main._on_play_pressed()
-	main._discard_pending_traffic()
 	var frontier_bin: int = main.traffic_state.next_bin
 	_check(frontier_bin > main.traffic_state.first_recorded_bin and frontier_bin < 96, "a completed bin must exist before testing a traffic wait")
 	main.calendar_clock.set_time(frontier_bin / 4, frontier_bin % 4 * 15)

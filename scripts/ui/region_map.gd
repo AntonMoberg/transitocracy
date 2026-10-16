@@ -213,50 +213,68 @@ func _aggregate_flow_matrix(profile, hour: int, purpose: String) -> Dictionary:
 	return grouped
 
 
+func _road_node_city(node_id: int) -> int:
+	var node = region.road_nodes[node_id]
+	return node.city_id if node.city_id >= 0 else region.neighborhoods[region.nearest_neighborhood_id(node.position_km)].city_id
+
+
+func _is_strategic_road_nodes(from_node_id: int, to_node_id: int, road_class: String) -> bool:
+	if road_class == "Highway":
+		return true
+	return _road_node_city(from_node_id) != _road_node_city(to_node_id)
+
+
+func _is_strategic_road(link) -> bool:
+	return _is_strategic_road_nodes(link.from_node_id, link.to_node_id, link.road_class)
+
+
 func _draw_aggregate_roads() -> void:
-	_ensure_aggregate_cache()
-	var corridors: Dictionary = {}
-	var visible_ids: Dictionary = {}
-	for area in _visible_areas():
-		visible_ids[area.id] = true
 	var local_km := 0.0
+	for link in region.road_links:
+		if _is_strategic_road(link):
+			continue
+		local_km += link.length_km
+		draw_polyline(_screen_polyline(link.points), Color("526474", 0.30), 1.0, true)
 	for index in range(region.road_links.size()):
 		var link = region.road_links[index]
-		var first_group: int = aggregate_node_groups[link.from_node_id]
-		var second_group: int = aggregate_node_groups[link.to_node_id]
-		if not visible_ids.has(first_group) or not visible_ids.has(second_group):
+		if not _is_strategic_road(link):
 			continue
-		if first_group == second_group:
-			local_km += link.length_km
-			continue
-		var first_id: int = mini(first_group, second_group)
-		var second_id: int = maxi(first_group, second_group)
-		var key: Vector2i = Vector2i(first_id, second_id)
-		if not corridors.has(key):
-			corridors[key] = {"capacity": 0.0, "forward": 0.0, "reverse": 0.0, "queue_forward": 0.0, "queue_reverse": 0.0}
-		var corridor: Dictionary = corridors[key]
-		corridor["capacity"] += (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
-		if traffic_profile != null and index < traffic_profile.link_ids.size():
-			var served: Vector2 = traffic_profile.interpolated_served_rate(index, selected_hour, hour_fraction, next_traffic_profile)
-			var queue: Vector2 = traffic_profile.interpolated_queue(index, selected_hour, hour_fraction)
-			corridor["forward"] += served.x if first_group == first_id else served.y
-			corridor["reverse"] += served.y if first_group == first_id else served.x
-			corridor["queue_forward"] += queue.x if first_group == first_id else queue.y
-			corridor["queue_reverse"] += queue.y if first_group == first_id else queue.x
-	for key in corridors:
-		var corridor: Dictionary = corridors[key]
-		var capacity: float = maxf(1.0, corridor["capacity"])
-		var forward_color: Color = _congestion_color(maxf(corridor["forward"] / capacity, corridor["queue_forward"] / (capacity * 0.5)))
-		var reverse_color: Color = _congestion_color(maxf(corridor["reverse"] / capacity, corridor["queue_reverse"] / (capacity * 0.5)))
-		if not _is_recorded_time():
+		var forward_color := Color("3f88b0")
+		var reverse_color := forward_color
+		if map_mode == "Roads" and not _is_recorded_time():
 			forward_color = Color("647687")
 			reverse_color = forward_color
+		elif map_mode == "Roads" and traffic_profile != null and index < traffic_profile.link_ids.size():
+			var served: Vector2 = traffic_profile.interpolated_served_rate(index, selected_hour, hour_fraction, next_traffic_profile)
+			var queue: Vector2 = traffic_profile.interpolated_queue(index, selected_hour, hour_fraction)
+			var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
+			forward_color = _congestion_color(maxf(served.x / capacity, queue.x / (capacity * 0.5)))
+			reverse_color = _congestion_color(maxf(served.y / capacity, queue.y / (capacity * 0.5)))
 		if map_mode == "Trips":
-			forward_color.a = 0.25
-			reverse_color.a = 0.25
-		_draw_active_road(PackedVector2Array([_world_to_screen(region.jurisdictions[key.x].center_km), _world_to_screen(region.jurisdictions[key.y].center_km)]), 1, forward_color, reverse_color, false)
+			forward_color.a = 0.23
+			reverse_color.a = 0.23
+		_draw_active_road(_screen_polyline(link.points), link.lanes_per_direction, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 	var font := get_theme_default_font()
-	draw_string(font, Vector2(18, size.y - 18), "%s view  •  %.0f km of local roads summarized" % [detail_level, local_km], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("aec5d4"))
+	draw_string(font, Vector2(18, size.y - 18), "%s view  •  %.0f km of local roads subdued" % [detail_level, local_km], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("aec5d4"))
+
+
+func _draw_aggregate_road_projects() -> void:
+	for project in region.road_projects:
+		match project.kind:
+			"New road":
+				if _is_strategic_road_nodes(project.from_node_id, project.to_node_id, project.road_class):
+					_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, Color("8fbfd8", 0.70))
+			"Widen":
+				for link in region.road_links:
+					if link.id == project.target_link_id and _is_strategic_road(link):
+						var screen_points: PackedVector2Array = _screen_polyline(link.points)
+						for direction in range(2):
+							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction))
+							_draw_dashed_polyline(new_lane, Color("f0d38d", 0.9), _road_lane_width())
+			"Interchange junction":
+				draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+			"Highway exit":
+				draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 
 
 func _draw_aggregate_flows() -> void:
@@ -359,6 +377,10 @@ func _draw() -> void:
 
 
 func _draw_roads() -> void:
+	if detail_level != "Neighborhood":
+		_draw_aggregate_roads()
+		_draw_aggregate_road_projects()
+		return
 	for link_index in range(region.road_links.size()):
 		var link = region.road_links[link_index]
 		var forward_color := Color("3f88b0")
@@ -499,6 +521,9 @@ func _congestion_color(ratio: float) -> Color:
 func _draw_road_nodes() -> void:
 	for node in region.road_nodes:
 		var position_on_screen: Vector2 = _world_to_screen(node.position_km)
+		if detail_level != "Neighborhood" and node.neighborhood_id >= 0 and not node.is_interchange:
+			draw_circle(position_on_screen, 2.0, Color("8ea3b1", 0.48))
+			continue
 		var radius := 5.0 if node.is_interchange else 3.5
 		draw_circle(position_on_screen, radius + 2.0, Color("091321"))
 		draw_circle(position_on_screen, radius, Color("f2d786") if node.is_interchange else Color("c8d5df"))
@@ -654,6 +679,10 @@ func _draw_cities() -> void:
 
 
 func _draw_neighborhoods() -> void:
+	if detail_level != "Neighborhood":
+		for neighborhood in region.neighborhoods:
+			draw_circle(_world_to_screen(neighborhood.position_km), 2.5, Color("718899", 0.45))
+		return
 	if region.accessibility.is_empty():
 		return
 	var min_access: float = region.accessibility[0]
@@ -705,6 +734,9 @@ func _draw_neighborhoods() -> void:
 
 
 func _draw_hourly_flows() -> void:
+	if detail_level != "Neighborhood":
+		_draw_aggregate_flows()
+		return
 	if flow_profile == null:
 		return
 	var visible_flows: Array[Dictionary] = _get_net_flows()
