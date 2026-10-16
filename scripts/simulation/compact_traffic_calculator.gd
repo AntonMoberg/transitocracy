@@ -36,30 +36,55 @@ static func prepare_routes(region, state, previous_state = null) -> void:
 
 
 static func build_hour(region, profile, state, mode: int, hour: int) -> void:
+	if mode == 2 and hour >= 0 and hour < state.compact_hourly_links.size() and not state.compact_hourly_links[hour].is_empty():
+		state.cached_links = state.compact_hourly_links[hour]
+		state.profile.hourly_volumes[hour] = state.cached_links
+		state.cached_revenue = state.compact_hourly_revenue[hour]
+		state.cached_hour = hour
+		state.cached_mode = mode
+		return
 	if state.compact_trees_by_mode.is_empty():
 		prepare_routes(region, state)
 	var stage_start: int = Time.get_ticks_usec()
 	var region_mode: bool = mode == 3
 	var group_count: int = region.region_ids.size() if region_mode else region.cities.size()
 	var grouped: Array[PackedFloat32Array] = []
+	var daily_od: Dictionary = profile.compact_region_od if region_mode else profile.compact_city_od
+	var work_daily: Array = daily_od[FlowProfile.WORK]
+	var shopping_daily: Array = daily_od[FlowProfile.COMMERCIAL]
+	var social_daily: Array = daily_od[FlowProfile.SOCIAL]
+	var work_curves: Dictionary = profile.compact_curves[FlowProfile.WORK]
+	var shopping_curves: Dictionary = profile.compact_curves[FlowProfile.COMMERCIAL]
+	var social_curves: Dictionary = profile.compact_curves[FlowProfile.SOCIAL]
+	var work_out: float = 1.0 / 24.0 if hour == 24 else work_curves["out"][hour]
+	var work_back: float = 1.0 / 24.0 if hour == 24 else work_curves["back"][hour]
+	var shopping_out: float = 1.0 / 24.0 if hour == 24 else shopping_curves["out"][hour]
+	var shopping_back: float = 1.0 / 24.0 if hour == 24 else shopping_curves["back"][hour]
+	var social_out: float = 1.0 / 24.0 if hour == 24 else social_curves["out"][hour]
+	var social_back: float = 1.0 / 24.0 if hour == 24 else social_curves["back"][hour]
+	var centers := PackedVector2Array()
+	centers.resize(group_count)
 	for _group_id in range(group_count):
 		var row := PackedFloat32Array()
 		row.resize(group_count)
 		grouped.append(row)
+		centers[_group_id] = region.jurisdictions[region.region_ids[_group_id]].center_km if region_mode else region.cities[_group_id]["center_km"]
 	for origin_group in range(group_count):
+		var work_origin: PackedFloat32Array = work_daily[origin_group]
+		var shopping_origin: PackedFloat32Array = shopping_daily[origin_group]
+		var social_origin: PackedFloat32Array = social_daily[origin_group]
+		var grouped_origin: PackedFloat32Array = grouped[origin_group]
 		for destination_group in range(group_count):
 			if origin_group == destination_group and not region_mode:
 				continue
-			var work: float = profile._compact_region_hour_pair(origin_group, destination_group, hour, FlowProfile.WORK) if region_mode else profile._compact_city_hour_pair(origin_group, destination_group, hour, FlowProfile.WORK)
-			var shopping: float = profile._compact_region_hour_pair(origin_group, destination_group, hour, FlowProfile.COMMERCIAL) if region_mode else profile._compact_city_hour_pair(origin_group, destination_group, hour, FlowProfile.COMMERCIAL)
-			var social: float = profile._compact_region_hour_pair(origin_group, destination_group, hour, FlowProfile.SOCIAL) if region_mode else profile._compact_city_hour_pair(origin_group, destination_group, hour, FlowProfile.SOCIAL)
+			var work: float = work_origin[destination_group] * work_out + work_daily[destination_group][origin_group] * work_back
+			var shopping: float = shopping_origin[destination_group] * shopping_out + shopping_daily[destination_group][origin_group] * shopping_back
+			var social: float = social_origin[destination_group] * social_out + social_daily[destination_group][origin_group] * social_back
 			if work + shopping + social < 0.00001:
 				continue
-			var origin_point: Vector2 = region.jurisdictions[region.region_ids[origin_group]].center_km if region_mode else region.cities[origin_group]["center_km"]
-			var destination_point: Vector2 = region.jurisdictions[region.region_ids[destination_group]].center_km if region_mode else region.cities[destination_group]["center_km"]
-			var distance: float = origin_point.distance_to(destination_point)
+			var distance: float = centers[origin_group].distance_to(centers[destination_group])
 			var car_share: float = clampf(0.20 + 0.035 * distance, 0.20, 0.90)
-			grouped[origin_group][destination_group] = car_share * (work / 1.2 + shopping / 1.5 + social / 1.8)
+			grouped_origin[destination_group] = car_share * (work / 1.2 + shopping / 1.5 + social / 1.8)
 	_record_stage(state, "group_demand", stage_start)
 	stage_start = Time.get_ticks_usec()
 	var node_key: String = "region_nodes" if region_mode else "city_nodes"

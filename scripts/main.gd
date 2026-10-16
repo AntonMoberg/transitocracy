@@ -17,6 +17,7 @@ const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd"
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const MultiScaleDayCalculator = preload("res://scripts/simulation/multiscale_day_calculator.gd")
 const MultiScaleWeekBuffer = preload("res://scripts/simulation/multiscale_week_buffer.gd")
+const CompactHourPrecompute = preload("res://scripts/simulation/compact_hour_precompute.gd")
 const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
 const RoadRebuild = preload("res://scripts/simulation/road_rebuild.gd")
 
@@ -33,6 +34,9 @@ var inspected_minute: int = 0
 var pending_day_thread: Thread
 var week_thread: Thread
 var week_buffer
+var compact_hour_thread: Thread
+var compact_hour_buffer
+var compact_hour_prepared_count: int = 0
 var active_snapshot_buffers: Array = []
 var deferred_region_edits: Array[Callable] = []
 var pending_day_key: int = -1
@@ -104,6 +108,7 @@ var last_handoff_us: int = 0
 var last_advance_us: int = 0
 var last_sync_us: int = 0
 var last_handoff_breakdown: Dictionary = {}
+var pending_inspector_refresh: bool = false
 
 
 func _ready() -> void:
@@ -133,6 +138,10 @@ func _process(delta: float) -> void:
 	_reap_finished_day_threads()
 	_reap_finished_data_threads()
 	_poll_day_worker()
+	_poll_compact_hour_worker()
+	if pending_inspector_refresh:
+		pending_inspector_refresh = false
+		_refresh_inspector(false)
 	if simulation_mode == MultiScaleTraffic.DAY and traffic_state != null:
 		_ensure_week_worker()
 		_poll_week_worker()
@@ -148,6 +157,7 @@ func _process(delta: float) -> void:
 	var handoff_started: int = Time.get_ticks_usec()
 	_ensure_day_profiles()
 	last_handoff_us = Time.get_ticks_usec() - handoff_started
+	_ensure_compact_hour_worker()
 	if not playing or calendar_clock == null or traffic_state == null:
 		return
 	var target_rate: float = [1.0, 60.0, 3600.0, 86400.0][simulation_mode] * [1.0, 2.0, 4.0][pace_index]
@@ -166,23 +176,45 @@ func _process(delta: float) -> void:
 			break
 		if compact_day and simulation_credit < float(day_end - traffic_state.unix_seconds):
 			break
+		if compact_day and week_buffer != null and pending_day_result_key != traffic_state.day_key + 1:
+			# Keep the display at the day edge until the worker publishes the
+			# prepared snapshot instead of doing a costly fallback on this frame.
+			break
 		if compact_hour and simulation_credit < float(mini(day_end, (traffic_state.unix_seconds / 3600 + 1) * 3600) - traffic_state.unix_seconds):
 			break
 		var quantum: int = 1 if simulation_mode == MultiScaleTraffic.SECOND else (60 if simulation_mode == MultiScaleTraffic.MINUTE else (86400 if compact_day else 3600))
 		var duration: int = mini(floori(simulation_credit), mini(quantum, day_end - traffic_state.unix_seconds))
 		if duration <= 0:
 			break
-		var pending_policies_before: int = region.pending_policy_changes.size()
-		MultiScaleTraffic.advance(region, flow_profile, traffic_state, traffic_state.unix_seconds + duration, simulation_mode)
-		if region.pending_policy_changes.size() != pending_policies_before:
-			_refresh_fiscal_controls()
-			_refresh_inspector(false)
+		if compact_day and pending_day_result_key == traffic_state.day_key + 1:
+			# The week worker has already simulated this entire day to produce the
+			# next snapshot. Avoid repeating the same traffic work on the UI thread.
+			traffic_state.unix_seconds = day_end
+		else:
+			var pending_policies_before: int = region.pending_policy_changes.size()
+			MultiScaleTraffic.advance(region, flow_profile, traffic_state, traffic_state.unix_seconds + duration, simulation_mode)
+			if region.pending_policy_changes.size() != pending_policies_before:
+				_refresh_fiscal_controls()
+				_refresh_inspector(false)
 		simulation_credit -= duration
 		calendar_clock.unix_seconds = traffic_state.unix_seconds
 		if traffic_state.unix_seconds >= day_end:
 			_queue_next_day(traffic_state.day_key)
 			break
+	if compact_day and pending_day_result_key == traffic_state.day_key + 1 and traffic_state.unix_seconds >= (traffic_state.day_key + 1) * 86400:
+		# Carry any fractional-day credit into the prepared day in this frame.
+		# Waiting for the next frame would visibly jump past midnight.
+		_ensure_day_profiles()
 	calendar_clock.fractional_second = minf(0.999, simulation_credit) if simulation_mode == MultiScaleTraffic.SECOND else 0.0
+	if compact_hour or compact_day:
+		var seconds_until_day_end: float = float((traffic_state.day_key + 1) * 86400 - traffic_state.unix_seconds)
+		var display_window: float = seconds_until_day_end
+		if compact_hour:
+			var seconds_until_hour_end: float = float((traffic_state.unix_seconds / 3600 + 1) * 3600 - traffic_state.unix_seconds)
+			display_window = minf(display_window, seconds_until_hour_end)
+		calendar_clock.visual_offset_seconds = minf(simulation_credit, maxf(0.0, display_window - 0.001))
+	else:
+		calendar_clock.visual_offset_seconds = 0.0
 	last_advance_us = Time.get_ticks_usec() - advance_started
 	game_rate_seconds += traffic_state.unix_seconds - game_start
 	real_rate_seconds += delta
@@ -546,8 +578,14 @@ func _on_mode_selected(index: int) -> void:
 			mode_selector.select(simulation_mode)
 			return
 	var old_mode: int = simulation_mode
+	if old_mode != index:
+		simulation_credit = 0.0
+		if calendar_clock != null:
+			calendar_clock.visual_offset_seconds = 0.0
 	if old_mode != index and (old_mode == MultiScaleTraffic.DAY or index == MultiScaleTraffic.DAY):
 		_discard_pending_day()
+	elif old_mode == MultiScaleTraffic.HOUR and index != MultiScaleTraffic.HOUR:
+		_discard_compact_hour_precompute()
 	simulation_mode = index
 	mode_selector.select(index)
 	if old_mode != index:
@@ -853,19 +891,20 @@ func _apply_generated_region(result: Dictionary) -> void:
 	simulation_credit = 0.0
 
 
-func _refresh_region_summary() -> void:
-	var totals: Dictionary = region.get_region_totals()
+func _refresh_region_summary(prepared_stats: Dictionary = {}) -> void:
+	var totals: Dictionary = prepared_stats if not prepared_stats.is_empty() else region.get_region_totals()
 	summary_label.text = "%s  •  %d regions  •  %d counties  •  %d cities  •  %d neighborhoods  •  %s people  •  %s jobs" % [
 		region.state_name, region.region_ids.size(), region.county_ids.size(), region.cities.size(), region.neighborhoods.size(),
 		_format_count(totals["population"]), _format_count(totals["jobs"]),
 	]
-	var balance := 0.0
-	var net := 0.0
-	for area in region.jurisdictions:
-		if area.kind == "Region":
-			continue
-		balance += area.treasury
-		net += area.daily_revenue() - area.daily_road_upkeep
+	var balance: float = float(prepared_stats.get("balance", 0.0))
+	var net: float = float(prepared_stats.get("net", 0.0))
+	if prepared_stats.is_empty():
+		for area in region.jurisdictions:
+			if area.kind == "Region":
+				continue
+			balance += area.treasury
+			net += area.daily_revenue() - area.daily_road_upkeep
 	dynamics_label.text = "Today: %+d households / %+d people  •  Total funds $%s  •  Net $%s/day" % [
 		region.last_household_change, region.last_population_change, _format_count(roundi(balance)), _format_count(roundi(net))
 	]
@@ -877,10 +916,13 @@ func _ensure_day_profiles() -> void:
 		return
 	if traffic_state.unix_seconds < pending_day_result_key * 86400:
 		return
+	_discard_compact_hour_precompute()
 	var handoff_started: int = Time.get_ticks_usec()
+	last_handoff_breakdown.clear()
 	if simulation_mode == MultiScaleTraffic.DAY and week_timeline_start_key >= 0:
 		week_timeline_history[traffic_state.day_key] = flow_profile.get_daily_totals()
 	var old_data: Dictionary = {"region": region, "flow": flow_profile, "traffic_state": traffic_state, "traffic_profile": traffic_profile}
+	var summary_stats: Dictionary = pending_day_result.get("summary_stats", {})
 	region = pending_day_result["region"]
 	flow_profile = pending_day_result["flow"]
 	traffic_state = pending_day_result["traffic_state"]
@@ -904,10 +946,9 @@ func _ensure_day_profiles() -> void:
 	last_handoff_breakdown["assign"] = Time.get_ticks_usec() - handoff_started
 	_retire_simulation_data(old_data)
 	last_handoff_breakdown["retire"] = Time.get_ticks_usec() - handoff_started
-	_refresh_region_summary()
+	_refresh_region_summary(summary_stats)
 	last_handoff_breakdown["summary"] = Time.get_ticks_usec() - handoff_started
-	_refresh_inspector(false)
-	last_handoff_breakdown["inspector"] = Time.get_ticks_usec() - handoff_started
+	pending_inspector_refresh = true
 	_update_road_status()
 	last_handoff_breakdown["total"] = Time.get_ticks_usec() - handoff_started
 
@@ -919,6 +960,59 @@ func _retire_simulation_data(payload: Dictionary) -> void:
 	else:
 		# Keep the payload alive and retry on a later frame if a thread cannot start.
 		retired_data_backlog.append(payload)
+
+
+func _ensure_compact_hour_worker() -> void:
+	if simulation_mode != MultiScaleTraffic.HOUR or region == null or not region.is_large_scale or traffic_state == null:
+		return
+	if traffic_state.unix_seconds >= (traffic_state.day_key + 1) * 86400:
+		return
+	if compact_hour_thread != null or traffic_state.compact_hourly_links.size() == 24 or _region_snapshot_busy():
+		return
+	var snapshot = MultiScaleTraffic.fork_for_week(traffic_state)
+	var buffer = CompactHourPrecompute.new()
+	buffer.bind_source(region, flow_profile, traffic_state.day_key)
+	var worker := Thread.new()
+	var task := Callable(CompactHourPrecompute, "prepare").bind(region, flow_profile, snapshot, buffer)
+	if worker.start(task, Thread.PRIORITY_LOW) != OK:
+		push_warning("Could not start hourly route preparation worker; using direct calculation.")
+		return
+	compact_hour_buffer = buffer
+	compact_hour_thread = worker
+	active_snapshot_buffers.append(buffer)
+
+
+func _poll_compact_hour_worker() -> void:
+	if compact_hour_thread == null:
+		return
+	if compact_hour_buffer != null and traffic_state != null and compact_hour_buffer.source_region == region and compact_hour_buffer.source_flow == flow_profile and compact_hour_buffer.source_day_key == traffic_state.day_key:
+		var prepared: Dictionary = compact_hour_buffer.snapshot_hours()
+		if int(prepared["count"]) > compact_hour_prepared_count:
+			traffic_state.compact_hourly_links = prepared["links"]
+			traffic_state.compact_hourly_revenue = prepared["revenue"]
+			compact_hour_prepared_count = int(prepared["count"])
+	if compact_hour_thread.is_alive():
+		return
+	var result: Dictionary = compact_hour_thread.wait_to_finish()
+	compact_hour_thread = null
+	compact_hour_buffer = null
+	if result.is_empty() or traffic_state == null:
+		return
+	if result["region"] != region or result["flow"] != flow_profile or result["day_key"] != traffic_state.day_key or result["link_ids"] != traffic_state.link_ids:
+		return
+
+
+func _discard_compact_hour_precompute() -> void:
+	if compact_hour_buffer != null:
+		compact_hour_buffer.cancel()
+		compact_hour_buffer = null
+	if compact_hour_thread != null:
+		retired_day_threads.append(compact_hour_thread)
+		compact_hour_thread = null
+	if traffic_state != null:
+		traffic_state.compact_hourly_links.clear()
+		traffic_state.compact_hourly_revenue.clear()
+	compact_hour_prepared_count = 0
 
 
 func _reap_finished_data_threads() -> void:
@@ -974,6 +1068,7 @@ func _poll_week_worker() -> void:
 	pending_day_result = result
 	pending_day_result_key = target_day_key
 	pending_day_source_mode = MultiScaleTraffic.DAY
+	_set_next_day_flow(pending_day_result["flow"])
 
 
 func _effective_day_rate(target_rate: float) -> float:
@@ -1021,9 +1116,20 @@ func _poll_day_worker() -> void:
 	pending_day_result_key = pending_day_key
 	pending_day_thread = null
 	pending_day_key = -1
+	_set_next_day_flow(pending_day_result["flow"])
+
+
+func _set_next_day_flow(profile) -> void:
+	next_day_profile = profile
+	if map_view != null:
+		map_view.set_next_day_profile(profile)
+	if flow_timeline != null:
+		flow_timeline.set_next_day_profile(profile)
 
 
 func _discard_pending_day() -> void:
+	_discard_compact_hour_precompute()
+	_set_next_day_flow(null)
 	if week_buffer != null:
 		week_buffer.cancel()
 		week_buffer = null
@@ -1086,7 +1192,19 @@ func _sync_clock_view() -> void:
 		_sync_week_timeline()
 	else:
 		flow_timeline.set_week_mode(false)
-	map_view.set_time(int(traffic_display_time.x), traffic_display_time.y)
+	var latest_completed_hour: int = -1
+	var previous_completed_hour: int = -1
+	if simulation_mode == MultiScaleTraffic.HOUR and region.is_large_scale and inspected_hour < 0:
+		var candidate_hour: int = (traffic_state.unix_seconds - traffic_state.day_key * 86400) / 3600 - 1
+		if candidate_hour >= 0 and candidate_hour * 4 + 3 < traffic_state.next_bin and candidate_hour * 4 + 3 >= traffic_state.first_recorded_bin:
+			latest_completed_hour = candidate_hour
+			if candidate_hour > 0 and (candidate_hour - 1) * 4 + 3 >= traffic_state.first_recorded_bin:
+				previous_completed_hour = candidate_hour - 1
+	map_view.set_hourly_road_history(previous_completed_hour, latest_completed_hour, fraction)
+	if map_view.map_mode == "Trips":
+		map_view.set_time(hour, fraction)
+	else:
+		map_view.set_time(int(traffic_display_time.x), traffic_display_time.y)
 	map_view.set_recorded_bin(traffic_state.next_bin, traffic_state.first_recorded_bin)
 	_update_flow_detail()
 	if selected_road_link_id >= 0 and map_mode_selector.selected == 0:
@@ -1107,10 +1225,14 @@ func _sync_week_timeline() -> void:
 			if int(day_key) >= week_timeline_start_key and int(day_key) < week_timeline_start_key + 7:
 				totals[day_key] = prepared_flows[day_key].get_daily_totals()
 	flow_timeline.set_week_mode(true)
-	flow_timeline.set_week_window(week_timeline_start_key, float(calendar_clock.unix_seconds) + calendar_clock.fractional_second, totals)
+	flow_timeline.set_week_window(week_timeline_start_key, calendar_clock.get_display_unix_seconds(), totals)
 
 
 func _display_traffic_time(hour: int, fraction: float) -> Vector2:
+	if simulation_mode == MultiScaleTraffic.HOUR and region.is_large_scale and inspected_hour < 0:
+		var completed_hour: int = (traffic_state.unix_seconds - traffic_state.day_key * 86400) / 3600 - 1
+		if completed_hour >= 0 and completed_hour * 4 + 3 < traffic_state.next_bin and completed_hour * 4 + 3 >= traffic_state.first_recorded_bin:
+			return Vector2(completed_hour, 0.75)
 	var requested_bin: int = hour * 4 + floori(fraction * 4.0)
 	if inspected_hour >= 0 or requested_bin < traffic_state.next_bin or traffic_state.next_bin <= traffic_state.first_recorded_bin:
 		return Vector2(hour, fraction)
@@ -1407,7 +1529,7 @@ func _rebuild_after_road_change() -> void:
 	region.city_od_candidates.clear()
 	AccessibilityCalculator.recalculate(region)
 	flow_profile = TripFlowCalculator.build(region)
-	TripFlowCalculator.populate_day(flow_profile, region.generation_seed, calendar_clock.unix_seconds, calendar_clock.is_weekend())
+	TripFlowCalculator.populate_day(flow_profile, region.generation_seed, calendar_clock.unix_seconds, CalendarClock.is_weekend_unix(calendar_clock.unix_seconds))
 	traffic_state = MultiScaleTraffic.new_day(region, flow_profile, calendar_clock.unix_seconds, previous_state)
 	traffic_profile = traffic_state.profile
 	map_view.set_flow_profile(flow_profile)

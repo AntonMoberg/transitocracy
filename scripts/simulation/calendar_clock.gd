@@ -6,6 +6,8 @@ const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
 
 var unix_seconds: int = 0
 var fractional_second: float = 0.0
+# Presentation time can move within a coarse simulation step without committing it.
+var visual_offset_seconds: float = 0.0
 
 
 func _init() -> void:
@@ -15,6 +17,7 @@ func _init() -> void:
 func reset() -> void:
 	unix_seconds = Time.get_unix_time_from_datetime_dict(START_DATE)
 	fractional_second = 0.0
+	visual_offset_seconds = 0.0
 
 
 func advance_simulation_seconds(seconds: float) -> void:
@@ -22,10 +25,12 @@ func advance_simulation_seconds(seconds: float) -> void:
 	var whole_seconds := floori(elapsed)
 	unix_seconds += whole_seconds
 	fractional_second = elapsed - whole_seconds
+	visual_offset_seconds = 0.0
 
 
 func advance_hour() -> void:
 	unix_seconds += 3600
+	visual_offset_seconds = 0.0
 
 
 func set_hour(hour: int) -> void:
@@ -38,22 +43,27 @@ func set_time(hour: int, minute: int) -> void:
 	unix_seconds += (clampi(minute, 0, 59) - int(date["minute"])) * 60
 	unix_seconds -= int(date["second"])
 	fractional_second = 0.0
+	visual_offset_seconds = 0.0
+
+
+func get_display_unix_seconds() -> float:
+	return float(unix_seconds) + fractional_second + visual_offset_seconds
 
 
 func get_hour() -> int:
-	return int(Time.get_datetime_dict_from_unix_time(unix_seconds)["hour"])
+	return int(Time.get_datetime_dict_from_unix_time(floori(get_display_unix_seconds()))["hour"])
 
 
 func get_minute() -> int:
-	return int(Time.get_datetime_dict_from_unix_time(unix_seconds)["minute"])
+	return int(Time.get_datetime_dict_from_unix_time(floori(get_display_unix_seconds()))["minute"])
 
 
 func get_hour_fraction() -> float:
-	return (float(unix_seconds % 3600) + fractional_second) / 3600.0
+	return fposmod(get_display_unix_seconds(), 3600.0) / 3600.0
 
 
 func is_weekend() -> bool:
-	return is_weekend_unix(unix_seconds)
+	return is_weekend_unix(floori(get_display_unix_seconds()))
 
 
 static func is_weekend_unix(seconds: int) -> bool:
@@ -62,7 +72,7 @@ static func is_weekend_unix(seconds: int) -> bool:
 
 
 func get_display_text(show_seconds: bool = false) -> String:
-	var date: Dictionary = Time.get_datetime_dict_from_unix_time(unix_seconds)
+	var date: Dictionary = Time.get_datetime_dict_from_unix_time(floori(get_display_unix_seconds()))
 	var clock_text: String = "%02d:%02d:%02d" % [date["hour"], date["minute"], date["second"]] if show_seconds else "%02d:%02d" % [date["hour"], date["minute"]]
 	return "%s %d %s %d  •  %s" % [
 		WEEKDAY_NAMES[date["weekday"]], date["day"], MONTH_NAMES[date["month"] - 1], date["year"], clock_text

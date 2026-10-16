@@ -11,6 +11,7 @@ const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
+const SPATIAL_GRID_SIZE = 32
 const CITY_COLORS = [
 	Color("4b8fbf"),
 	Color("9872c5"),
@@ -39,6 +40,10 @@ var selected_hour: int = 8
 var hour_fraction: float = 0.0
 var recorded_bin: int = 0
 var first_recorded_bin: int = 0
+# Coarse mode blends completed traffic hours; it never presents an uncomputed hour.
+var road_history_previous_hour: int = -1
+var road_history_current_hour: int = -1
+var road_history_fraction: float = 1.0
 var selected_purpose: String = FlowProfile.ALL
 var selected_id: int = -1
 var selected_jurisdiction_id: int = -1
@@ -55,6 +60,18 @@ var pointer_dragged: bool = false
 var pointer_start: Vector2 = Vector2.ZERO
 var last_draw_us: int = 0
 var last_draw_stages_us: Dictionary = {}
+var spatial_region
+var spatial_link_count: int = -1
+var spatial_node_count: int = -1
+var spatial_origin: Vector2 = Vector2.ZERO
+var spatial_cell_size: Vector2 = Vector2.ONE
+var spatial_neighborhoods: Dictionary = {}
+var spatial_road_nodes: Dictionary = {}
+var spatial_road_links: Dictionary = {}
+var spatial_strategic_links: Array[int] = []
+var spatial_local_road_km: float = 0.0
+var road_arrow_mesh: ArrayMesh
+var neighborhood_batches: Array[MultiMesh] = []
 
 
 func _ready() -> void:
@@ -66,6 +83,11 @@ func _ready() -> void:
 
 func set_region(new_region) -> void:
 	region = new_region
+	spatial_region = null
+	road_history_previous_hour = -1
+	road_history_current_hour = -1
+	if new_region != null:
+		call_deferred("_ensure_spatial_index")
 	selected_id = -1
 	selected_road_link_id = -1
 	hovered_id = -1
@@ -87,6 +109,9 @@ func set_next_day_profile(new_profile) -> void:
 
 func set_traffic_profile(new_profile) -> void:
 	traffic_profile = new_profile
+	if new_profile == null:
+		road_history_previous_hour = -1
+		road_history_current_hour = -1
 	queue_redraw()
 
 
@@ -143,6 +168,16 @@ func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
 		return
 	recorded_bin = bin_index
 	first_recorded_bin = first_bin
+	queue_redraw()
+
+
+func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: float) -> void:
+	var next_fraction: float = clampf(fraction, 0.0, 1.0)
+	if road_history_previous_hour == previous_hour and road_history_current_hour == current_hour and is_equal_approx(road_history_fraction, next_fraction):
+		return
+	road_history_previous_hour = previous_hour
+	road_history_current_hour = current_hour
+	road_history_fraction = next_fraction
 	queue_redraw()
 
 
@@ -266,30 +301,27 @@ func _is_strategic_road(link) -> bool:
 
 
 func _draw_aggregate_roads() -> void:
-	var local_km := 0.0
-	for link in region.road_links:
-		if _is_strategic_road(link):
-			continue
-		local_km += link.length_km
-		if (not region.is_large_scale or detail_level == "County" and zoom >= 4.0) and _polyline_visible(link.points):
-			draw_polyline(_screen_polyline(link.points), Color("526474", 0.30), 1.0, true)
-	for index in range(region.road_links.size()):
+	_ensure_spatial_index()
+	var local_km: float = spatial_local_road_km
+	if not region.is_large_scale or detail_level == "County" and zoom >= 4.0:
+		var nearby_indices: Array[int] = _spatial_visible_indices(spatial_road_links, 20.0, true) if region.is_large_scale else _all_indices(region.road_links.size())
+		for index in nearby_indices:
+			var local_link = region.road_links[index]
+			if not _is_strategic_road(local_link) and _polyline_visible(local_link.points):
+				draw_polyline(_screen_polyline(local_link.points), Color("526474", 0.30), 1.0, true)
+	for index in spatial_strategic_links:
 		var link = region.road_links[index]
-		if not _is_strategic_road(link):
-			continue
 		if not _polyline_visible(link.points):
 			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
-		if map_mode == "Roads" and not _is_recorded_time():
+		if map_mode == "Roads" and road_history_current_hour < 0 and not _is_recorded_time():
 			forward_color = Color("647687")
 			reverse_color = forward_color
 		elif map_mode == "Roads" and traffic_profile != null and index < traffic_profile.link_ids.size():
-			var served: Vector2 = traffic_profile.interpolated_served_rate(index, selected_hour, hour_fraction, next_traffic_profile)
-			var queue: Vector2 = traffic_profile.interpolated_queue(index, selected_hour, hour_fraction)
-			var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
-			forward_color = _congestion_color(maxf(served.x / capacity, queue.x / (capacity * 0.5)))
-			reverse_color = _congestion_color(maxf(served.y / capacity, queue.y / (capacity * 0.5)))
+			var load: Vector2 = _road_load_ratio(index, link)
+			forward_color = _congestion_color(load.x)
+			reverse_color = _congestion_color(load.y)
 		if map_mode == "Trips":
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
@@ -425,12 +457,112 @@ func _draw() -> void:
 	last_draw_us = Time.get_ticks_usec() - draw_started
 
 
+func _spatial_cell(point: Vector2) -> Vector2i:
+	return Vector2i(
+		clampi(floori((point.x - spatial_origin.x) / spatial_cell_size.x), 0, SPATIAL_GRID_SIZE - 1),
+		clampi(floori((point.y - spatial_origin.y) / spatial_cell_size.y), 0, SPATIAL_GRID_SIZE - 1)
+	)
+
+
+func _spatial_add_point(buckets: Dictionary, point: Vector2, index: int) -> void:
+	var cell: Vector2i = _spatial_cell(point)
+	var key: int = cell.y * SPATIAL_GRID_SIZE + cell.x
+	if not buckets.has(key):
+		buckets[key] = []
+	buckets[key].append(index)
+
+
+func _ensure_spatial_index() -> void:
+	if region == null or (spatial_region == region and spatial_link_count == region.road_links.size() and spatial_node_count == region.road_nodes.size()):
+		return
+	spatial_region = region
+	spatial_link_count = region.road_links.size()
+	spatial_node_count = region.road_nodes.size()
+	spatial_neighborhoods.clear()
+	spatial_road_nodes.clear()
+	spatial_road_links.clear()
+	spatial_strategic_links.clear()
+	spatial_local_road_km = 0.0
+	var bounds: Rect2 = region.jurisdictions[0].bounds_km
+	spatial_origin = bounds.position
+	spatial_cell_size = bounds.size / float(SPATIAL_GRID_SIZE)
+	for neighborhood in region.neighborhoods:
+		_spatial_add_point(spatial_neighborhoods, neighborhood.position_km, neighborhood.id)
+	for node_index in range(region.road_nodes.size()):
+		_spatial_add_point(spatial_road_nodes, region.road_nodes[node_index].position_km, node_index)
+	for link_index in range(region.road_links.size()):
+		var link = region.road_links[link_index]
+		if _is_strategic_road(link):
+			spatial_strategic_links.append(link_index)
+		else:
+			spatial_local_road_km += link.length_km
+		var points: PackedVector2Array = link.points
+		if points.is_empty():
+			continue
+		var link_bounds := Rect2(points[0], Vector2.ZERO)
+		for point in points:
+			link_bounds = link_bounds.expand(point)
+		var first: Vector2i = _spatial_cell(link_bounds.position)
+		var last: Vector2i = _spatial_cell(link_bounds.end)
+		for cell_y in range(first.y, last.y + 1):
+			for cell_x in range(first.x, last.x + 1):
+				var key: int = cell_y * SPATIAL_GRID_SIZE + cell_x
+				if not spatial_road_links.has(key):
+					spatial_road_links[key] = []
+				spatial_road_links[key].append(link_index)
+
+
+func _spatial_visible_indices(buckets: Dictionary, margin: float, unique: bool = false) -> Array[int]:
+	return _spatial_rect_indices(buckets, Vector2(-margin, -margin), size + Vector2(margin, margin), unique)
+
+
+func _spatial_near_indices(buckets: Dictionary, screen_point: Vector2, radius: float, unique: bool = false) -> Array[int]:
+	return _spatial_rect_indices(buckets, screen_point - Vector2(radius, radius), screen_point + Vector2(radius, radius), unique)
+
+
+func _spatial_rect_indices(buckets: Dictionary, screen_first: Vector2, screen_last: Vector2, unique: bool = false) -> Array[int]:
+	_ensure_spatial_index()
+	var first: Vector2i = _spatial_cell(_screen_to_world(screen_first))
+	var last: Vector2i = _spatial_cell(_screen_to_world(screen_last))
+	var result: Array[int] = []
+	var seen: Dictionary = {}
+	for cell_y in range(first.y, last.y + 1):
+		for cell_x in range(first.x, last.x + 1):
+			var key: int = cell_y * SPATIAL_GRID_SIZE + cell_x
+			if not buckets.has(key):
+				continue
+			for index in buckets[key]:
+				if unique:
+					if seen.has(index):
+						continue
+					seen[index] = true
+				result.append(index)
+	return result
+
+
+func _all_indices(count: int) -> Array[int]:
+	var indices: Array[int] = []
+	indices.resize(count)
+	for index in range(count):
+		indices[index] = index
+	return indices
+
+
 func _draw_roads() -> void:
 	if detail_level != "Neighborhood":
 		_draw_aggregate_roads()
 		_draw_aggregate_road_projects()
 		return
-	for link_index in range(region.road_links.size()):
+	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, 25.0, true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
+	var batch_roads: bool = region.is_large_scale and zoom >= 2.0
+	var casing_lines: Dictionary = {}
+	var lane_lines := PackedVector2Array()
+	var lane_colors := PackedColorArray()
+	var arrow_vertices := PackedVector2Array()
+	var arrow_colors := PackedColorArray()
+	var selected_points := PackedVector2Array()
+	var selected_lanes: int = 0
+	for link_index in road_indices:
 		var link = region.road_links[link_index]
 		if region.is_large_scale and zoom < 2.0 and not _is_strategic_road(link):
 			continue
@@ -438,19 +570,54 @@ func _draw_roads() -> void:
 			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
-		if map_mode == "Roads" and not _is_recorded_time():
+		if map_mode == "Roads" and road_history_current_hour < 0 and not _is_recorded_time():
 			forward_color = Color("647687")
 			reverse_color = forward_color
 		elif map_mode == "Roads" and traffic_profile != null:
-			var served: Vector2 = traffic_profile.interpolated_served_rate(link_index, selected_hour, hour_fraction, next_traffic_profile)
-			var queue: Vector2 = traffic_profile.interpolated_queue(link_index, selected_hour, hour_fraction)
-			var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
-			forward_color = _congestion_color(maxf(served.x / capacity, queue.x / (capacity * 0.5)))
-			reverse_color = _congestion_color(maxf(served.y / capacity, queue.y / (capacity * 0.5)))
+			var load: Vector2 = _road_load_ratio(link_index, link)
+			forward_color = _congestion_color(load.x)
+			reverse_color = _congestion_color(load.y)
 		if map_mode == "Trips":
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
-		_draw_active_road(_screen_polyline(link.points), link.lanes_per_direction, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+		var screen_points: PackedVector2Array = _screen_polyline(link.points)
+		if not batch_roads:
+			_draw_active_road(screen_points, link.lanes_per_direction, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+			continue
+		if selected_road_link_id == link.id and map_mode == "Roads":
+			selected_points = screen_points
+			selected_lanes = link.lanes_per_direction
+		if map_mode == "Roads":
+			var casing: PackedVector2Array = casing_lines.get(link.lanes_per_direction, PackedVector2Array())
+			for segment in range(1, screen_points.size()):
+				casing.append(screen_points[segment - 1])
+				casing.append(screen_points[segment])
+			casing_lines[link.lanes_per_direction] = casing
+		for direction in range(2):
+			var lane_color: Color = forward_color if direction == 0 else reverse_color
+			for lane_index in range(link.lanes_per_direction):
+				var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction, direction, lane_index))
+				for segment in range(1, lane_points.size()):
+					lane_lines.append(lane_points[segment - 1])
+					lane_lines.append(lane_points[segment])
+					lane_colors.append(lane_color)
+		if map_mode == "Roads":
+			_append_road_arrow_triangles(screen_points, link.lanes_per_direction, arrow_vertices, arrow_colors)
+	if batch_roads:
+		if not selected_points.is_empty():
+			draw_polyline(selected_points, Color("f7f0bf"), _road_outer_half_width(selected_lanes) * 2.0 + 3.0, true)
+		for lane_count in casing_lines:
+			draw_multiline(casing_lines[lane_count], Color("091321"), _road_outer_half_width(lane_count) * 2.0, true)
+		if not lane_lines.is_empty():
+			draw_multiline_colors(lane_lines, lane_colors, _road_lane_width(), true)
+		if not arrow_vertices.is_empty():
+			var arrays: Array = []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = arrow_vertices
+			arrays[Mesh.ARRAY_COLOR] = arrow_colors
+			road_arrow_mesh = ArrayMesh.new()
+			road_arrow_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			draw_mesh(road_arrow_mesh, null)
 	for project in region.road_projects:
 		match project.kind:
 			"New road":
@@ -466,6 +633,30 @@ func _draw_roads() -> void:
 				draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 			"Highway exit":
 				draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+
+
+func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int, vertices: PackedVector2Array, colors: PackedColorArray) -> void:
+	for segment in range(1, screen_points.size()):
+		var start_point: Vector2 = screen_points[segment - 1]
+		var end_point: Vector2 = screen_points[segment]
+		var displacement: Vector2 = end_point - start_point
+		var segment_length: float = displacement.length()
+		if segment_length < 16.0:
+			continue
+		var tangent: Vector2 = displacement / segment_length
+		var normal: Vector2 = tangent.orthogonal()
+		var bundle_offset: float = _road_median_half_gap() + _road_lane_spacing() * float(lanes) * 0.5
+		var arrow_length: float = clampf(segment_length * 0.18, 3.0, 6.0)
+		for direction in range(2):
+			var travel: Vector2 = tangent if direction == 0 else -tangent
+			var tip: Vector2 = start_point.lerp(end_point, 0.57 if direction == 0 else 0.43) + normal * bundle_offset * _road_direction_side(direction)
+			var base: Vector2 = tip - travel * arrow_length
+			var wing: Vector2 = travel.orthogonal() * 2.2
+			vertices.append(tip)
+			vertices.append(base + wing)
+			vertices.append(base - wing)
+			for corner in range(3):
+				colors.append(Color("f1f7fa", 0.88))
 
 
 func _draw_active_road(screen_points: PackedVector2Array, lanes: int, forward_color: Color, reverse_color: Color, selected: bool) -> void:
@@ -571,9 +762,31 @@ func _congestion_color(ratio: float) -> Color:
 	return Color("e6c56f").lerp(Color("e25e5e"), clampf((ratio - 0.7) / 0.8, 0.0, 1.0))
 
 
+func _road_load_ratio(link_index: int, link) -> Vector2:
+	var served: Vector2
+	var queue: Vector2
+	if road_history_current_hour >= 0:
+		var current_bin: int = road_history_current_hour * 4 + 3
+		var current_served: Vector2 = traffic_profile.quarter_hour_served[current_bin][link_index]
+		served = current_served * 4.0
+		queue = traffic_profile.quarter_hour_queues[current_bin][link_index]
+		if road_history_previous_hour >= 0 and road_history_previous_hour != road_history_current_hour:
+			var previous_bin: int = road_history_previous_hour * 4 + 3
+			served = traffic_profile.quarter_hour_served[previous_bin][link_index].lerp(current_served, road_history_fraction) * 4.0
+			queue = traffic_profile.quarter_hour_queues[previous_bin][link_index].lerp(queue, road_history_fraction)
+	else:
+		served = traffic_profile.interpolated_served_rate(link_index, selected_hour, hour_fraction, next_traffic_profile)
+		queue = traffic_profile.interpolated_queue(link_index, selected_hour, hour_fraction)
+	var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
+	return Vector2(maxf(served.x / capacity, queue.x / (capacity * 0.5)), maxf(served.y / capacity, queue.y / (capacity * 0.5)))
+
+
 func _draw_road_nodes() -> void:
 	var first_node: int = region.neighborhoods.size() if region.is_large_scale and zoom < 2.0 else 0
-	for node_id in range(first_node, region.road_nodes.size()):
+	var node_indices: Array[int] = _spatial_visible_indices(spatial_road_nodes, 16.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
+	for node_id in node_indices:
+		if node_id < first_node:
+			continue
 		var node = region.road_nodes[node_id]
 		var position_on_screen: Vector2 = _world_to_screen(node.position_km)
 		if not _screen_visible(position_on_screen, 16.0):
@@ -751,11 +964,59 @@ func _draw_cities() -> void:
 		draw_arc(center, radius, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.28), 1.0, true)
 
 
+func _circle_mesh(inner_radius: float) -> ArrayMesh:
+	var vertices := PackedVector2Array()
+	for segment in range(32):
+		var first: Vector2 = Vector2.from_angle(float(segment) * TAU / 32.0)
+		var second: Vector2 = Vector2.from_angle(float(segment + 1) * TAU / 32.0)
+		if inner_radius <= 0.0:
+			vertices.append(Vector2.ZERO)
+			vertices.append(first)
+			vertices.append(second)
+		else:
+			vertices.append(first)
+			vertices.append(second)
+			vertices.append(first * inner_radius)
+			vertices.append(second)
+			vertices.append(second * inner_radius)
+			vertices.append(first * inner_radius)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+func _ensure_neighborhood_batches(count: int) -> void:
+	if neighborhood_batches.is_empty():
+		var disc: ArrayMesh = _circle_mesh(0.0)
+		var thin_ring: ArrayMesh = _circle_mesh(0.92)
+		var thick_ring: ArrayMesh = _circle_mesh(0.85)
+		for mesh in [disc, disc, thin_ring, thick_ring]:
+			var batch := MultiMesh.new()
+			batch.transform_format = MultiMesh.TRANSFORM_2D
+			batch.use_colors = true
+			batch.mesh = mesh
+			batch.instance_count = maxi(512, count)
+			neighborhood_batches.append(batch)
+	if count > neighborhood_batches[0].instance_count:
+		for batch in neighborhood_batches:
+			batch.instance_count = count
+
+
+func _set_neighborhood_batch(batch: MultiMesh, index: int, center: Vector2, radius: float, color: Color) -> void:
+	batch.set_instance_transform_2d(index, Transform2D(Vector2(radius, 0.0), Vector2(0.0, radius), center))
+	batch.set_instance_color(index, color)
+
+
 func _draw_neighborhoods() -> void:
+	var neighborhood_indices: Array[int] = _spatial_visible_indices(spatial_neighborhoods, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.neighborhoods.size())
 	if detail_level != "Neighborhood":
 		if region.is_large_scale and detail_level in ["State", "Region"]:
 			return
-		for neighborhood in region.neighborhoods:
+		for neighborhood_index in neighborhood_indices:
+			var neighborhood = region.neighborhoods[neighborhood_index]
 			var point: Vector2 = _world_to_screen(neighborhood.position_km)
 			if _screen_visible(point, 3.0) and (not region.is_large_scale or zoom >= 2.0):
 				draw_circle(point, 2.5, Color("718899", 0.45))
@@ -768,33 +1029,59 @@ func _draw_neighborhoods() -> void:
 		min_access = minf(min_access, value)
 		max_access = maxf(max_access, value)
 	var visible_count := 0
-	for neighborhood in region.neighborhoods:
+	for neighborhood_index in neighborhood_indices:
+		var neighborhood = region.neighborhoods[neighborhood_index]
 		if _screen_visible(_world_to_screen(neighborhood.position_km), 15.0):
 			visible_count += 1
-	var detail_limit: float = 256.0 if zoom < 2.0 else 512.0
+	var detail_limit: float = 256.0 if zoom < 3.0 else 512.0
 	var stride: int = maxi(1, ceili(float(visible_count) / detail_limit)) if region.is_large_scale else 1
-	for neighborhood in region.neighborhoods:
+	var batch_nodes: bool = region.is_large_scale and zoom >= 2.0
+	var batch_count: int = 0
+	if batch_nodes:
+		_ensure_neighborhood_batches(mini(visible_count + 2, 1024))
+	for neighborhood_index in neighborhood_indices:
+		var neighborhood = region.neighborhoods[neighborhood_index]
 		var screen_position: Vector2 = _world_to_screen(neighborhood.position_km)
 		if not _screen_visible(screen_position, 15.0) or (neighborhood.id % stride != 0 and neighborhood.id != selected_id and neighborhood.id != hovered_id):
 			continue
 		var radius: float = _node_radius(neighborhood.population)
 		var color := _access_color((region.accessibility[neighborhood.id] - min_access) / maxf(1.0, max_access - min_access))
-		draw_circle(screen_position, radius + 3.0, Color("0b1421"))
-		draw_circle(screen_position, radius, color)
-		draw_arc(screen_position, radius, 0.0, TAU, 32, Color(1, 1, 1, 0.42), 1.0, true)
 		var desirability_color := Color("cf6075").lerp(Color("61c99a"), neighborhood.desirability / 100.0)
-		draw_arc(screen_position, radius + 2.0, 0.0, TAU, 32, desirability_color, 2.0, true)
-		if neighborhood.id == selected_id:
-			draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("ffffff"), 2.5, true)
-		elif neighborhood.id == hovered_id:
-			draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("a9d7ff"), 2.0, true)
+		if batch_nodes:
+			_set_neighborhood_batch(neighborhood_batches[0], batch_count, screen_position, radius + 3.0, Color("0b1421"))
+			_set_neighborhood_batch(neighborhood_batches[1], batch_count, screen_position, radius, color)
+			_set_neighborhood_batch(neighborhood_batches[2], batch_count, screen_position, radius + 0.5, Color(1, 1, 1, 0.42))
+			_set_neighborhood_batch(neighborhood_batches[3], batch_count, screen_position, radius + 2.5, desirability_color)
+			batch_count += 1
+		else:
+			draw_circle(screen_position, radius + 3.0, Color("0b1421"))
+			draw_circle(screen_position, radius, color)
+			draw_arc(screen_position, radius, 0.0, TAU, 32, Color(1, 1, 1, 0.42), 1.0, true)
+			draw_arc(screen_position, radius + 2.0, 0.0, TAU, 32, desirability_color, 2.0, true)
+			if neighborhood.id == selected_id:
+				draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("ffffff"), 2.5, true)
+			elif neighborhood.id == hovered_id:
+				draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("a9d7ff"), 2.0, true)
+	if batch_nodes:
+		for batch in neighborhood_batches:
+			batch.visible_instance_count = batch_count
+			if batch_count > 0:
+				draw_multimesh(batch, null)
+		for highlighted_id in [selected_id, hovered_id]:
+			if highlighted_id < 0:
+				continue
+			var highlighted = region.neighborhoods[highlighted_id]
+			var center: Vector2 = _world_to_screen(highlighted.position_km)
+			if _screen_visible(center, 20.0):
+				draw_arc(center, _node_radius(highlighted.population) + 5.0, 0.0, TAU, 48, Color("ffffff") if highlighted_id == selected_id else Color("a9d7ff"), 2.5 if highlighted_id == selected_id else 2.0, true)
 	var label_order: Array[int] = []
 	if selected_id >= 0:
 		label_order.append(selected_id)
 	if hovered_id >= 0 and hovered_id != selected_id:
 		label_order.append(hovered_id)
 	if zoom >= 1.8:
-		for neighborhood in region.neighborhoods:
+		for neighborhood_index in neighborhood_indices:
+			var neighborhood = region.neighborhoods[neighborhood_index]
 			if neighborhood.id != selected_id and neighborhood.id != hovered_id and _screen_visible(_world_to_screen(neighborhood.position_km), 25.0) and neighborhood.id % stride == 0:
 				label_order.append(neighborhood.id)
 	var font := get_theme_default_font()
@@ -1234,7 +1521,9 @@ func _hit_road_node(screen_position: Vector2) -> int:
 		return -1
 	var closest := -1
 	var best := INF
-	for node in region.road_nodes:
+	var node_indices: Array[int] = _spatial_near_indices(spatial_road_nodes, screen_position, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
+	for node_index in node_indices:
+		var node = region.road_nodes[node_index]
 		var distance: float = screen_position.distance_to(_world_to_screen(node.position_km))
 		var hit_radius: float = _node_radius(region.neighborhoods[node.neighborhood_id].population) + 3.0 if node.neighborhood_id >= 0 else 13.0
 		if distance <= hit_radius and distance < best:
@@ -1248,7 +1537,9 @@ func _hit_road_link(screen_position: Vector2) -> int:
 		return -1
 	var closest := -1
 	var best := 4.5
-	for link in region.road_links:
+	var link_indices: Array[int] = _spatial_near_indices(spatial_road_links, screen_position, 25.0, true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
+	for link_index in link_indices:
+		var link = region.road_links[link_index]
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
 		for direction in range(2):
 			for lane_index in range(link.lanes_per_direction):
@@ -1267,7 +1558,9 @@ func _hit_test(screen_position: Vector2) -> int:
 		return -1
 	var closest_id := -1
 	var closest_distance := INF
-	for neighborhood in region.neighborhoods:
+	var neighborhood_indices: Array[int] = _spatial_near_indices(spatial_neighborhoods, screen_position, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.neighborhoods.size())
+	for neighborhood_index in neighborhood_indices:
+		var neighborhood = region.neighborhoods[neighborhood_index]
 		var distance: float = screen_position.distance_to(_world_to_screen(neighborhood.position_km))
 		if distance <= _node_radius(neighborhood.population) + 7.0 and distance < closest_distance:
 			closest_id = neighborhood.id

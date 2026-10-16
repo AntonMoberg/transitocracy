@@ -45,7 +45,16 @@ static func advance_day(region, day_key: int, previous_flow, previous_state) -> 
 	var traffic = MultiScaleTraffic.new_day(region, flow, day_key * 86400, previous_state)
 	timings["traffic_new_day"] = Time.get_ticks_usec() - stage_start
 	NeighborhoodDynamics.refresh_desirability(region)
-	return {"region": region, "flow": flow, "traffic_state": traffic, "traffic": traffic.profile, "timings_us": timings}
+	var totals: Dictionary = region.get_region_totals()
+	var balance := 0.0
+	var net := 0.0
+	for area in region.jurisdictions:
+		if area.kind == "Region":
+			continue
+		balance += area.treasury
+		net += area.daily_revenue() - area.daily_road_upkeep
+	var summary_stats := {"population": totals["population"], "jobs": totals["jobs"], "balance": balance, "net": net}
+	return {"region": region, "flow": flow, "traffic_state": traffic, "traffic": traffic.profile, "summary_stats": summary_stats, "timings_us": timings}
 
 
 static func produce_seven_day_windows(region, flow, traffic_state, buffer) -> void:
@@ -86,6 +95,7 @@ static func produce_seven_day_windows(region, flow, traffic_state, buffer) -> vo
 				"region": DayCycleCalculator.copy_region(region),
 				"flow": flow,
 				"traffic_state": MultiScaleTraffic.fork_for_week(traffic_state),
+				"summary_stats": result["summary_stats"],
 				"timings_us": result["timings_us"],
 			}
 			snapshot["timings_us"]["snapshot"] = Time.get_ticks_usec() - stage_start

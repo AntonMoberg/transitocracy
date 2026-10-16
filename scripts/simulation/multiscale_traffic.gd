@@ -296,6 +296,12 @@ static func _advance_compact_day(region, flow_profile, state, day_end: int) -> v
 
 static func _advance_links(region, flow_profile, state, hour: int, duration: int) -> void:
 	var fraction: float = float(duration) / 3600.0
+	var congestion_active: bool = false
+	for city_jurisdiction_id in region.city_jurisdiction_ids:
+		var city_area = region.jurisdictions[city_jurisdiction_id]
+		if city_area.congestion_fee != 0.0 and city_area.is_congestion_hour(hour):
+			congestion_active = true
+			break
 	var bin_index: int = clampi((state.unix_seconds % SECONDS_PER_DAY) / 900, 0, 95)
 	var queued: PackedVector2Array = state.queues.duplicate()
 	var served_bin: PackedVector2Array = state.profile.quarter_hour_served[bin_index].duplicate()
@@ -334,17 +340,18 @@ static func _advance_links(region, flow_profile, state, hour: int, duration: int
 		time_bin[index] = minutes
 		state.last_speed_kmh[index] = Vector2(link.length_km * 60.0 / maxf(0.01, minutes.x), link.length_km * 60.0 / maxf(0.01, minutes.y))
 		state.profile.hourly_peak_ratio[hour] = maxf(state.profile.hourly_peak_ratio[hour], maxf(arrivals.x, arrivals.y) / maxf(1.0, capacity * fraction))
-		var owner = region.jurisdictions[link.owner_jurisdiction_id]
-		owner.daily_fee_revenue += served.x * link.toll_forward + served.y * link.toll_reverse
-		var first_city: int = _node_city(region, link.from_node_id)
-		var second_city: int = _node_city(region, link.to_node_id)
-		if first_city != second_city:
-			var forward_city = region.jurisdictions[region.city_jurisdiction_ids[second_city]]
-			var reverse_city = region.jurisdictions[region.city_jurisdiction_ids[first_city]]
-			if forward_city.is_congestion_hour(hour):
-				forward_city.daily_fee_revenue += served.x * forward_city.congestion_fee
-			if reverse_city.is_congestion_hour(hour):
-				reverse_city.daily_fee_revenue += served.y * reverse_city.congestion_fee
+		if link.toll_forward != 0.0 or link.toll_reverse != 0.0:
+			region.jurisdictions[link.owner_jurisdiction_id].daily_fee_revenue += served.x * link.toll_forward + served.y * link.toll_reverse
+		if congestion_active:
+			var first_city: int = _node_city(region, link.from_node_id)
+			var second_city: int = _node_city(region, link.to_node_id)
+			if first_city != second_city:
+				var forward_city = region.jurisdictions[region.city_jurisdiction_ids[second_city]]
+				var reverse_city = region.jurisdictions[region.city_jurisdiction_ids[first_city]]
+				if forward_city.is_congestion_hour(hour):
+					forward_city.daily_fee_revenue += served.x * forward_city.congestion_fee
+				if reverse_city.is_congestion_hour(hour):
+					reverse_city.daily_fee_revenue += served.y * reverse_city.congestion_fee
 		state.served_cars += served.x + served.y
 	state.queues = queued
 	state.profile.quarter_hour_queues[bin_index] = queued.duplicate()
