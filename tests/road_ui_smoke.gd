@@ -34,8 +34,8 @@ func _run_checks() -> void:
 		label_rects.append(label_rect)
 	_check(main.road_tool_selector.get_item_text(6) == "Demolish", "road tools must include demolition")
 	_check(not main.road_tool_selector.disabled and main.map_view.detail_level == "Neighborhood", "full map must enable detailed road tools")
-	var forward_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 0, 0)
-	var reverse_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 1, 0)
+	var forward_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 0, 0, "Highway")
+	var reverse_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 1, 0, "Highway")
 	_check(forward_side.y > 0.0 and reverse_side.y < 0.0, "road directions must keep right-hand lanes")
 	var preview: Dictionary = {}
 	for first_id in range(mini(20, main.region.road_nodes.size())):
@@ -80,6 +80,8 @@ func _run_checks() -> void:
 	_check(main.traffic_state.link_ids.size() == main.region.road_links.size(), "rolling traffic must replan after demolition")
 	main._on_jurisdiction_selected(main.region.region_ids[0])
 	_check(not main.road_tool_selector.disabled and main.map_view.detail_level == "Neighborhood", "selecting a region must retain detailed road tools and map")
+	_check(main.fiscal_label.tooltip_text.contains("State grants"), "regional inspector must disclose grants alongside road upkeep")
+	_check(main.fiscal_label.text.contains("$%s funds" % main._format_count(roundi(main.region.jurisdictions[main.region.region_ids[0]].treasury))), "regional inspector must show its own spendable treasury")
 	main.map_mode_selector.select(1)
 	main._on_map_mode_selected(1)
 	_check(main.map_view.map_mode == "Trips", "full map must retain the trip layer")

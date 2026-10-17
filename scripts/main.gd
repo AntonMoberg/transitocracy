@@ -776,30 +776,24 @@ func _refresh_fiscal_controls() -> void:
 	var property: float = area.daily_property_revenue
 	var sales: float = area.daily_sales_revenue
 	var fees: float = area.daily_fee_revenue
+	var grants: float = area.daily_grant_revenue
+	var transfers: float = area.daily_transfer_expense
 	var upkeep: float = area.daily_road_upkeep
+	var child_balance := 0.0
 	if area.kind == "Region":
-		balance = 0.0
-		income = 0.0
-		property = 0.0
-		sales = 0.0
-		fees = 0.0
-		upkeep = 0.0
 		var stack: Array = area.child_ids.duplicate()
 		while not stack.is_empty():
 			var child = region.jurisdictions[stack.pop_back()]
-			balance += child.treasury
-			income += child.daily_income_revenue
-			property += child.daily_property_revenue
-			sales += child.daily_sales_revenue
-			fees += child.daily_fee_revenue
-			upkeep += child.daily_road_upkeep
+			child_balance += child.treasury
 			stack.append_array(child.child_ids)
 	var totals: Dictionary = region.get_jurisdiction_totals(area.id)
-	fiscal_label.text = "%s  •  $%s funds  •  $%s/day net%s" % [area.name, _format_count(roundi(balance)), _format_count(roundi(income + property + sales + fees - upkeep)), pending_text]
-	fiscal_label.tooltip_text = "%s: %s people, %s jobs\nTreasury $%s\nIncome $%s/day  •  Property $%s/day\nSales $%s today  •  Fees $%s today\nRoad upkeep $%s/day" % [
+	fiscal_label.text = "%s  •  $%s funds  •  $%s/day net%s" % [area.name, _format_count(roundi(balance)), _format_count(roundi(income + property + sales + fees + grants - upkeep - transfers)), pending_text]
+	fiscal_label.tooltip_text = "%s: %s people, %s jobs\nTreasury $%s\nIncome $%s/day  •  Property $%s/day\nSales $%s today  •  Fees $%s today\nState grants $%s/day  •  Transfers $%s/day\nRoad upkeep $%s/day" % [
 		area.name, _format_count(totals["population"]), _format_count(totals["jobs"]), _format_count(roundi(balance)),
 		_format_count(roundi(income)), _format_count(roundi(property)),
-		_format_count(roundi(sales)), _format_count(roundi(fees)), _format_count(roundi(upkeep))]
+		_format_count(roundi(sales)), _format_count(roundi(fees)), _format_count(roundi(grants)), _format_count(roundi(transfers)), _format_count(roundi(upkeep))]
+	if area.kind == "Region":
+		fiscal_label.tooltip_text += "\nOther local treasuries $%s" % _format_count(roundi(child_balance))
 
 
 func _refresh_scope_breadcrumb() -> void:
@@ -946,10 +940,8 @@ func _refresh_region_summary(prepared_stats: Dictionary = {}) -> void:
 	var net: float = float(prepared_stats.get("net", 0.0))
 	if prepared_stats.is_empty():
 		for area in region.jurisdictions:
-			if area.kind == "Region":
-				continue
 			balance += area.treasury
-			net += area.daily_revenue() - area.daily_road_upkeep
+			net += area.daily_net()
 	dynamics_label.text = "Today: %+d households / %+d people  •  Total funds $%s  •  Net $%s/day" % [
 		region.last_household_change, region.last_population_change, _format_count(roundi(balance)), _format_count(roundi(net))
 	]

@@ -30,6 +30,8 @@ var daily_income_revenue: float = 0.0
 var daily_property_revenue: float = 0.0
 var daily_sales_revenue: float = 0.0
 var daily_fee_revenue: float = 0.0
+var daily_grant_revenue: float = 0.0
+var daily_transfer_expense: float = 0.0
 var daily_road_upkeep: float = 0.0
 var last_fiscal_change: float = 0.0
 
@@ -68,7 +70,11 @@ static func polygon_contains_point(point: Vector2, polygon: PackedVector2Array) 
 
 
 func daily_revenue() -> float:
-	return daily_income_revenue + daily_property_revenue + daily_sales_revenue + daily_fee_revenue
+	return daily_income_revenue + daily_property_revenue + daily_sales_revenue + daily_fee_revenue + daily_grant_revenue
+
+
+func daily_net() -> float:
+	return daily_revenue() - daily_road_upkeep - daily_transfer_expense
 
 
 func is_congestion_hour(hour: int) -> bool:

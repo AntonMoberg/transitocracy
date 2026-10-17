@@ -108,11 +108,6 @@ func lowest_common_jurisdiction(first_id: int, second_id: int) -> int:
 	return 0
 
 
-func funded_jurisdiction(first_id: int, second_id: int) -> int:
-	var owner_id: int = lowest_common_jurisdiction(first_id, second_id)
-	return 0 if jurisdictions[owner_id].kind == "Region" else owner_id
-
-
 func nearest_neighborhood_id(point: Vector2) -> int:
 	var nearest_id := 0
 	var nearest_distance := INF
@@ -139,14 +134,22 @@ func jurisdiction_at_point(point: Vector2) -> int:
 	return 0
 
 
-func road_owner_for_points(points: PackedVector2Array) -> int:
+func road_owner_for_points(points: PackedVector2Array, road_class: String) -> int:
 	var owner_id: int = jurisdiction_at_point(points[0])
+	var traveled := 0.0
+	var next_sample := 5.0
 	for segment in range(1, points.size()):
-		var steps: int = maxi(1, ceili(points[segment - 1].distance_to(points[segment]) / 5.0))
-		for step in range(steps + 1):
-			var point: Vector2 = points[segment - 1].lerp(points[segment], float(step) / float(steps))
+		var length: float = points[segment - 1].distance_to(points[segment])
+		while next_sample < traveled + length:
+			var point: Vector2 = points[segment - 1].lerp(points[segment], (next_sample - traveled) / length)
 			owner_id = lowest_common_jurisdiction(owner_id, jurisdiction_at_point(point))
-	return 0 if jurisdictions[owner_id].kind == "Region" else owner_id
+			next_sample += 5.0
+		traveled += length
+	owner_id = lowest_common_jurisdiction(owner_id, jurisdiction_at_point(points[-1]))
+	if road_class == "Highway":
+		while jurisdictions[owner_id].kind not in ["Region", "State"]:
+			owner_id = jurisdictions[owner_id].parent_id
+	return owner_id
 
 
 func get_city_name(city_id: int) -> String:

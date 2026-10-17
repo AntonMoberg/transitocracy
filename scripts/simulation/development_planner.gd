@@ -4,6 +4,7 @@ const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const RoadNodeData = preload("res://scripts/simulation/road_node_data.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 
@@ -139,9 +140,9 @@ static func set_approval(region, candidate_id: int, approved: bool) -> Dictionar
 	spoke.to_node_id = access_node_id
 	spoke.road_class = RoadLinkData.ARTERIAL
 	spoke.lanes_per_direction = 1
-	spoke.points = StateGeography.land_route(region.jurisdictions[0].polygon_km, gateway.position_km, region.road_nodes[access_node_id].position_km)
+	spoke.points = RoadRouteBuilder.build(region, gateway.id, access_node_id, spoke.road_class)
 	spoke.recalculate_length()
-	spoke.owner_jurisdiction_id = region.road_owner_for_points(spoke.points)
+	spoke.owner_jurisdiction_id = region.road_owner_for_points(spoke.points, spoke.road_class)
 	region.road_links.append(spoke)
 	region.road_geometry_revision += 1
 	region.neighborhood_development_connected.append(0)

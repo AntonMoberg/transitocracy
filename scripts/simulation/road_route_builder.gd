@@ -1,0 +1,199 @@
+extends RefCounted
+
+const StateGeography = preload("res://scripts/simulation/state_geography.gd")
+const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
+const MIN_HIGHWAY_RADIUS_KM = 2.0
+const HIGHWAY_TANGENT_STRAIGHT_KM = 0.1
+
+
+static func build(region, from_id: int, to_id: int, road_class: String, waypoints: PackedVector2Array = PackedVector2Array(), from_tangent: Vector2 = Vector2.ZERO, to_tangent: Vector2 = Vector2.ZERO, land_certified: bool = false) -> PackedVector2Array:
+	assert(not land_certified or waypoints.is_empty())
+	if road_class == RoadLinkData.HIGHWAY and not waypoints.is_empty():
+		# A waypoint already on the natural route must not introduce a new bend.
+		var natural_route: PackedVector2Array = build(region, from_id, to_id, road_class, PackedVector2Array(), from_tangent, to_tangent)
+		var cursor := 0
+		var all_on_route := true
+		for waypoint in waypoints:
+			while cursor < natural_route.size() and natural_route[cursor] != waypoint:
+				cursor += 1
+			if cursor == natural_route.size():
+				all_on_route = false
+				break
+			cursor += 1
+		if all_on_route:
+			return natural_route
+	var anchors := PackedVector2Array([region.road_nodes[from_id].position_km])
+	anchors.append_array(waypoints)
+	anchors.append(region.road_nodes[to_id].position_km)
+	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
+	var safe_path := PackedVector2Array([anchors[0]])
+	for leg_index in range(1, anchors.size()):
+		var safe_leg: PackedVector2Array = PackedVector2Array([anchors[leg_index - 1], anchors[leg_index]]) if land_certified else StateGeography.land_route(land, anchors[leg_index - 1], anchors[leg_index])
+		for point_index in range(1, safe_leg.size()):
+			if safe_path[-1].distance_squared_to(safe_leg[point_index]) > 0.000001:
+				safe_path.append(safe_leg[point_index])
+	if safe_path.size() < 2:
+		return safe_path
+	if road_class == RoadLinkData.ARTERIAL and waypoints.is_empty() and safe_path.size() == 2:
+		return safe_path
+	# Use one bend scale for the whole route so adjoining segments keep the same tangent.
+	var highway: bool = road_class == RoadLinkData.HIGHWAY
+	var path_options: Array[PackedVector2Array] = [safe_path]
+	if highway:
+		if safe_path.size() > 2:
+			for inset_km in [2.0, 4.0, 8.0, 12.0, 20.0, 30.0]:
+				var inset_path: PackedVector2Array = _inset_coastal_detour(land, safe_path, inset_km)
+				if not inset_path.is_empty():
+					path_options.append(inset_path)
+		elif not land_certified:
+			# Small side routes give a coastline-constrained endpoint more room to turn.
+			var middle: Vector2 = safe_path[0].lerp(safe_path[1], 0.5)
+			var normal: Vector2 = (safe_path[1] - safe_path[0]).normalized().orthogonal()
+			for offset_km in [-5.0, 5.0, -10.0, 10.0, -20.0, 20.0, -40.0, 40.0]:
+				var middle_point: Vector2 = middle + normal * offset_km
+				if Geometry2D.is_point_in_polygon(middle_point, land) and StateGeography.segment_on_land(land, safe_path[0], middle_point) and StateGeography.segment_on_land(land, middle_point, safe_path[1]):
+					path_options.append(PackedVector2Array([safe_path[0], middle_point, safe_path[1]]))
+	var best_route := PackedVector2Array()
+	var best_radius := -1.0
+	for path in path_options:
+		for bend_scale in [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.0]:
+			if bend_scale == 0.0 and not highway:
+				return safe_path
+			var handle_scales: Array[float] = [1.0]
+			if highway:
+				handle_scales.append_array([1.5, 2.0, 3.0])
+			for handle_scale in handle_scales:
+				var route := PackedVector2Array([path[0]])
+				var valid := true
+				for segment_index in range(path.size() - 1):
+					var first: Vector2 = path[segment_index]
+					var last: Vector2 = path[segment_index + 1]
+					var chord: Vector2 = (last - first).normalized()
+					var start_direction: Vector2 = _tangent_at(path, segment_index, from_tangent, to_tangent, bend_scale)
+					var end_direction: Vector2 = _tangent_at(path, segment_index + 1, from_tangent, to_tangent, bend_scale)
+					var segment: PackedVector2Array = _curved_segment(land, first, last, chord, start_direction, end_direction, road_class, region.generation_seed, from_id, to_id, segment_index, bend_scale, handle_scale, land_certified)
+					if segment.is_empty():
+						valid = false
+						break
+					for point_index in range(1, segment.size()):
+						route.append(segment[point_index])
+				if not valid:
+					continue
+				if not highway:
+					return route
+				var radius: float = minimum_curve_radius(route)
+				if radius >= MIN_HIGHWAY_RADIUS_KM:
+					return route
+				if radius > best_radius:
+					best_radius = radius
+					best_route = route
+	return best_route if not best_route.is_empty() else safe_path
+
+
+static func minimum_curve_radius(points: PackedVector2Array) -> float:
+	var minimum := INF
+	for index in range(1, points.size() - 1):
+		var before: Vector2 = points[index] - points[index - 1]
+		var after: Vector2 = points[index + 1] - points[index]
+		if before.length() < 0.005 or after.length() < 0.005:
+			continue
+		var cross: float = absf(before.cross(after))
+		if cross < 0.00000001:
+			continue
+		minimum = minf(minimum, before.length() * after.length() * (before + after).length() / (2.0 * cross))
+	return minimum
+
+
+static func _inset_coastal_detour(land: PackedVector2Array, path: PackedVector2Array, inset_km: float) -> PackedVector2Array:
+	var signed_area := 0.0
+	for index in range(land.size()):
+		signed_area += land[index].cross(land[(index + 1) % land.size()])
+	# Vector2.orthogonal() points right of its vector in Godot coordinates.
+	var inward_sign := -1.0 if signed_area > 0.0 else 1.0
+	var inset := path.duplicate()
+	for path_index in range(1, path.size() - 1):
+		var nearest_index := -1
+		var nearest_distance := INF
+		for coast_index in range(land.size()):
+			var distance: float = path[path_index].distance_squared_to(land[coast_index])
+			if distance < nearest_distance:
+				nearest_distance = distance
+				nearest_index = coast_index
+		if nearest_distance > 0.000001:
+			continue
+		var previous: Vector2 = (land[nearest_index] - land[posmod(nearest_index - 1, land.size())]).normalized()
+		var next: Vector2 = (land[(nearest_index + 1) % land.size()] - land[nearest_index]).normalized()
+		var inward: Vector2 = (previous.orthogonal() + next.orthogonal()).normalized() * inward_sign
+		if inward == Vector2.ZERO:
+			return PackedVector2Array()
+		inset[path_index] = path[path_index] + inward * inset_km
+		if not Geometry2D.is_point_in_polygon(inset[path_index], land):
+			return PackedVector2Array()
+	for segment_index in range(1, inset.size()):
+		if not StateGeography.segment_on_land(land, inset[segment_index - 1], inset[segment_index]):
+			return PackedVector2Array()
+	return inset
+
+
+static func clearance_to_coast(land: PackedVector2Array, point: Vector2) -> float:
+	var clearance := INF
+	for index in range(land.size()):
+		clearance = minf(clearance, point.distance_to(Geometry2D.get_closest_point_to_segment(point, land[index], land[(index + 1) % land.size()])))
+	return clearance
+
+
+static func _tangent_at(path: PackedVector2Array, index: int, from_tangent: Vector2, to_tangent: Vector2, bend_scale: float) -> Vector2:
+	var incoming: Vector2 = (path[index] - path[index - 1]).normalized() if index > 0 else (path[1] - path[0]).normalized()
+	var outgoing: Vector2 = (path[index + 1] - path[index]).normalized() if index < path.size() - 1 else incoming
+	if index == 0 and from_tangent != Vector2.ZERO:
+		return from_tangent.normalized()
+	if index == path.size() - 1 and to_tangent != Vector2.ZERO:
+		return to_tangent.normalized()
+	var preferred: Vector2 = outgoing
+	if index > 0 and index < path.size() - 1 and incoming.dot(outgoing) > -0.65:
+		preferred = (incoming + outgoing).normalized()
+	var straight: Vector2 = outgoing if index < path.size() - 1 else incoming
+	return straight.lerp(preferred, bend_scale).normalized()
+
+
+static func _curved_segment(land: PackedVector2Array, first: Vector2, last: Vector2, chord: Vector2, start_direction: Vector2, end_direction: Vector2, road_class: String, seed_value: int, from_id: int, to_id: int, segment_index: int, bend_scale: float, handle_scale: float, land_certified: bool) -> PackedVector2Array:
+	var length: float = first.distance_to(last)
+	if length < 0.001:
+		return PackedVector2Array([first, last])
+	var highway: bool = road_class == RoadLinkData.HIGHWAY
+	var rng := RandomNumberGenerator.new()
+	rng.seed = posmod(seed_value * 1000003 + from_id * 73856093 + to_id * 19349663 + segment_index * 26544357, 2147483647)
+	var bend: float = minf(length * (0.055 if highway else 0.12), 7.0 if highway else 1.4) * rng.randf_range(0.75, 1.0) * (-1.0 if rng.randf() < 0.5 else 1.0) * bend_scale
+	var edge_distance: float = minf(HIGHWAY_TANGENT_STRAIGHT_KM, length * 0.08) if highway else 0.0
+	var curve_first: Vector2 = first + start_direction * edge_distance
+	var curve_last: Vector2 = last - end_direction * edge_distance
+	var handle_length: float = minf(minf(length * 0.32, 12.0 if highway else 1.0) * handle_scale, length * 0.48)
+	var first_control: Vector2 = curve_first + start_direction * handle_length
+	var second_control: Vector2 = curve_last - end_direction * handle_length
+	var steps: int = clampi(ceili(length / (2.0 if highway else 0.15)), 12 if highway else 6, 80)
+	var sample_times: Array[float] = []
+	for step in range(1, steps):
+		var sample_t: float = float(step) / float(steps)
+		if highway:
+			sample_t = 0.5 - 0.5 * cos(sample_t * PI)
+		sample_times.append(sample_t)
+	var candidate := PackedVector2Array([first])
+	if highway:
+		if not land_certified and not StateGeography.segment_on_land(land, first, curve_first):
+			return PackedVector2Array()
+		candidate.append(curve_first)
+	for t in sample_times:
+		var inverse: float = 1.0 - t
+		var point: Vector2 = curve_first * (inverse * inverse * inverse) + first_control * (3.0 * inverse * inverse * t) + second_control * (3.0 * inverse * t * t) + curve_last * (t * t * t)
+		point += chord.orthogonal() * (bend * 16.0 * t * t * inverse * inverse)
+		if not land_certified and not StateGeography.segment_on_land(land, candidate[-1], point):
+			return PackedVector2Array()
+		candidate.append(point)
+	if highway:
+		if not land_certified and not StateGeography.segment_on_land(land, candidate[-1], curve_last):
+			return PackedVector2Array()
+		candidate.append(curve_last)
+	if not land_certified and not StateGeography.segment_on_land(land, candidate[-1], last):
+		return PackedVector2Array()
+	candidate.append(last)
+	return candidate

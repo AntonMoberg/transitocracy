@@ -14,7 +14,8 @@ const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
 const SPATIAL_GRID_SIZE = 32
-const MAX_ZOOM = 64.0
+const MAX_ZOOM = 131072.0
+const MAX_PIXELS_PER_KM = 10000.0
 const TRACKPAD_PAN_PIXELS = 32.0
 const ROAD_LIVE = 0
 const ROAD_HOUR = 1
@@ -113,7 +114,7 @@ func _ready() -> void:
 			button.tooltip_text = "Show the whole state"
 			button.pressed.connect(reset_view)
 		else:
-			var factor: float = 1.25 if label == "+" else 0.8
+			var factor: float = 1.6 if label == "+" else 0.625
 			button.tooltip_text = "Zoom in" if label == "+" else "Zoom out"
 			button.pressed.connect(func() -> void: _zoom_at(size * 0.5, factor))
 		navigation.add_child(button)
@@ -388,12 +389,17 @@ func _show_local_road_detail() -> bool:
 func _draw_aggregate_roads() -> void:
 	_ensure_spatial_index()
 	var local_km: float = spatial_local_road_km
-	if not region.is_large_scale or detail_level == "County" and zoom >= 4.0:
-		var nearby_indices: Array[int] = _spatial_visible_indices(spatial_road_links, 20.0, true) if region.is_large_scale else _all_indices(region.road_links.size())
+	var physical_roads: bool = _pixels_per_meter() >= 0.3
+	if not region.is_large_scale or detail_level == "County" and zoom >= 4.0 or physical_roads:
+		var nearby_indices: Array[int] = _spatial_visible_indices(spatial_road_links, _road_cull_margin(), true) if region.is_large_scale else _all_indices(region.road_links.size())
 		for index in nearby_indices:
 			var local_link = region.road_links[index]
 			if not _is_strategic_road(local_link) and _polyline_visible(local_link.points):
-				draw_polyline(_screen_polyline(local_link.points), Color("526474", 0.30), 1.0, true)
+				var local_points: PackedVector2Array = _screen_polyline(local_link.points)
+				if physical_roads:
+					_draw_active_road(local_points, local_link.lanes_per_direction, local_link.road_class, Color("526474", 0.35), Color("526474", 0.35), false)
+				else:
+					draw_polyline(local_points, Color("526474", 0.30), 1.0, true)
 	for index in spatial_strategic_links:
 		var link = region.road_links[index]
 		if not _polyline_visible(link.points):
@@ -407,7 +413,7 @@ func _draw_aggregate_roads() -> void:
 		if map_mode == "Trips":
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
-		_draw_active_road(_screen_polyline(link.points), link.lanes_per_direction, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+		_draw_active_road(_screen_polyline(link.points), link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 	var font := get_theme_default_font()
 	draw_string(font, Vector2(18, size.y - 18), "%s view  •  %.0f km of local roads subdued" % [detail_level, local_km], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("aec5d4"))
 
@@ -417,14 +423,14 @@ func _draw_aggregate_road_projects() -> void:
 		match project.kind:
 			"New road":
 				if _is_strategic_road_nodes(project.from_node_id, project.to_node_id, project.road_class):
-					_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, Color("8fbfd8", 0.70))
+					_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
 			"Widen":
 				for link in region.road_links:
 					if link.id == project.target_link_id and _is_strategic_road(link):
 						var screen_points: PackedVector2Array = _screen_polyline(link.points)
 						for direction in range(2):
-							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction))
-							_draw_dashed_polyline(new_lane, Color("f0d38d", 0.9), _road_lane_width())
+							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction, link.road_class))
+							_draw_dashed_polyline(new_lane, Color("f0d38d", 0.9), _road_lane_width(link.road_class))
 			"Interchange junction":
 				draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 			"Highway exit":
@@ -651,8 +657,8 @@ func _draw_roads() -> void:
 		_draw_aggregate_roads()
 		_draw_aggregate_road_projects()
 		return
-	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, 25.0, true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
-	var batch_roads: bool = region.is_large_scale and zoom >= 2.0
+	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, _road_cull_margin(), true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
+	var batch_roads: bool = region.is_large_scale and zoom >= 2.0 and _pixels_per_meter() < 0.3
 	var show_local_roads: bool = _show_local_road_detail()
 	var casing_lines: Dictionary = {}
 	var lane_lines := PackedVector2Array()
@@ -678,7 +684,7 @@ func _draw_roads() -> void:
 			reverse_color.a = 0.23
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
 		if not batch_roads:
-			_draw_active_road(screen_points, link.lanes_per_direction, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+			_draw_active_road(screen_points, link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 			continue
 		if selected_road_link_id == link.id and map_mode == "Roads":
 			selected_points = screen_points
@@ -692,7 +698,7 @@ func _draw_roads() -> void:
 		for direction in range(2):
 			var lane_color: Color = forward_color if direction == 0 else reverse_color
 			for lane_index in range(link.lanes_per_direction):
-				var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction, direction, lane_index))
+				var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction, direction, lane_index, link.road_class))
 				for segment in range(1, lane_points.size()):
 					lane_lines.append(lane_points[segment - 1])
 					lane_lines.append(lane_points[segment])
@@ -701,11 +707,11 @@ func _draw_roads() -> void:
 			_append_road_arrow_triangles(screen_points, link.lanes_per_direction, arrow_vertices, arrow_colors)
 	if batch_roads:
 		if not selected_points.is_empty():
-			draw_polyline(selected_points, Color("f7f0bf"), _road_outer_half_width(selected_lanes) * 2.0 + 3.0, true)
+			draw_polyline(selected_points, Color("f7f0bf"), _road_outer_half_width(selected_lanes, "Highway") * 2.0 + 3.0, true)
 		for lane_count in casing_lines:
-			draw_multiline(casing_lines[lane_count], Color("091321"), _road_outer_half_width(lane_count) * 2.0, true)
+			draw_multiline(casing_lines[lane_count], Color("091321"), _road_outer_half_width(lane_count, "Highway") * 2.0, true)
 		if not lane_lines.is_empty():
-			draw_multiline_colors(lane_lines, lane_colors, _road_lane_width(), true)
+			draw_multiline_colors(lane_lines, lane_colors, _road_lane_width("Highway"), true)
 		if not arrow_vertices.is_empty():
 			var arrays: Array = []
 			arrays.resize(Mesh.ARRAY_MAX)
@@ -717,14 +723,14 @@ func _draw_roads() -> void:
 	for project in region.road_projects:
 		match project.kind:
 			"New road":
-				_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, Color("8fbfd8", 0.70))
+				_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
 			"Widen":
 				for link in region.road_links:
 					if link.id == project.target_link_id:
 						var screen_points: PackedVector2Array = _screen_polyline(link.points)
 						for direction in range(2):
-							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction))
-							_draw_dashed_polyline(new_lane, Color("f0d38d", 0.9), _road_lane_width())
+							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction, link.road_class))
+							_draw_dashed_polyline(new_lane, Color("f0d38d", 0.9), _road_lane_width(link.road_class))
 			"Interchange junction":
 				draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 			"Highway exit":
@@ -741,7 +747,7 @@ func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int,
 			continue
 		var tangent: Vector2 = displacement / segment_length
 		var normal: Vector2 = tangent.orthogonal()
-		var bundle_offset: float = _road_median_half_gap() + _road_lane_spacing() * float(lanes) * 0.5
+		var bundle_offset: float = _road_median_half_gap("Highway") + _road_lane_spacing("Highway") * float(lanes) * 0.5
 		var arrow_length: float = clampf(segment_length * 0.18, 3.0, 6.0)
 		for direction in range(2):
 			var travel: Vector2 = tangent if direction == 0 else -tangent
@@ -755,24 +761,27 @@ func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int,
 				colors.append(Color("f1f7fa", 0.88))
 
 
-func _draw_active_road(screen_points: PackedVector2Array, lanes: int, forward_color: Color, reverse_color: Color, selected: bool) -> void:
+func _draw_active_road(screen_points: PackedVector2Array, lanes: int, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:
 	if screen_points.size() < 2:
 		return
 	if map_mode == "Roads":
-		var casing_width: float = _road_outer_half_width(lanes) * 2.0
+		var casing_width: float = _road_outer_half_width(lanes, road_class) * 2.0
 		if selected:
 			draw_polyline(screen_points, Color("f7f0bf"), casing_width + 3.0, true)
 		draw_polyline(screen_points, Color("091321"), casing_width, true)
 	for direction in range(2):
 		var lane_color: Color = forward_color if direction == 0 else reverse_color
 		for lane_index in range(lanes):
-			var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index))
-			draw_polyline(lane_points, lane_color, _road_lane_width(), true)
+			var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index, road_class))
+			draw_polyline(lane_points, lane_color, _road_lane_width(road_class), true)
 	if map_mode == "Roads":
-		_draw_road_direction_arrows(screen_points, lanes)
+		_draw_road_direction_arrows(screen_points, lanes, road_class)
 
 
-func _draw_road_direction_arrows(screen_points: PackedVector2Array, lanes: int) -> void:
+func _draw_road_direction_arrows(screen_points: PackedVector2Array, lanes: int, road_class: String) -> void:
+	var lane_width: float = _road_lane_width(road_class)
+	var arrow_spacing: float = maxf(180.0, lane_width * 7.0)
+	var bundle_offset: float = _road_median_half_gap(road_class) + _road_lane_spacing(road_class) * float(lanes) * 0.5
 	for segment in range(1, screen_points.size()):
 		var start_point: Vector2 = screen_points[segment - 1]
 		var end_point: Vector2 = screen_points[segment]
@@ -782,14 +791,36 @@ func _draw_road_direction_arrows(screen_points: PackedVector2Array, lanes: int) 
 			continue
 		var tangent: Vector2 = displacement / segment_length
 		var normal: Vector2 = tangent.orthogonal()
-		var bundle_offset: float = _road_median_half_gap() + _road_lane_spacing() * float(lanes) * 0.5
-		var arrow_length: float = clampf(segment_length * 0.18, 3.0, 6.0)
-		for direction in range(2):
-			var travel: Vector2 = tangent if direction == 0 else -tangent
-			var tip_position: Vector2 = start_point.lerp(end_point, 0.57 if direction == 0 else 0.43) + normal * bundle_offset * _road_direction_side(direction)
-			var arrow_base: Vector2 = tip_position - travel * arrow_length
-			var wing: Vector2 = travel.orthogonal() * 2.2
-			draw_colored_polygon(PackedVector2Array([tip_position, arrow_base + wing, arrow_base - wing]), Color("f1f7fa", 0.88))
+		var visible_offsets: Vector2 = _visible_segment_offsets(start_point, tangent, segment_length, bundle_offset + lane_width)
+		if visible_offsets.x > visible_offsets.y:
+			continue
+		var first_arrow: int = maxi(0, ceili(visible_offsets.x / arrow_spacing - 0.5))
+		var last_arrow: int = floori(visible_offsets.y / arrow_spacing - 0.5)
+		if segment_length <= arrow_spacing:
+			first_arrow = 0
+			last_arrow = 0
+		for arrow_index in range(first_arrow, last_arrow + 1):
+			var along: float = segment_length * 0.5 if segment_length <= arrow_spacing else (float(arrow_index) + 0.5) * arrow_spacing
+			for direction in range(2):
+				var travel: Vector2 = tangent if direction == 0 else -tangent
+				var tip_position: Vector2 = start_point + tangent * along + normal * bundle_offset * _road_direction_side(direction)
+				if not _screen_visible(tip_position, lane_width):
+					continue
+				var arrow_length: float = maxf(6.0, lane_width * 0.45)
+				var arrow_base: Vector2 = tip_position - travel * arrow_length
+				var wing: Vector2 = travel.orthogonal() * maxf(2.2, lane_width * 0.18)
+				draw_colored_polygon(PackedVector2Array([tip_position, arrow_base + wing, arrow_base - wing]), Color("f1f7fa", 0.88))
+
+
+func _visible_segment_offsets(start_point: Vector2, tangent: Vector2, segment_length: float, margin: float) -> Vector2:
+	var viewport: Rect2 = Rect2(Vector2.ZERO, size).grow(margin)
+	var min_offset: float = INF
+	var max_offset: float = -INF
+	for corner in [viewport.position, Vector2(viewport.end.x, viewport.position.y), viewport.end, Vector2(viewport.position.x, viewport.end.y)]:
+		var along: float = (corner - start_point).dot(tangent)
+		min_offset = minf(min_offset, along)
+		max_offset = maxf(max_offset, along)
+	return Vector2(maxf(0.0, min_offset), minf(segment_length, max_offset))
 
 
 func _screen_polyline(world_points: PackedVector2Array) -> PackedVector2Array:
@@ -816,20 +847,27 @@ func _offset_polyline(screen_points: PackedVector2Array, offset: float) -> Packe
 	return shifted
 
 
-func _road_lane_spacing() -> float:
-	return clampf(2.7 * sqrt(zoom), 2.3, 4.2)
+func _pixels_per_meter() -> float:
+	return _map_scale() * zoom / 1000.0
 
 
-func _road_lane_width() -> float:
-	return clampf(1.8 * sqrt(zoom), 1.5, 2.5)
+func _road_lane_spacing(road_class: String) -> float:
+	var lane_meters: float = 3.6 if road_class == "Highway" else 3.25
+	return maxf(clampf(2.7 * sqrt(zoom), 2.3, 4.2), lane_meters * _pixels_per_meter())
 
 
-func _road_median_half_gap() -> float:
-	return clampf(1.6 * sqrt(zoom), 1.4, 2.4)
+func _road_lane_width(road_class: String) -> float:
+	var lane_meters: float = 3.5 if road_class == "Highway" else 3.15
+	return maxf(clampf(1.8 * sqrt(zoom), 1.5, 2.5), lane_meters * _pixels_per_meter())
 
 
-func _road_lane_offset(lanes: int, direction: int, lane_index: int) -> float:
-	return _road_direction_side(direction) * (_road_median_half_gap() + _road_lane_spacing() * (float(lane_index) + 0.5))
+func _road_median_half_gap(road_class: String) -> float:
+	var half_meters: float = 1.5 if road_class == "Highway" else 0.35
+	return maxf(clampf(1.6 * sqrt(zoom), 1.4, 2.4), half_meters * _pixels_per_meter())
+
+
+func _road_lane_offset(lanes: int, direction: int, lane_index: int, road_class: String) -> float:
+	return _road_direction_side(direction) * (_road_median_half_gap(road_class) + _road_lane_spacing(road_class) * (float(lane_index) + 0.5))
 
 
 func _road_direction_side(direction: int) -> float:
@@ -837,8 +875,13 @@ func _road_direction_side(direction: int) -> float:
 	return -1.0 if direction == 0 else 1.0
 
 
-func _road_outer_half_width(lanes: int) -> float:
-	return _road_median_half_gap() + _road_lane_spacing() * float(lanes) + 0.7
+func _road_outer_half_width(lanes: int, road_class: String) -> float:
+	var shoulder_meters: float = 2.0 if road_class == "Highway" else 0.8
+	return _road_median_half_gap(road_class) + _road_lane_spacing(road_class) * float(lanes) + maxf(0.7, shoulder_meters * _pixels_per_meter())
+
+
+func _road_cull_margin() -> float:
+	return maxf(25.0, _road_outer_half_width(5, "Highway") + 4.0)
 
 
 func _draw_dashed_polyline(screen_points: PackedVector2Array, color: Color, width: float) -> void:
@@ -846,10 +889,10 @@ func _draw_dashed_polyline(screen_points: PackedVector2Array, color: Color, widt
 		_draw_flow_stroke(screen_points[index - 1], screen_points[index], color, width, true)
 
 
-func _draw_dashed_road(screen_points: PackedVector2Array, lanes: int, color: Color) -> void:
+func _draw_dashed_road(screen_points: PackedVector2Array, lanes: int, road_class: String, color: Color) -> void:
 	for direction in range(2):
 		for lane_index in range(lanes):
-			_draw_dashed_polyline(_offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index)), color, _road_lane_width())
+			_draw_dashed_polyline(_offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index, road_class)), color, _road_lane_width(road_class))
 
 
 func _congestion_color(ratio: float) -> Color:
@@ -1107,21 +1150,19 @@ func _draw_road_nodes() -> void:
 
 func _draw_road_preview() -> void:
 	if preview_start_node >= 0:
-		var points := PackedVector2Array([region.road_nodes[preview_start_node].position_km])
-		for point in preview_waypoints:
-			points.append(point)
-		if road_preview.get("ok", false):
-			points.append(region.road_nodes[int(road_preview["to"])].position_km)
-		else:
+		var points: PackedVector2Array = road_preview["points"] if road_preview.get("ok", false) else PackedVector2Array([region.road_nodes[preview_start_node].position_km])
+		if not road_preview.get("ok", false):
+			for point in preview_waypoints:
+				points.append(point)
 			points.append(hover_world_position)
 		var preview_lanes: int = int(road_preview.get("lanes", 2 if road_tool == "Highway" else 1))
-		_draw_dashed_road(_screen_polyline(points), preview_lanes, Color("f4dd91"))
+		_draw_dashed_road(_screen_polyline(points), preview_lanes, road_tool, Color("f4dd91"))
 	elif road_preview.get("ok", false) and road_preview.get("kind", "") == "Highway exit":
 		draw_arc(_world_to_screen(road_preview["position_km"]), 10.0, 0.0, TAU, 24, Color("f4dd91"), 2.0, true)
 	elif road_preview.get("ok", false) and road_preview.get("kind", "") == "Demolish":
 		for link in region.road_links:
 			if link.id == road_preview["target_link_id"]:
-				_draw_dashed_road(_screen_polyline(link.points), link.lanes_per_direction, Color("f06464"))
+				_draw_dashed_road(_screen_polyline(link.points), link.lanes_per_direction, link.road_class, Color("f06464"))
 
 
 func _draw_road_legend() -> void:
@@ -1725,11 +1766,16 @@ func _draw_flow_stroke(start_point: Vector2, end_point: Vector2, color: Color, w
 	if length <= 0.0:
 		return
 	var direction: Vector2 = displacement / length
-	var offset := 0.0
-	while offset < length:
-		var dash_end: float = minf(offset + 10.0, length)
+	if not Rect2(start_point, Vector2.ZERO).expand(end_point).grow(width).intersects(Rect2(Vector2.ZERO, size)):
+		return
+	var visible_offsets: Vector2 = _visible_segment_offsets(start_point, direction, length, width)
+	var dash_length: float = maxf(10.0, width * 1.5)
+	var dash_period: float = dash_length + maxf(6.0, width * 0.6)
+	var offset: float = floorf(visible_offsets.x / dash_period) * dash_period
+	while offset < visible_offsets.y:
+		var dash_end: float = minf(offset + dash_length, length)
 		draw_line(start_point + direction * offset, start_point + direction * dash_end, color, width, true)
-		offset += 16.0
+		offset += dash_period
 
 
 func _choose_flows_for_display(visible_flows: Array[Dictionary]) -> Array[Dictionary]:
@@ -1934,7 +1980,7 @@ func _zoom_at(screen_position: Vector2, factor: float) -> void:
 	if not is_finite(factor) or factor <= 0.0:
 		return
 	var old_zoom: float = zoom
-	zoom = clampf(zoom * factor, 1.0, MAX_ZOOM)
+	zoom = clampf(zoom * factor, 1.0, minf(MAX_ZOOM, MAX_PIXELS_PER_KM / maxf(_map_scale(), 0.001)))
 	var ratio: float = zoom / old_zoom
 	pan = screen_position - size * 0.5 - (screen_position - size * 0.5 - pan) * ratio
 	if pointer_down:
@@ -1962,7 +2008,7 @@ func _gui_input(event: InputEvent) -> void:
 		if mouse_button.pressed and (mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP or mouse_button.button_index == MOUSE_BUTTON_WHEEL_DOWN):
 			var direction: float = 1.0 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
 			var amount: float = mouse_button.factor if mouse_button.factor > 0.0 else 1.0
-			_zoom_at(mouse_button.position, pow(1.12, direction * amount))
+			_zoom_at(mouse_button.position, pow(1.35, direction * amount))
 			accept_event()
 		elif mouse_button.button_index == MOUSE_BUTTON_LEFT:
 			if mouse_button.pressed:
@@ -2064,23 +2110,30 @@ func _hit_road_link(screen_position: Vector2) -> int:
 	if region == null:
 		return -1
 	var closest := -1
-	var best := 4.5
+	var best := INF
 	var show_local_roads: bool = _show_local_road_detail()
-	var link_indices: Array[int] = _spatial_near_indices(spatial_road_links, screen_position, 25.0, true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
+	var link_indices: Array[int] = _spatial_near_indices(spatial_road_links, screen_position, _road_cull_margin(), true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
 	for link_index in link_indices:
 		var link = region.road_links[link_index]
 		if not show_local_roads and not _is_strategic_road(link):
 			continue
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
+		var lane_hit_radius: float = maxf(4.5, _road_lane_width(link.road_class) * 0.5 + 2.0)
 		for direction in range(2):
 			for lane_index in range(link.lanes_per_direction):
-				var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction, direction, lane_index))
+				var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction, direction, lane_index, link.road_class))
 				for segment in range(1, lane_points.size()):
 					var point: Vector2 = Geometry2D.get_closest_point_to_segment(screen_position, lane_points[segment - 1], lane_points[segment])
 					var distance: float = point.distance_to(screen_position)
-					if distance < best:
+					if distance <= lane_hit_radius and distance < best:
 						best = distance
 						closest = link.id
+		for segment in range(1, screen_points.size()):
+			var center_point: Vector2 = Geometry2D.get_closest_point_to_segment(screen_position, screen_points[segment - 1], screen_points[segment])
+			var center_distance: float = center_point.distance_to(screen_position)
+			if center_distance <= _road_outer_half_width(link.lanes_per_direction, link.road_class) + 2.0 and center_distance < best:
+				best = center_distance
+				closest = link.id
 	return closest
 
 
@@ -2170,7 +2223,7 @@ func _polyline_visible(points: PackedVector2Array) -> bool:
 	var bounds := Rect2(first, Vector2.ZERO)
 	for point in points:
 		bounds = bounds.expand(_world_to_screen(point))
-	return bounds.grow(20.0).intersects(Rect2(Vector2.ZERO, size))
+	return bounds.grow(_road_cull_margin()).intersects(Rect2(Vector2.ZERO, size))
 
 
 func _world_to_screen(world_position: Vector2) -> Vector2:

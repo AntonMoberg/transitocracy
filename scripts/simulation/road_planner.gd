@@ -4,6 +4,7 @@ const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 const RoadNodeData = preload("res://scripts/simulation/road_node_data.gd")
 const RoadProjectData = preload("res://scripts/simulation/road_project_data.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
+const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 
 const INTERCHANGE_COST = 10000000
 const INTERCHANGE_UPKEEP = 1000.0
@@ -21,12 +22,24 @@ static func link_preview(region, from_id: int, to_id: int, road_class: String, w
 	for link in region.road_links:
 		if link.road_class == road_class and ((link.from_node_id == from_id and link.to_node_id == to_id) or (link.from_node_id == to_id and link.to_node_id == from_id)):
 			return {"ok": false, "reason": "This road connection already exists."}
-	var points := PackedVector2Array([region.road_nodes[from_id].position_km])
 	for point in waypoints:
 		if not _inside_map(point, region):
 			return {"ok": false, "reason": "Keep road waypoints inside the region."}
-		points.append(point)
-	points.append(region.road_nodes[to_id].position_km)
+	var from_tangent := Vector2.ZERO
+	var to_tangent := Vector2.ZERO
+	if road_class == RoadLinkData.HIGHWAY:
+		from_tangent = -_single_highway_outward(region, from_id)
+		to_tangent = _single_highway_outward(region, to_id)
+	var points: PackedVector2Array = RoadRouteBuilder.build(region, from_id, to_id, road_class, waypoints, from_tangent, to_tangent)
+	if points.size() < 2:
+		return {"ok": false, "reason": "Road is too short."}
+	if road_class == RoadLinkData.HIGHWAY:
+		if RoadRouteBuilder.minimum_curve_radius(points) < RoadRouteBuilder.MIN_HIGHWAY_RADIUS_KM:
+			return {"ok": false, "reason": "This highway needs a gentler curve. Adjust its route or interchanges."}
+		if from_tangent != Vector2.ZERO and absf(rad_to_deg(from_tangent.angle_to(points[1] - points[0]))) > 0.25:
+			return {"ok": false, "reason": "This highway cannot join smoothly at its first interchange. Adjust its route."}
+		if to_tangent != Vector2.ZERO and absf(rad_to_deg(to_tangent.angle_to(points[-1] - points[-2]))) > 0.25:
+			return {"ok": false, "reason": "This highway cannot join smoothly at its second interchange. Adjust its route."}
 	var length := _length(points)
 	if length < 0.1:
 		return {"ok": false, "reason": "Road is too short."}
@@ -34,7 +47,7 @@ static func link_preview(region, from_id: int, to_id: int, road_class: String, w
 	var cost := roundi(length * lanes * (1800000.0 if road_class == RoadLinkData.HIGHWAY else 600000.0))
 	var base_days := maxi(45, ceili(20.0 + 4.0 * length)) if road_class == RoadLinkData.HIGHWAY else maxi(14, ceili(7.0 + 2.0 * length))
 	var days := _construction_days(base_days)
-	return {"ok": true, "kind": RoadProjectData.NEW_LINK, "from": from_id, "to": to_id, "road_class": road_class, "lanes": lanes, "points": points, "length_km": length, "cost": cost, "days": days, "open_day_key": day_key + days, "owner_id": region.road_owner_for_points(points)}
+	return {"ok": true, "kind": RoadProjectData.NEW_LINK, "from": from_id, "to": to_id, "road_class": road_class, "lanes": lanes, "waypoints": waypoints.duplicate(), "points": points, "length_km": length, "cost": cost, "days": days, "open_day_key": day_key + days, "owner_id": region.road_owner_for_points(points, road_class)}
 
 
 static func widen_preview(region, link_id: int, day_key: int) -> Dictionary:
@@ -116,8 +129,7 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 		return {"ok": false, "reason": preview.get("reason", "Invalid road project.")}
 	match preview["kind"]:
 		RoadProjectData.NEW_LINK:
-			var original_points: PackedVector2Array = preview["points"]
-			preview = link_preview(region, preview["from"], preview["to"], preview["road_class"], original_points.slice(1, original_points.size() - 1), day_key)
+			preview = link_preview(region, preview["from"], preview["to"], preview["road_class"], preview.get("waypoints", PackedVector2Array()), day_key)
 		RoadProjectData.WIDEN:
 			preview = widen_preview(region, preview["target_link_id"], day_key)
 		RoadProjectData.INTERCHANGE_NODE:
@@ -189,7 +201,7 @@ static func advance_day(region, day_key: int) -> bool:
 	# Yesterday's tax estimate accrues before today's migration changes households.
 	refresh_upkeep(region)
 	for area in region.jurisdictions:
-		area.last_fiscal_change = area.daily_revenue() - area.daily_road_upkeep
+		area.last_fiscal_change = area.daily_net()
 		area.treasury += area.last_fiscal_change
 		area.daily_sales_revenue = 0.0
 		area.daily_fee_revenue = 0.0
@@ -201,19 +213,21 @@ static func advance_day(region, day_key: int) -> bool:
 			continue
 		match project.kind:
 			RoadProjectData.NEW_LINK:
-				_append_link(region, project.from_node_id, project.to_node_id, project.road_class, project.lanes_per_direction, project.points)
+				_append_link(region, project.from_node_id, project.to_node_id, project.road_class, project.lanes_per_direction, project.points, project.owner_jurisdiction_id)
 			RoadProjectData.WIDEN:
 				var index: int = RoadGraph.link_index(region, project.target_link_id)
 				if index >= 0:
 					region.road_links[index].lanes_per_direction += 1
 			RoadProjectData.INTERCHANGE_NODE:
 				region.road_nodes[project.target_node_id].is_interchange = true
+				region.road_nodes[project.target_node_id].interchange_owner_jurisdiction_id = project.owner_jurisdiction_id
 			RoadProjectData.INTERCHANGE_EXIT:
 				var exit_node = RoadNodeData.new()
 				exit_node.id = region.road_nodes.size()
 				exit_node.position_km = project.position_km
 				exit_node.city_id = region.city_id_at_point(project.position_km)
 				exit_node.is_interchange = true
+				exit_node.interchange_owner_jurisdiction_id = project.owner_jurisdiction_id
 				region.road_nodes.append(exit_node)
 				_split_link(region, project.target_link_id, exit_node.id, project.position_km)
 		changed = true
@@ -231,9 +245,22 @@ static func refresh_upkeep(region) -> void:
 		region.jurisdictions[link.owner_jurisdiction_id].daily_road_upkeep += link.length_km * link.lanes_per_direction * (600.0 if link.road_class == RoadLinkData.HIGHWAY else 200.0)
 	for node in region.road_nodes:
 		if node.is_interchange:
-			var city_id: int = region.city_id_at_point(node.position_km)
-			var owner_id: int = region.city_jurisdiction_ids[city_id] if city_id >= 0 else region.jurisdiction_at_point(node.position_km)
+			var owner_id: int = node.interchange_owner_jurisdiction_id
+			if owner_id < 0:
+				var city_id: int = region.city_id_at_point(node.position_km)
+				owner_id = region.city_jurisdiction_ids[city_id] if city_id >= 0 else region.jurisdiction_at_point(node.position_km)
 			region.jurisdictions[owner_id].daily_road_upkeep += INTERCHANGE_UPKEEP
+	refresh_regional_grants(region)
+
+
+static func refresh_regional_grants(region) -> void:
+	var state = region.jurisdictions[0]
+	state.daily_transfer_expense = 0.0
+	var capital_share: float = maxf(0.0, state.daily_income_revenue) * 0.20 / float(maxi(1, region.region_ids.size()))
+	for region_id in region.region_ids:
+		var area = region.jurisdictions[region_id]
+		area.daily_grant_revenue = area.daily_road_upkeep + capital_share
+		state.daily_transfer_expense += area.daily_grant_revenue
 
 
 static func calculate_upkeep(region) -> float:
@@ -281,13 +308,12 @@ static func _split_link(region, link_id: int, new_node_id: int, point: Vector2) 
 	old_link.to_node_id = new_node_id
 	old_link.points = first
 	old_link.recalculate_length()
-	old_link.owner_jurisdiction_id = region.road_owner_for_points(first)
-	_append_link(region, new_node_id, old_to, old_link.road_class, old_link.lanes_per_direction, second)
+	_append_link(region, new_node_id, old_to, old_link.road_class, old_link.lanes_per_direction, second, old_link.owner_jurisdiction_id)
 	region.road_links[-1].toll_forward = old_link.toll_forward
 	region.road_links[-1].toll_reverse = old_link.toll_reverse
 
 
-static func _append_link(region, from_id: int, to_id: int, road_class: String, lanes: int, points: PackedVector2Array) -> void:
+static func _append_link(region, from_id: int, to_id: int, road_class: String, lanes: int, points: PackedVector2Array, owner_id: int) -> void:
 	var link = RoadLinkData.new()
 	link.id = region.next_road_link_id
 	region.next_road_link_id += 1
@@ -297,7 +323,7 @@ static func _append_link(region, from_id: int, to_id: int, road_class: String, l
 	link.lanes_per_direction = lanes
 	link.points = points
 	link.recalculate_length()
-	link.owner_jurisdiction_id = region.road_owner_for_points(points)
+	link.owner_jurisdiction_id = owner_id
 	region.road_links.append(link)
 
 
@@ -306,6 +332,30 @@ static func _length(points: PackedVector2Array) -> float:
 	for index in range(1, points.size()):
 		result += points[index - 1].distance_to(points[index])
 	return result
+
+
+static func _single_highway_outward(region, node_id: int) -> Vector2:
+	var count := 0
+	var outward := Vector2.ZERO
+	for link in region.road_links:
+		if link.road_class != RoadLinkData.HIGHWAY:
+			continue
+		if link.from_node_id == node_id:
+			count += 1
+			outward = link.points[1] - link.points[0]
+		elif link.to_node_id == node_id:
+			count += 1
+			outward = link.points[-2] - link.points[-1]
+	for project in region.road_projects:
+		if project.kind != RoadProjectData.NEW_LINK or project.road_class != RoadLinkData.HIGHWAY:
+			continue
+		if project.from_node_id == node_id:
+			count += 1
+			outward = project.points[1] - project.points[0]
+		elif project.to_node_id == node_id:
+			count += 1
+			outward = project.points[-2] - project.points[-1]
+	return outward.normalized() if count == 1 else Vector2.ZERO
 
 
 static func _construction_days(base_days: int) -> int:

@@ -20,13 +20,20 @@ func _initialize() -> void:
 	var clock = CalendarClock.new()
 	var day_key: int = clock.unix_seconds / 86400
 	var initial_links: int = region.road_links.size()
-	_check(initial_links == 49 and RoadGraph.is_forest(region), "starter roads must connect forty developed neighborhoods and ten city hubs")
+	_check(initial_links >= 49 and RoadGraph.is_forest(region) and _all_connected(region), "starter roads must connect forty developed neighborhoods and ten city hubs as a tree")
+	for city_id in region.starting_city_ids:
+		var hub_id: int = region.city_hub_node_ids[city_id]
+		var arterial_count := 0
+		for link in region.road_links:
+			if link.road_class == "Arterial" and (link.from_node_id == hub_id or link.to_node_id == hub_id):
+				arterial_count += 1
+		_check(arterial_count >= 1 and arterial_count <= 2, "each highway hub must feed only one or two arterial trunks")
 	var interchange: Dictionary = RoadPlanner.interchange_preview(region, region.neighborhood_gateway_node_ids[0], -1, Vector2.ZERO, day_key)
 	_check(interchange["ok"] and region.jurisdictions[interchange["owner_id"]].kind == "City" and region.jurisdictions[interchange["owner_id"]].treasury >= interchange["cost"], "a starting city must be able to fund a junction interchange")
 	var state_roads := 0
 	var local_roads := 0
 	for link in region.road_links:
-		_check(link.owner_jurisdiction_id == region.road_owner_for_points(link.points), "road owner must cover the whole corridor")
+		_check(link.owner_jurisdiction_id == region.road_owner_for_points(link.points, link.road_class), "road owner must cover the whole corridor")
 		state_roads += 1 if link.owner_jurisdiction_id == 0 else 0
 		local_roads += 1 if region.jurisdictions[link.owner_jurisdiction_id].kind in ["City", "Neighborhood"] else 0
 	_check(state_roads > 0 and local_roads > 0, "the generated network must have both state and local road owners")

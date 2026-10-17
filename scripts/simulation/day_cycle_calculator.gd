@@ -122,6 +122,8 @@ static func _copy_large_region(source):
 		j.daily_property_revenue = original.daily_property_revenue
 		j.daily_sales_revenue = original.daily_sales_revenue
 		j.daily_fee_revenue = original.daily_fee_revenue
+		j.daily_grant_revenue = original.daily_grant_revenue
+		j.daily_transfer_expense = original.daily_transfer_expense
 		j.daily_road_upkeep = original.daily_road_upkeep
 		j.last_fiscal_change = original.last_fiscal_change
 		copy.jurisdictions.append(j)
@@ -133,6 +135,7 @@ static func _copy_large_region(source):
 		node.neighborhood_id = original.neighborhood_id
 		node.city_id = original.city_id
 		node.is_interchange = original.is_interchange
+		node.interchange_owner_jurisdiction_id = original.interchange_owner_jurisdiction_id
 		copy.road_nodes.append(node)
 	for original in source.road_links:
 		var link = RoadLinkData.new()
@@ -172,6 +175,7 @@ static func advance_day(region, day_key: int, previous_flow, previous_traffic, p
 	var traffic_state = RollingTrafficCalculator.new_day(region, flow_profile, previous_state, roads_changed)
 	RollingTrafficCalculator.advance_chunk(region, flow_profile, traffic_state, 1)
 	NeighborhoodDynamics.refresh_desirability(region)
+	RoadPlanner.refresh_regional_grants(region)
 	return {"region": region, "flow": flow_profile, "traffic": traffic_state.profile, "traffic_state": traffic_state}
 
 

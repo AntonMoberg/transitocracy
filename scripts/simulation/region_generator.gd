@@ -43,6 +43,7 @@ static func _generate(seed_value: int, city_count: int, neighborhood_count: int,
 	for region_index in range(region_count):
 		var region_name: String = "Region %d" % (region_index + 1) if large_scale else REGION_NAMES[region_index]
 		var planning_region = _add_jurisdiction(region, JurisdictionData.REGION, region_name, state.id)
+		planning_region.treasury = 300000000.0
 		region.region_ids.append(planning_region.id)
 		for local_county in range(counties_per_region[region_index]):
 			var county_index: int = region.county_ids.size()

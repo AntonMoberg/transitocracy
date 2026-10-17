@@ -25,7 +25,14 @@ func _run() -> void:
 			_check(setup["errors"].is_empty(), "generated region must validate: %d/%d %s" % [city_count, seed_value, setup["errors"]])
 			_check(region.starting_city_ids.size() == 10, "ten anchor cities must start populated")
 			_check(region.neighborhoods.size() == city_count + 30, "only seed and anchor neighborhoods should be simulated at launch")
-			_check(region.road_links.size() == 49, "forty local arterials and nine highways should connect the anchors")
+			_check(region.road_links.size() >= 49, "arterial trunks and nine highways should connect the starting neighborhoods")
+			for city_id in region.starting_city_ids:
+				var hub_id: int = region.city_hub_node_ids[city_id]
+				var feeder_count := 0
+				for link in region.road_links:
+					if link.road_class == "Arterial" and (link.from_node_id == hub_id or link.to_node_id == hub_id):
+						feeder_count += 1
+				_check(feeder_count >= 1 and feeder_count <= 2, "every starting highway hub must have one or two arterial trunks")
 			_check(int(region.get_region_totals()["population"]) <= 100000, "launch population must stay below 100,000")
 			var developed := 0
 			for neighborhood in region.neighborhoods:
@@ -34,6 +41,7 @@ func _run() -> void:
 				_check(region.jurisdictions[region.city_jurisdiction_ids[neighborhood.city_id]].contains_point(neighborhood.position_km), "neighborhood must belong to its city")
 				if neighborhood.initially_developed:
 					developed += 1
+					_check(region.neighborhood_spoke_link_ids[neighborhood.id] >= 0 and region.neighborhood_development_connected[neighborhood.id] != 0, "developed neighborhoods must reach an arterial trunk")
 					_check(neighborhood.development_approved and neighborhood.population > 0, "anchor cells must start approved and populated")
 				else:
 					_check(not neighborhood.development_approved and neighborhood.population == 0 and neighborhood.jobs == 0, "other city seed cells stay empty")

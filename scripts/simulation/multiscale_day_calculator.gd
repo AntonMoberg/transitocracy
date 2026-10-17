@@ -48,14 +48,13 @@ static func advance_day(region, day_key: int, previous_flow, previous_state) -> 
 	var traffic = MultiScaleTraffic.new_day(region, flow, day_key * 86400, previous_state)
 	timings["traffic_new_day"] = Time.get_ticks_usec() - stage_start
 	NeighborhoodDynamics.refresh_desirability(region)
+	RoadPlanner.refresh_regional_grants(region)
 	var totals: Dictionary = region.get_region_totals()
 	var balance := 0.0
 	var net := 0.0
 	for area in region.jurisdictions:
-		if area.kind == "Region":
-			continue
 		balance += area.treasury
-		net += area.daily_revenue() - area.daily_road_upkeep
+		net += area.daily_net()
 	var summary_stats := {"population": totals["population"], "jobs": totals["jobs"], "balance": balance, "net": net}
 	return {"region": region, "flow": flow, "traffic_state": traffic, "traffic": traffic.profile, "summary_stats": summary_stats, "timings_us": timings}
 
