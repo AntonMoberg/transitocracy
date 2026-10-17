@@ -21,7 +21,8 @@ func _run_checks() -> void:
 	var first_region_id: int = main.region.region_ids[0]
 	var region_label: Rect2 = main.map_view._jurisdiction_label_rect(main.region.jurisdictions[first_region_id])
 	_check(main.map_view._hit_jurisdiction_label(region_label.get_center()) == first_region_id, "region labels must be clickable on the full map")
-	_check(main.map_view._hit_jurisdiction_border(main.map_view._world_to_screen(Vector2(120, 24))) >= 0, "region borders must be selectable")
+	var polygon: PackedVector2Array = main.region.jurisdictions[first_region_id].polygon_km
+	_check(main.map_view._hit_jurisdiction_border(main.map_view._world_to_screen(polygon[0].lerp(polygon[1], 0.5))) >= 0, "region borders must be selectable")
 	var mouse_click := InputEventMouseButton.new()
 	mouse_click.button_index = MOUSE_BUTTON_LEFT
 	mouse_click.position = region_label.get_center()

@@ -16,23 +16,54 @@ static func prepare_routes(region, state, previous_state = null) -> void:
 		state.compact_trees_by_mode = previous_state.compact_trees_by_mode
 		return
 	var city_nodes := PackedInt32Array()
-	for node_id in region.city_hub_node_ids:
+	for node_id in region.city_route_node_ids:
 		city_nodes.append(node_id)
 	var region_nodes := PackedInt32Array()
-	var found := PackedByteArray()
-	found.resize(region.region_ids.size())
+	region_nodes.resize(region.region_ids.size())
+	region_nodes.fill(-1)
+	var populations := PackedInt32Array()
+	populations.resize(region.region_ids.size())
 	for city in region.cities:
 		var region_id: int = city["region_id"]
-		if found[region_id] == 0:
-			found[region_id] = 1
-			region_nodes.append(region.city_hub_node_ids[city["id"]])
+		var population: int = region.get_city_totals(city["id"])["population"]
+		if region_nodes[region_id] < 0 or population > populations[region_id]:
+			populations[region_id] = population
+			region_nodes[region_id] = region.city_route_node_ids[city["id"]]
+	for region_id in range(region_nodes.size()):
+		if region_nodes[region_id] < 0:
+			region_nodes[region_id] = city_nodes[0]
 	var costs: PackedVector2Array = RoadGraph.free_flow_costs(region)
 	state.compact_trees_by_mode = {
 		"city_nodes": city_nodes,
 		"region_nodes": region_nodes,
 		"city_trees": RoadGraph.group_route_trees(region, costs, city_nodes),
 		"region_trees": RoadGraph.group_route_trees(region, costs, region_nodes),
+		"local_routes": _local_routes(region, costs),
 	}
+
+
+static func _local_routes(region, costs: PackedVector2Array) -> Array:
+	var routes: Array = []
+	routes.resize(region.neighborhoods.size())
+	var neighbors: Array = RoadGraph.adjacency(region)
+	var forest: bool = RoadGraph.is_forest(region)
+	for city in region.cities:
+		var source_node: int = region.city_route_node_ids[city["id"]]
+		if neighbors[source_node].is_empty():
+			continue
+		var tree: Dictionary = RoadGraph._shortest_tree(region, costs, neighbors, source_node, true, false, forest)
+		for neighborhood_id in city["neighborhood_ids"]:
+			var cursor: int = region.neighborhood_gateway_node_ids[neighborhood_id]
+			if tree["distances"][cursor] >= RoadGraph.UNREACHABLE_MINUTES:
+				continue
+			var path: Array[Vector2i] = []
+			while cursor != source_node:
+				var link_index: int = tree["previous_link"][cursor]
+				var prior: int = tree["previous_node"][cursor]
+				path.append(Vector2i(link_index, 0 if region.road_links[link_index].from_node_id == cursor else 1))
+				cursor = prior
+			routes[neighborhood_id] = path
+	return routes
 
 
 static func build_hour(region, profile, state, mode: int, hour: int) -> void:
@@ -149,12 +180,13 @@ static func _add_neighborhood_spokes(region, profile, state, hour: int, volumes:
 	var social_back: float = 1.0 / 24.0 if hour == 24 else profile.compact_curves[FlowProfile.SOCIAL]["back"][hour]
 	for neighborhood in region.neighborhoods:
 		var neighborhood_id: int = neighborhood.id
-		var spoke_index: int = state.spoke_indices[neighborhood_id]
-		if spoke_index < 0:
+		var path = state.compact_trees_by_mode["local_routes"][neighborhood_id]
+		if path == null:
 			continue
 		var outward: float = 0.5 * ((work_origin[neighborhood_id] * work_out + work_destination[neighborhood_id] * work_back) / 1.2 + (shopping_origin[neighborhood_id] * shopping_out + shopping_destination[neighborhood_id] * shopping_back) / 1.5 + (social_origin[neighborhood_id] * social_out + social_destination[neighborhood_id] * social_back) / 1.8)
 		var inward: float = 0.5 * ((work_destination[neighborhood_id] * work_out + work_origin[neighborhood_id] * work_back) / 1.2 + (shopping_destination[neighborhood_id] * shopping_out + shopping_origin[neighborhood_id] * shopping_back) / 1.5 + (social_destination[neighborhood_id] * social_out + social_origin[neighborhood_id] * social_back) / 1.8)
-		volumes[spoke_index] += Vector2(outward, inward)
+		for edge in path:
+			volumes[edge.x] += Vector2(outward, inward) if edge.y == 0 else Vector2(inward, outward)
 
 
 static func _hourly_revenue(region, profile, hour: int) -> Dictionary:

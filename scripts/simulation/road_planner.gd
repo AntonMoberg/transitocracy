@@ -306,7 +306,7 @@ static func _construction_days(base_days: int) -> int:
 
 
 static func _inside_map(point: Vector2, region) -> bool:
-	return region.jurisdictions[0].bounds_km.has_point(point)
+	return region.jurisdictions[0].contains_point(point)
 
 
 static func _neighborhood_components_without(region, excluded_link_id: int) -> int:

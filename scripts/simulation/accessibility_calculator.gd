@@ -12,6 +12,7 @@ static func recalculate(region) -> void:
 		_recalculate_large(region)
 		return
 	if not region.road_nodes.is_empty():
+		region.neighborhood_development_connected = RoadGraph.neighborhoods_connected_to_start(region)
 		region.travel_times = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region), [], false)["times"]
 		recalculate_jobs(region)
 		return
@@ -50,9 +51,26 @@ static func recalculate_large_with_costs(region, costs: PackedVector2Array) -> v
 
 static func _recalculate_large(region, supplied_costs: PackedVector2Array = PackedVector2Array()) -> void:
 	var city_count: int = region.cities.size()
-	region.neighborhood_accessible = RoadGraph.neighborhoods_connected_to_hubs(region)
+	region.neighborhood_development_connected = RoadGraph.neighborhoods_connected_to_start(region)
+	var adjacency: Array = RoadGraph.adjacency(region)
+	var rooted_nodes: PackedByteArray = RoadGraph.nodes_connected_to_start(region)
+	region.city_route_node_ids = region.city_hub_node_ids.duplicate()
+	for city in region.cities:
+		var hub_id: int = region.city_hub_node_ids[city["id"]]
+		if rooted_nodes[hub_id] != 0:
+			continue
+		for neighborhood_id in city["neighborhood_ids"]:
+			var gateway_id: int = region.neighborhood_gateway_node_ids[neighborhood_id]
+			if adjacency[gateway_id].is_empty():
+				continue
+			if adjacency[hub_id].is_empty() or region.neighborhood_development_connected[neighborhood_id] != 0:
+				region.city_route_node_ids[city["id"]] = gateway_id
+			if region.neighborhood_development_connected[neighborhood_id] != 0:
+				break
+	region.neighborhood_accessible.resize(region.neighborhoods.size())
+	region.neighborhood_accessible.fill(0)
 	var costs: PackedVector2Array = supplied_costs if not supplied_costs.is_empty() else RoadGraph.free_flow_costs(region)
-	var neighbors: Array = RoadGraph.strategic_adjacency(region)
+	var neighbors: Array = adjacency
 	var forest: bool = RoadGraph.is_forest(region)
 	var rows: Array = []
 	rows.resize(city_count)
@@ -67,20 +85,27 @@ static func _recalculate_large(region, supplied_costs: PackedVector2Array = Pack
 		for city_id in range(city_count):
 			rows[city_id] = _city_times_row(region, costs, neighbors, forest, city_id)
 	region.city_travel_times.clear()
-	for row in rows:
-		region.city_travel_times.append(row)
+	for city_id in range(city_count):
+		region.city_travel_times.append(rows[city_id]["times"])
+		var neighborhood_ids: Array = region.cities[city_id]["neighborhood_ids"]
+		for local_id in range(neighborhood_ids.size()):
+			region.neighborhood_accessible[neighborhood_ids[local_id]] = rows[city_id]["accessible"][local_id]
 	_recalculate_large_jobs(region)
 
 
-static func _city_times_row(region, costs: PackedVector2Array, neighbors: Array, forest: bool, city_id: int) -> PackedFloat32Array:
-	var source_node: int = region.city_hub_node_ids[city_id]
+static func _city_times_row(region, costs: PackedVector2Array, neighbors: Array, forest: bool, city_id: int) -> Dictionary:
+	var source_node: int = region.city_route_node_ids[city_id]
 	var tree: Dictionary = RoadGraph._shortest_tree(region, costs, neighbors, source_node, false, false, forest)
 	var distances: PackedFloat32Array = tree["distances"]
 	var row := PackedFloat32Array()
 	row.resize(region.cities.size())
 	for destination_id in range(row.size()):
-		row[destination_id] = RoadGraph.LOCAL_ACCESS_MINUTES + distances[region.city_hub_node_ids[destination_id]]
-	return row
+		row[destination_id] = RoadGraph.LOCAL_ACCESS_MINUTES + distances[region.city_route_node_ids[destination_id]]
+	var accessible := PackedByteArray()
+	for neighborhood_id in region.cities[city_id]["neighborhood_ids"]:
+		var gateway_id: int = region.neighborhood_gateway_node_ids[neighborhood_id]
+		accessible.append(1 if distances[gateway_id] < RoadGraph.UNREACHABLE_MINUTES else 0)
+	return {"times": row, "accessible": accessible}
 
 
 static func _recalculate_large_jobs(region) -> void:

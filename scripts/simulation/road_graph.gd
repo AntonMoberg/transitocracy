@@ -50,9 +50,9 @@ static func strategic_adjacency(region) -> Array:
 		var link = region.road_links[index]
 		var from_node = region.road_nodes[link.from_node_id]
 		var to_node = region.road_nodes[link.to_node_id]
-		if from_node.neighborhood_id >= 0 and full[link.from_node_id].size() == 1:
+		if from_node.neighborhood_id >= 0 and full[link.from_node_id].size() == 1 and not region.city_route_node_ids.has(from_node.id):
 			continue
-		if to_node.neighborhood_id >= 0 and full[link.to_node_id].size() == 1:
+		if to_node.neighborhood_id >= 0 and full[link.to_node_id].size() == 1 and not region.city_route_node_ids.has(to_node.id):
 			continue
 		neighbors[link.from_node_id].append(Vector2i(index, 0))
 		neighbors[link.to_node_id].append(Vector2i(index, 1))
@@ -60,11 +60,40 @@ static func strategic_adjacency(region) -> Array:
 
 
 static func neighborhoods_connected_to_hubs(region) -> PackedByteArray:
+	return _neighborhoods_connected_to_nodes(region, region.city_route_node_ids if not region.city_route_node_ids.is_empty() else region.city_hub_node_ids)
+
+
+static func neighborhoods_connected_to_start(region) -> PackedByteArray:
+	var visited: PackedByteArray = nodes_connected_to_start(region)
+	var connected := PackedByteArray()
+	connected.resize(region.neighborhoods.size())
+	for neighborhood_id in range(connected.size()):
+		connected[neighborhood_id] = visited[region.neighborhood_gateway_node_ids[neighborhood_id]]
+	return connected
+
+
+static func nodes_connected_to_start(region) -> PackedByteArray:
+	var roots: Array[int] = []
+	for city_id in region.starting_city_ids:
+		roots.append(region.city_hub_node_ids[city_id])
+	return _nodes_connected_to(region, roots)
+
+
+static func _neighborhoods_connected_to_nodes(region, roots: Array[int]) -> PackedByteArray:
+	var visited: PackedByteArray = _nodes_connected_to(region, roots)
+	var connected := PackedByteArray()
+	connected.resize(region.neighborhoods.size())
+	for neighborhood_id in range(connected.size()):
+		connected[neighborhood_id] = visited[region.neighborhood_gateway_node_ids[neighborhood_id]]
+	return connected
+
+
+static func _nodes_connected_to(region, roots: Array[int]) -> PackedByteArray:
 	var neighbors: Array = adjacency(region)
 	var visited := PackedByteArray()
 	visited.resize(region.road_nodes.size())
 	var queue := PackedInt32Array()
-	for hub_node_id in region.city_hub_node_ids:
+	for hub_node_id in roots:
 		if visited[hub_node_id] == 0:
 			visited[hub_node_id] = 1
 			queue.append(hub_node_id)
@@ -78,11 +107,7 @@ static func neighborhoods_connected_to_hubs(region) -> PackedByteArray:
 			if visited[next_id] == 0:
 				visited[next_id] = 1
 				queue.append(next_id)
-	var connected := PackedByteArray()
-	connected.resize(region.neighborhoods.size())
-	for neighborhood_id in range(connected.size()):
-		connected[neighborhood_id] = visited[region.neighborhood_gateway_node_ids[neighborhood_id]]
-	return connected
+	return visited
 
 
 static func route_pairs(region, costs: PackedVector2Array, adjacent_links: Array = [], include_paths: bool = true, parallel_sources: bool = true) -> Dictionary:

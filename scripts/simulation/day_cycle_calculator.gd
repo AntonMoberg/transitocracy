@@ -28,6 +28,8 @@ static func _copy_large_region(source):
 	# objects while sharing the large static ID lists and packed geometry.
 	var copy = RegionData.new()
 	copy.generation_seed = source.generation_seed
+	copy.starting_city_ids = source.starting_city_ids.duplicate()
+	copy.neighborhood_development_connected = source.neighborhood_development_connected.duplicate()
 	copy.is_large_scale = true
 	copy.current_day_key = source.current_day_key
 	copy.state_name = source.state_name
@@ -48,6 +50,7 @@ static func _copy_large_region(source):
 	copy.next_road_project_id = source.next_road_project_id
 	copy.neighborhood_gateway_node_ids = source.neighborhood_gateway_node_ids.duplicate()
 	copy.city_hub_node_ids = source.city_hub_node_ids.duplicate()
+	copy.city_route_node_ids = source.city_route_node_ids.duplicate()
 	copy.neighborhood_spoke_link_ids = source.neighborhood_spoke_link_ids.duplicate()
 	for original in source.neighborhoods:
 		var n = NeighborhoodData.new()
@@ -59,6 +62,7 @@ static func _copy_large_region(source):
 		n.name = original.name
 		n.position_km = original.position_km
 		n.land_area_ha = original.land_area_ha
+		n.developable_area_ha = original.developable_area_ha
 		n.zone_shares = original.zone_shares.duplicate()
 		n.zone_density = original.zone_density.duplicate()
 		n.housing_capacity = original.housing_capacity
@@ -80,6 +84,12 @@ static func _copy_large_region(source):
 		n.migration_remainder = original.migration_remainder
 		n.last_household_change = original.last_household_change
 		n.last_population_change = original.last_population_change
+		n.initially_developed = original.initially_developed
+		n.development_state = original.development_state
+		n.development_jobs_by_skill = original.development_jobs_by_skill.duplicate()
+		n.development_retail_share = original.development_retail_share
+		n.development_income = original.development_income
+		n.job_growth_remainder = original.job_growth_remainder
 		copy.neighborhoods.append(n)
 	for original in source.jurisdictions:
 		var j = JurisdictionData.new()
@@ -91,6 +101,8 @@ static func _copy_large_region(source):
 		j.neighborhood_ids = original.neighborhood_ids
 		j.center_km = original.center_km
 		j.bounds_km = original.bounds_km
+		j.polygon_km = original.polygon_km
+		j.generation_weight = original.generation_weight
 		j.income_tax_rate = original.income_tax_rate
 		j.property_tax_rate = original.property_tax_rate
 		j.sales_tax_rate = original.sales_tax_rate

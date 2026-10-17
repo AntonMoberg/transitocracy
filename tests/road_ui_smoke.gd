@@ -23,6 +23,8 @@ func _run_checks() -> void:
 	for area in main.region.jurisdictions:
 		if area.kind not in ["Region", "County", "City"]:
 			continue
+		if not main.map_view._jurisdiction_label_visible(area):
+			continue
 		var label_rect: Rect2 = main.map_view._jurisdiction_label_rect(area)
 		var font_size: int = 11 if area.kind == "Region" else (10 if area.kind == "County" else 9)
 		var text_width: float = main.map_view.get_theme_default_font().get_string_size(main.map_view._jurisdiction_label_text(area), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x

@@ -22,7 +22,6 @@ const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
 const RoadRebuild = preload("res://scripts/simulation/road_rebuild.gd")
 const RoadTrafficSummary = preload("res://scripts/simulation/road_traffic_summary.gd")
 
-const DEFAULT_SEED = 1729
 
 var region
 var flow_profile
@@ -63,6 +62,8 @@ var measured_rate: float = 0.0
 var map_view
 var flow_timeline
 var seed_input: SpinBox
+var seed_generate_button: Button
+var generation_rng := RandomNumberGenerator.new()
 var map_size_selector: OptionButton
 var generate_button: Button
 var generation_thread: Thread
@@ -113,8 +114,9 @@ var pending_inspector_refresh: bool = false
 
 func _ready() -> void:
 	get_window().min_size = Vector2i(1024, 700)
+	generation_rng.randomize()
 	_build_interface()
-	_generate_region(DEFAULT_SEED)
+	_on_generate_pressed()
 
 
 func _exit_tree() -> void:
@@ -299,7 +301,7 @@ func _build_interface() -> void:
 	titles.add_child(subtitle)
 
 	var seed_label := Label.new()
-	seed_label.text = "Region seed"
+	seed_label.text = "Seed"
 	seed_label.add_theme_color_override("font_color", Color("b8c9d6"))
 	header.add_child(seed_label)
 	seed_input = SpinBox.new()
@@ -307,11 +309,12 @@ func _build_interface() -> void:
 	seed_input.max_value = 9999999
 	seed_input.step = 1
 	seed_input.rounded = true
-	seed_input.value = DEFAULT_SEED
+	seed_input.value = 1
+	seed_input.tooltip_text = "Reuse this seed with From seed to recreate a map"
 	seed_input.custom_minimum_size = Vector2(116, 0)
 	header.add_child(seed_input)
 	var map_size_label := Label.new()
-	map_size_label.text = "Map size"
+	map_size_label.text = "Detail"
 	map_size_label.add_theme_color_override("font_color", Color("b8c9d6"))
 	header.add_child(map_size_label)
 	map_size_selector = OptionButton.new()
@@ -319,12 +322,18 @@ func _build_interface() -> void:
 	map_size_selector.add_item("5,120 neighborhoods", 128)
 	map_size_selector.add_item("20,480 neighborhoods", 512)
 	map_size_selector.select(1)
-	map_size_selector.tooltip_text = "Generated cities and neighborhoods"
+	map_size_selector.tooltip_text = "Neighborhood detail within the same California-sized state"
 	header.add_child(map_size_selector)
 	generate_button = Button.new()
-	generate_button.text = "Generate"
+	generate_button.text = "New map"
+	generate_button.tooltip_text = "Generate a new random state"
 	generate_button.pressed.connect(_on_generate_pressed)
 	header.add_child(generate_button)
+	seed_generate_button = Button.new()
+	seed_generate_button.text = "From seed"
+	seed_generate_button.tooltip_text = "Generate the state described by the displayed seed"
+	seed_generate_button.pressed.connect(func() -> void: _generate_region(int(seed_input.value)))
+	header.add_child(seed_generate_button)
 	var quit_button := Button.new()
 	quit_button.text = "Quit"
 	quit_button.tooltip_text = "Close Transitocracy"
@@ -549,7 +558,12 @@ func _panel_style(color: Color, padding: int) -> StyleBoxFlat:
 
 
 func _on_generate_pressed() -> void:
-	_generate_region(int(seed_input.value))
+	if generation_thread != null:
+		return
+	var seed_value: int = generation_rng.randi_range(1, int(seed_input.max_value))
+	while seed_value == int(seed_input.value) or (region != null and seed_value == region.generation_seed):
+		seed_value = generation_rng.randi_range(1, int(seed_input.max_value))
+	_generate_region(seed_value)
 
 
 func _on_quit_pressed() -> void:
@@ -794,6 +808,8 @@ func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
 	var lines := PackedStringArray()
 	lines.append("[font_size=22][b]%s[/b][/font_size]" % area.name)
 	lines.append("[color=#91abc0]%s[/color]" % area.kind)
+	if area.kind == "City":
+		lines.append("Development: %s" % region.city_development_state(area.id))
 	lines.append("")
 	lines.append("Population: %s" % _format_count(totals["population"]))
 	lines.append("Households: %s / %s homes" % [_format_count(totals["households"]), _format_count(totals["housing_capacity"])])
@@ -820,14 +836,19 @@ func _generate_region(seed_value: int) -> void:
 	if generation_thread != null:
 		return
 	discard_road_rebuild = road_rebuild_thread != null
+	seed_input.set_value_no_signal(seed_value)
+	seed_input.editable = false
 	var city_count: int = map_size_selector.get_selected_id()
 	generate_button.disabled = true
+	seed_generate_button.disabled = true
 	map_size_selector.disabled = true
 	summary_label.text = "Generating %s…" % map_size_selector.get_item_text(map_size_selector.selected)
 	var worker := Thread.new()
 	var task := Callable(RegionSetup, "build").bind(seed_value, city_count, tax_input.value / 100.0)
 	if worker.start(task, Thread.PRIORITY_NORMAL) != OK:
 		generate_button.disabled = false
+		seed_generate_button.disabled = false
+		seed_input.editable = true
 		map_size_selector.disabled = false
 		push_error("Could not start region generation worker.")
 		return
@@ -840,6 +861,8 @@ func _poll_generation() -> void:
 	var result: Dictionary = generation_thread.wait_to_finish()
 	generation_thread = null
 	generate_button.disabled = false
+	seed_generate_button.disabled = false
+	seed_input.editable = true
 	map_size_selector.disabled = false
 	if result.is_empty():
 		push_error("Region generation returned no data.")
@@ -1296,8 +1319,16 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	var text_lines := PackedStringArray()
 	text_lines.append("[font_size=22][b]%s[/b][/font_size]" % neighborhood.name)
 	text_lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(neighborhood.city_id), neighborhood.land_area_ha])
+	text_lines.append("[color=#91abc0]Developable area: %.0f ha[/color]" % neighborhood.developable_area_ha)
 	text_lines.append("")
 	text_lines.append("[color=#78c8dc][b]NEIGHBORHOOD[/b][/color]")
+	text_lines.append("Development: %s" % neighborhood.development_state)
+	if neighborhood.development_state == "Dormant":
+		text_lines.append("Connect this gateway to an established city to begin growth.")
+	elif neighborhood.development_state == "Disconnected":
+		text_lines.append("Road access lost. Residents and jobs are leaving gradually.")
+	elif neighborhood.development_state == "Developing":
+		text_lines.append("Connected land is attracting residents and jobs each day.")
 	text_lines.append("Population: %s" % _format_count(neighborhood.population))
 	text_lines.append("Households: %s / %s homes" % [_format_count(neighborhood.households), _format_count(neighborhood.housing_capacity)])
 	text_lines.append("Today: %+d households" % neighborhood.last_household_change)

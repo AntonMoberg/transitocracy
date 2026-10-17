@@ -4,6 +4,8 @@ const ZONE_TYPES = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 const DENSITY_NAMES = ["Low", "Medium", "High"]
 
 var generation_seed: int = 0
+var starting_city_ids: Array[int] = []
+var neighborhood_development_connected: PackedByteArray = PackedByteArray()
 var is_large_scale: bool = false
 var city_travel_times: Array[PackedFloat32Array] = []
 var city_od_candidates: Array[PackedInt32Array] = []
@@ -31,6 +33,7 @@ var road_links: Array = []
 var road_projects: Array = []
 var neighborhood_gateway_node_ids: Array[int] = []
 var city_hub_node_ids: Array[int] = []
+var city_route_node_ids: Array[int] = []
 var neighborhood_spoke_link_ids: Array[int] = []
 
 
@@ -100,16 +103,16 @@ func nearest_neighborhood_id(point: Vector2) -> int:
 func jurisdiction_at_point(point: Vector2) -> int:
 	for city_id in city_jurisdiction_ids:
 		var city = jurisdictions[city_id]
-		if city.bounds_km.has_point(point):
-			var nearest_id: int = city.neighborhood_ids[0]
-			var nearest_distance := INF
+		if city.contains_point(point):
 			for neighborhood_id in city.neighborhood_ids:
-				var distance: float = point.distance_squared_to(neighborhoods[neighborhood_id].position_km)
-				if distance < nearest_distance:
-					nearest_distance = distance
-					nearest_id = neighborhood_id
-			return neighborhoods[nearest_id].jurisdiction_id
-	return neighborhoods[nearest_neighborhood_id(point)].jurisdiction_id
+				var district = jurisdictions[neighborhoods[neighborhood_id].jurisdiction_id]
+				if district.contains_point(point):
+					return district.id
+			return city.id
+	for county_id in county_ids:
+		if jurisdictions[county_id].contains_point(point):
+			return county_id
+	return 0
 
 
 func road_owner_for_points(points: PackedVector2Array) -> int:
@@ -124,6 +127,17 @@ func road_owner_for_points(points: PackedVector2Array) -> int:
 
 func get_city_name(city_id: int) -> String:
 	return str(cities[city_id]["name"])
+
+
+func city_development_state(jurisdiction_id: int) -> String:
+	var status := "Dormant"
+	for neighborhood_id in jurisdictions[jurisdiction_id].neighborhood_ids:
+		var development: String = neighborhoods[neighborhood_id].development_state
+		if development == "Established":
+			return development
+		if development == "Developing" or (development == "Disconnected" and status == "Dormant"):
+			status = development
+	return status
 
 
 func get_city_totals(city_id: int) -> Dictionary:
@@ -168,6 +182,8 @@ func validation_errors() -> PackedStringArray:
 			var area = jurisdictions[area_index]
 			if area.id != area_index or (area_index > 0 and (area.parent_id < 0 or area.parent_id >= area_index)):
 				errors.append("Invalid jurisdiction parent or id at %d." % area_index)
+			if not starting_city_ids.is_empty() and area.polygon_km.size() < 3:
+				errors.append("Jurisdiction %d lacks polygon geometry." % area_index)
 		for neighborhood in neighborhoods:
 			if neighborhood.jurisdiction_id < 0 or neighborhood.jurisdiction_id >= jurisdictions.size():
 				errors.append("Neighborhood %d lacks a jurisdiction." % neighborhood.id)
@@ -202,7 +218,7 @@ func validation_errors() -> PackedStringArray:
 				errors.append("Invalid density in %s: %s" % [neighborhood.name, zone])
 		if share_total != 100:
 			errors.append("Land shares do not total 100%% in %s." % neighborhood.name)
-		if neighborhood.households < 0 or neighborhood.population < 0 or neighborhood.households > neighborhood.housing_capacity or neighborhood.jobs > neighborhood.job_capacity:
+		if neighborhood.households < 0 or neighborhood.population < 0 or neighborhood.jobs < 0 or neighborhood.households > neighborhood.housing_capacity or neighborhood.jobs > neighborhood.job_capacity:
 			errors.append("Invalid population or occupancy in %s." % neighborhood.name)
 		if neighborhood.desirability < 0.0 or neighborhood.desirability > 100.0 or neighborhood.average_household_wealth < 0.0:
 			errors.append("Invalid household dynamics in %s." % neighborhood.name)
@@ -213,6 +229,8 @@ func validation_errors() -> PackedStringArray:
 			skill_jobs += int(count)
 		if skill_jobs != neighborhood.jobs:
 			errors.append("Job skill counts do not match total jobs in %s." % neighborhood.name)
+		if neighborhood.development_state == "Dormant" and (neighborhood.households != 0 or neighborhood.population != 0 or neighborhood.jobs != 0 or neighborhood.average_household_wealth != 0.0):
+			errors.append("Dormant neighborhood %s has occupied development." % neighborhood.name)
 	if accessibility.size() != neighborhoods.size() or (is_large_scale and city_travel_times.size() != cities.size()) or (not is_large_scale and travel_times.size() != neighborhoods.size()):
 		errors.append("Travel-time or accessibility data is incomplete.")
 	elif not is_large_scale:

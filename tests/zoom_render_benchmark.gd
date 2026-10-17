@@ -17,7 +17,7 @@ func _run() -> void:
 		return
 	main.playing = false
 	var map = main.map_view
-	var city: Dictionary = main.region.cities[main.region.cities.size() / 2]
+	var city: Dictionary = main.region.cities[main.region.starting_city_ids[0]]
 	for magnification in [1.0, 2.0, 3.0, 4.0, 8.0, 16.0]:
 		map.zoom = magnification
 		map.pan = -(city["center_km"] - map._world_center()) * map._map_scale() * magnification

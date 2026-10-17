@@ -20,7 +20,7 @@ func _initialize() -> void:
 	var clock = CalendarClock.new()
 	var day_key: int = clock.unix_seconds / 86400
 	var initial_links: int = region.road_links.size()
-	_check(initial_links == region.road_nodes.size() - 1 and RoadGraph.is_forest(region), "starter roads must form a sparse connected tree")
+	_check(initial_links == 15 and RoadGraph.is_forest(region), "starter roads must connect only the twelve developed neighborhoods and four city hubs")
 	var interchange: Dictionary = RoadPlanner.interchange_preview(region, region.neighborhood_gateway_node_ids[0], -1, Vector2.ZERO, day_key)
 	_check(interchange["ok"] and region.jurisdictions[interchange["owner_id"]].kind == "City" and region.jurisdictions[interchange["owner_id"]].treasury >= interchange["cost"], "a starting city must be able to fund a junction interchange")
 	var state_roads := 0
@@ -71,9 +71,12 @@ func _initialize() -> void:
 
 func _all_connected(region) -> bool:
 	var routes: Dictionary = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region), [], false)
-	for row in routes["times"]:
-		for minutes in row:
-			if minutes >= RoadGraph.UNREACHABLE_MINUTES:
+	for origin_id in range(region.neighborhoods.size()):
+		if not region.neighborhoods[origin_id].initially_developed:
+			continue
+		var row: PackedFloat32Array = routes["times"][origin_id]
+		for destination_id in range(row.size()):
+			if region.neighborhoods[destination_id].initially_developed and row[destination_id] >= RoadGraph.UNREACHABLE_MINUTES:
 				return false
 	return true
 

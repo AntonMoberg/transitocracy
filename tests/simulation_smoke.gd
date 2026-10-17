@@ -18,9 +18,9 @@ func _initialize() -> void:
 
 	_check(first.region_ids.size() == 4 and first.county_ids.size() == 8 and first.cities.size() == 16 and first.neighborhoods.size() == 96, "a state must generate all five administrative tiers")
 	for city in first.cities:
-		_check(city["neighborhood_ids"].size() == 6, "each city must contain six neighborhoods")
+		_check(city["neighborhood_ids"].size() >= 4, "each city must retain room beyond its three starting neighborhoods")
 	for neighborhood in first.neighborhoods:
-		_check(neighborhood.position_km.x >= 0.0 and neighborhood.position_km.x <= 240.0 and neighborhood.position_km.y >= 0.0 and neighborhood.position_km.y <= 160.0, "generated neighborhoods must stay inside the playable map")
+		_check(first.jurisdictions[0].contains_point(neighborhood.position_km), "generated neighborhoods must stay on playable land")
 		_check(first.jurisdiction_for_neighborhood(neighborhood.id, "State").id == 0 and first.jurisdiction_for_neighborhood(neighborhood.id, "County") != null, "every neighborhood must have state and county parents")
 	_check(first.validation_errors().is_empty(), "generated region must pass validation")
 	_check(first.neighborhoods[0].position_km == repeat.neighborhoods[0].position_km, "same seed must reproduce positions")

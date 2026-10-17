@@ -62,17 +62,19 @@ func _run() -> void:
 	MultiScaleTraffic.change_mode(next_result["region"], next_result["flow"], next_state, MultiScaleTraffic.DAY, MultiScaleTraffic.SECOND)
 	_check(absf(next_state.queued_cars() - macro_queue_total) < 0.1, "returning to detail preserves aggregate queue count")
 	_check(next_state.estimated == false and next_state.queued_cars() >= 0.0 and before_macro >= 0.0, "return to detailed mode reconstructs nonnegative traffic")
-	var junction_state = MultiScaleTraffic.new_day(region, flow, first_time)
+	var junction_region = DayCycleCalculator.copy_region(region)
 	var hub_id: int = -1
-	for node in region.road_nodes:
+	for node in junction_region.road_nodes:
 		var approaches := 0
 		for link in region.road_links:
 			if link.from_node_id == node.id or link.to_node_id == node.id:
 				approaches += 1
-		if approaches >= 3 and not node.is_interchange:
+		if approaches >= 3:
 			hub_id = node.id
+			node.is_interchange = false
 			break
-	_check(hub_id >= 0, "generated roads include a shared junction")
+	_check(hub_id >= 0, "starter city hubs can provide a shared junction fixture")
+	var junction_state = MultiScaleTraffic.new_day(junction_region, flow, first_time)
 	if hub_id >= 0:
 		var loading := PackedVector2Array()
 		loading.resize(region.road_links.size())
@@ -83,7 +85,7 @@ func _run() -> void:
 			elif link.from_node_id == hub_id:
 				loading[index] = Vector2(loading[index].x, 5000.0)
 		junction_state.cached_links = loading
-		MultiScaleTraffic._advance_links(region, flow, junction_state, 7, 900)
+		MultiScaleTraffic._advance_links(junction_region, flow, junction_state, 7, 900)
 		var junction_served := 0.0
 		for index in range(region.road_links.size()):
 			var link = region.road_links[index]

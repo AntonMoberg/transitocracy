@@ -12,6 +12,8 @@ const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
 const SPATIAL_GRID_SIZE = 32
+const MAX_ZOOM = 64.0
+const TRACKPAD_PAN_PIXELS = 32.0
 const ROAD_LIVE = 0
 const ROAD_HOUR = 1
 const ROAD_DAY = 2
@@ -81,6 +83,9 @@ var spatial_strategic_links: Array[int] = []
 var spatial_local_road_km: float = 0.0
 var road_arrow_mesh: ArrayMesh
 var neighborhood_batches: Array[MultiMesh] = []
+var jurisdiction_layout_key: String = ""
+var jurisdiction_label_rects: Dictionary = {}
+var last_drawn_neighborhood_borders: int = 0
 
 
 func _ready() -> void:
@@ -88,6 +93,24 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	custom_minimum_size = Vector2(480, 320)
 	resized.connect(queue_redraw)
+	var navigation := HBoxContainer.new()
+	navigation.name = "MapNavigation"
+	navigation.position = Vector2(12, 10)
+	navigation.add_theme_constant_override("separation", 4)
+	add_child(navigation)
+	for label in ["−", "+", "Fit"]:
+		var button := Button.new()
+		button.text = label
+		button.custom_minimum_size = Vector2(32, 28)
+		button.focus_mode = Control.FOCUS_NONE
+		if label == "Fit":
+			button.tooltip_text = "Show the whole state"
+			button.pressed.connect(reset_view)
+		else:
+			var factor: float = 1.25 if label == "+" else 0.8
+			button.tooltip_text = "Zoom in" if label == "+" else "Zoom out"
+			button.pressed.connect(func() -> void: _zoom_at(size * 0.5, factor))
+		navigation.add_child(button)
 
 
 func set_region(new_region) -> void:
@@ -472,8 +495,7 @@ func _hit_aggregate_node(screen_position: Vector2) -> int:
 
 func _draw() -> void:
 	var draw_started: int = Time.get_ticks_usec()
-	draw_rect(Rect2(Vector2.ZERO, size), Color("101b2b"))
-	_draw_grid()
+	draw_rect(Rect2(Vector2.ZERO, size), Color("102632"))
 	if region == null:
 		last_draw_us = Time.get_ticks_usec() - draw_started
 		return
@@ -496,6 +518,12 @@ func _draw() -> void:
 		_draw_road_legend()
 	else:
 		_draw_legend()
+	_draw_map_scale()
+	var font := get_theme_default_font()
+	var hint: String = "Pinch / wheel: zoom  •  Two fingers / drag: pan"
+	var hint_width: float = font.get_string_size(hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
+	var hint_y: float = 55.0 if size.x < 800.0 else size.y - 12.0
+	draw_string(font, Vector2(size.x - hint_width - 14.0, hint_y), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 	last_draw_stages_us["done"] = Time.get_ticks_usec() - draw_started
 	last_draw_us = Time.get_ticks_usec() - draw_started
 
@@ -1039,6 +1067,12 @@ func _draw_road_nodes() -> void:
 			draw_circle(position_on_screen, 2.0, Color("8ea3b1", 0.48))
 			continue
 		var radius := 5.0 if node.is_interchange else 3.5
+		var dormant: bool = node.neighborhood_id >= 0 and region.neighborhoods[node.neighborhood_id].development_state == "Dormant"
+		if node.kind == "City":
+			dormant = region.city_development_state(region.city_jurisdiction_ids[node.city_id]) == "Dormant"
+		if dormant:
+			draw_arc(position_on_screen, 3.5, 0.0, TAU, 12, Color("718899", 0.65), 1.0, true)
+			continue
 		draw_circle(position_on_screen, radius + 2.0, Color("091321"))
 		draw_circle(position_on_screen, radius, Color("f2d786") if node.is_interchange else Color("c8d5df"))
 		if node.is_interchange:
@@ -1074,27 +1108,26 @@ func _draw_road_legend() -> void:
 	draw_string(font, base + Vector2(0, -39), "clear", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	draw_string(font, base + Vector2(164, -39), "saturated / queued", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, base + Vector2(0, 4), "Dashed = under construction  •  Gold = interchange", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-
-
-func _draw_grid() -> void:
-	var grid_color := Color(0.32, 0.47, 0.60, 0.15)
-	var world_size: Vector2 = _world_size()
-	var spacing: int = maxi(20, ceili(35.0 / (_map_scale() * zoom) / 20.0) * 20)
-	for x in range(0, ceili(world_size.x) + 1, spacing):
-		draw_line(_world_to_screen(Vector2(x, 0)), _world_to_screen(Vector2(x, world_size.y)), grid_color, 1.0)
-	for y in range(0, ceili(world_size.y) + 1, spacing):
-		draw_line(_world_to_screen(Vector2(0, y)), _world_to_screen(Vector2(world_size.x, y)), grid_color, 1.0)
+	draw_string(font, base + Vector2(0, 4), "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 
 func _draw_boundaries() -> void:
+	var state_polygon: PackedVector2Array = _screen_polyline(region.jurisdictions[0].polygon_km)
+	if state_polygon.size() >= 3:
+		draw_colored_polygon(state_polygon, Color("263b40"))
+		for region_index in range(region.region_ids.size()):
+			var area = region.jurisdictions[region.region_ids[region_index]]
+			var tint := Color("304648").lerp(Color("26363e"), float(region_index % 4) / 3.0)
+			draw_colored_polygon(_screen_polyline(area.polygon_km), tint)
+		_draw_polygon_border(region.jurisdictions[0], Color("9eaca2"), 3.0)
 	if selected_jurisdiction_id >= 0:
 		var selected = region.jurisdictions[selected_jurisdiction_id]
-		if selected.kind in ["Region", "County", "City"]:
-			draw_rect(_jurisdiction_screen_rect(selected), Color("e5d69a", 0.055))
+		if selected.kind in ["Region", "County", "City", "Neighborhood"]:
+			draw_colored_polygon(_screen_polyline(selected.polygon_km), Color("e5d69a", 0.055))
+	_draw_neighborhood_boundaries()
 	# Draw the smaller divisions first so the broader borders stay legible where they coincide.
 	for kind in ["City", "County", "Region"]:
-		if region.is_large_scale and detail_level == "State" and zoom < 4.0 and kind == "City":
+		if region.is_large_scale and zoom < 2.0 and kind == "City":
 			continue
 		for area in region.jurisdictions:
 			if area.kind != kind:
@@ -1103,11 +1136,50 @@ func _draw_boundaries() -> void:
 				continue
 			var color: Color = _jurisdiction_color(kind)
 			color.a = {"City": 0.46, "County": 0.72, "Region": 0.92}[kind]
-			draw_rect(_jurisdiction_screen_rect(area), color, false, {"City": 1.0, "County": 2.0, "Region": 3.0}[kind])
+			if region.is_large_scale and zoom < 2.0:
+				color.a = 0.18 if kind == "County" else 0.65
+			_draw_polygon_border(area, color, {"City": 1.0, "County": 1.5, "Region": 2.0}[kind])
 	if selected_jurisdiction_id >= 0:
 		var selected = region.jurisdictions[selected_jurisdiction_id]
-		if selected.kind in ["Region", "County", "City"]:
-			draw_rect(_jurisdiction_screen_rect(selected), Color("fff0b0", 0.95), false, 3.5)
+		if selected.kind in ["Region", "County", "City", "Neighborhood"]:
+			_draw_polygon_border(selected, Color("fff0b0", 0.95), 3.5)
+
+
+func _neighborhood_borders_visible(city) -> bool:
+	if region.is_large_scale and zoom < 2.0:
+		return false
+	var bounds: Rect2 = _jurisdiction_screen_rect(city)
+	if not bounds.intersects(Rect2(Vector2.ZERO, size)):
+		return false
+	var parcel_extent: float = sqrt(bounds.get_area() / float(maxi(1, city.neighborhood_ids.size())))
+	return maxf(bounds.size.x, bounds.size.y) >= 55.0 and parcel_extent >= 16.0
+
+
+func _draw_neighborhood_boundaries() -> void:
+	last_drawn_neighborhood_borders = 0
+	for city_id in region.city_jurisdiction_ids:
+		var city = region.jurisdictions[city_id]
+		if not _neighborhood_borders_visible(city):
+			continue
+		for neighborhood_id in city.neighborhood_ids:
+			var neighborhood = region.neighborhoods[neighborhood_id]
+			var district = region.jurisdictions[neighborhood.jurisdiction_id]
+			if not _jurisdiction_screen_rect(district).intersects(Rect2(Vector2.ZERO, size)):
+				continue
+			var inhabited: bool = neighborhood.population > 0 or neighborhood.jobs > 0
+			var color: Color = CITY_COLORS[neighborhood.city_id % CITY_COLORS.size()]
+			color.a = 0.18 if inhabited else 0.035 + float(neighborhood_id % 3) * 0.015
+			draw_colored_polygon(_screen_polyline(district.polygon_km), color)
+			_draw_polygon_border(district, Color("c1d0b3", 0.65 if inhabited else 0.34), 1.0)
+			last_drawn_neighborhood_borders += 1
+
+
+func _draw_polygon_border(area, color: Color, width: float) -> void:
+	var points: PackedVector2Array = _screen_polyline(area.polygon_km)
+	if points.size() < 3:
+		return
+	points.append(points[0])
+	draw_polyline(points, color, width, true)
 
 
 func _jurisdiction_screen_rect(area) -> Rect2:
@@ -1121,32 +1193,94 @@ func _jurisdiction_color(kind: String) -> Color:
 			return Color("63c6e5")
 		"County":
 			return Color("e4be75")
+		"Neighborhood":
+			return Color("c1d0b3")
 		_:
 			return Color("b5a9e8")
 
 
 func _jurisdiction_label_text(area) -> String:
 	var space: float = _jurisdiction_screen_rect(area).size.x
+	if area.kind == "City" and region.city_development_state(area.id) != "Dormant":
+		space = maxf(space, 140.0)
+	var label: String
 	match area.kind:
 		"Region":
-			return ("REGION · " if space >= 200.0 else "") + area.name.to_upper()
+			label = ("REGION · " if space >= 200.0 else "") + area.name.to_upper()
 		"County":
-			return ("COUNTY · " + area.name.to_upper()) if space >= 150.0 else area.name.trim_suffix(" County").to_upper()
+			label = ("COUNTY · " + area.name.to_upper()) if space >= 150.0 else area.name.trim_suffix(" County").to_upper()
 		_:
-			return ("CITY · " if space >= 140.0 else "") + area.name.to_upper()
+			label = ("CITY · " if space >= 140.0 else "") + area.name.to_upper()
+	if area.name.to_upper().begins_with(area.kind.to_upper()):
+		label = area.name.to_upper()
+	var font := get_theme_default_font()
+	var font_size := 11 if area.kind == "Region" else (10 if area.kind == "County" else 9)
+	var available: float = maxf(20.0, minf(180.0, space - 6.0)) - 8.0
+	while label.length() > 1 and font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x > available:
+		label = label.substr(0, label.length() - 2) + "…"
+	return label
 
 
 func _jurisdiction_label_rect(area) -> Rect2:
-	var bounds: Rect2 = _jurisdiction_screen_rect(area)
+	_ensure_jurisdiction_labels()
+	return jurisdiction_label_rects.get(area.id, Rect2())
+
+
+func _jurisdiction_label_visible(area) -> bool:
+	return _jurisdiction_label_eligible(area) and _jurisdiction_label_rect(area).has_area()
+
+
+func _jurisdiction_label_eligible(area) -> bool:
+	if area.kind not in ["Region", "County", "City"]:
+		return false
+	if not _jurisdiction_screen_rect(area).intersects(Rect2(Vector2.ZERO, size)):
+		return false
+	if region.is_large_scale and area.id != selected_jurisdiction_id:
+		if area.kind == "County" and zoom < 2.0:
+			return false
+		if area.kind == "City" and zoom < 4.0 and region.city_development_state(area.id) == "Dormant":
+			return false
+	if region.is_large_scale and zoom < 4.0:
+		if detail_level == "State" and area.kind != "Region":
+			return false
+		if detail_level == "Region" and area.kind == "City":
+			return false
+	return _jurisdiction_screen_rect(area).size.x >= 35.0 or (area.kind == "City" and region.city_development_state(area.id) != "Dormant")
+
+
+func _ensure_jurisdiction_labels() -> void:
+	var key: String = "%s:%s:%s:%s:%s:%s" % [region.get_instance_id(), size, zoom, pan, detail_level, selected_jurisdiction_id]
+	if key == jurisdiction_layout_key:
+		return
+	jurisdiction_layout_key = key
+	jurisdiction_label_rects.clear()
+	var ordered: Array = []
+	if selected_jurisdiction_id >= 0 and _jurisdiction_label_eligible(region.jurisdictions[selected_jurisdiction_id]):
+		ordered.append(region.jurisdictions[selected_jurisdiction_id])
+	for kind in ["Region", "County", "City"]:
+		for area in region.jurisdictions:
+			if area.kind == kind and area.id != selected_jurisdiction_id and _jurisdiction_label_eligible(area):
+				ordered.append(area)
+	var occupied: Array[Rect2] = []
 	var font := get_theme_default_font()
-	var font_size := 11 if area.kind == "Region" else (10 if area.kind == "County" else 9)
-	var width: float = minf(font.get_string_size(_jurisdiction_label_text(area), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + 8.0, bounds.size.x - 6.0)
-	var top: float = bounds.position.y + 7.0
-	if area.kind == "County":
-		top = bounds.position.y + bounds.size.y * 0.5 + 3.0
-	elif area.kind == "City":
-		top = bounds.end.y - 14.0
-	return Rect2(Vector2(bounds.position.x + 3.0, top), Vector2(maxf(20.0, width), 14.0 if area.kind == "City" else 18.0))
+	for area in ordered:
+		var font_size := 11 if area.kind == "Region" else (10 if area.kind == "County" else 9)
+		var width: float = maxf(20.0, font.get_string_size(_jurisdiction_label_text(area), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + 8.0)
+		var center: Vector2 = _world_to_screen(area.center_km)
+		var top: float = -30.0 if area.kind == "City" else (8.0 if area.kind == "County" else -12.0)
+		for offset in [Vector2.ZERO, Vector2(0, -20), Vector2(0, 20), Vector2(0, -40), Vector2(0, 40), Vector2(-30, 0), Vector2(30, 0)]:
+			var candidate := Rect2(center + Vector2(-width * 0.5, top) + offset, Vector2(width, 14.0 if area.kind == "City" else 18.0))
+			if not Rect2(Vector2(4, 4), size - Vector2(8, 8)).encloses(candidate):
+				continue
+			var overlaps := false
+			for prior in occupied:
+				if candidate.grow(2.0).intersects(prior):
+					overlaps = true
+					break
+			if not overlaps:
+				jurisdiction_label_rects[area.id] = candidate
+				occupied.append(candidate)
+				break
 
 
 func _draw_jurisdiction_labels() -> void:
@@ -1159,7 +1293,7 @@ func _draw_jurisdiction_labels() -> void:
 		for area in region.jurisdictions:
 			if area.kind != kind:
 				continue
-			if not _jurisdiction_screen_rect(area).intersects(Rect2(Vector2.ZERO, size)):
+			if not _jurisdiction_label_visible(area):
 				continue
 			var rect: Rect2 = _jurisdiction_label_rect(area)
 			var color: Color = _jurisdiction_color(kind)
@@ -1177,12 +1311,13 @@ func _draw_jurisdiction_labels() -> void:
 
 func _draw_jurisdiction_key() -> void:
 	var font := get_theme_default_font()
-	var start := Vector2(size.x - 249.0, 10.0)
-	draw_rect(Rect2(start, Vector2(239.0, 25.0)), Color("0b1927", 0.94))
+	var start := Vector2(size.x - 362.0, 10.0)
+	draw_rect(Rect2(start, Vector2(352.0, 25.0)), Color("0b1927", 0.94))
 	for item in [
 		{"kind": "Region", "label": "Region", "offset": 9.0},
 		{"kind": "County", "label": "County", "offset": 85.0},
 		{"kind": "City", "label": "City", "offset": 165.0},
+		{"kind": "Neighborhood", "label": "Neighborhood", "offset": 220.0},
 	]:
 		var x: float = start.x + item["offset"]
 		var color: Color = _jurisdiction_color(item["kind"])
@@ -1197,13 +1332,14 @@ func _is_recorded_time() -> bool:
 
 func _draw_cities() -> void:
 	for city in region.cities:
-		var center: Vector2 = _world_to_screen(city["center_km"])
-		if not _screen_visible(center, 50.0):
+		var area = region.jurisdictions[city["jurisdiction_id"]]
+		var bounds: Rect2 = _jurisdiction_screen_rect(area)
+		if not bounds.intersects(Rect2(Vector2.ZERO, size)):
 			continue
 		var color: Color = CITY_COLORS[int(city["id"]) % CITY_COLORS.size()]
-		var radius: float = (4.0 if region.is_large_scale else 7.5) * _map_scale() * zoom
-		draw_circle(center, radius, Color(color.r, color.g, color.b, 0.08))
-		draw_arc(center, radius, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.28), 1.0, true)
+		if maxf(bounds.size.x, bounds.size.y) >= 8.0:
+			color.a = 0.035
+			draw_colored_polygon(_screen_polyline(area.polygon_km), color)
 
 
 func _circle_mesh(inner_radius: float) -> ArrayMesh:
@@ -1284,9 +1420,16 @@ func _draw_neighborhoods() -> void:
 	for neighborhood_index in neighborhood_indices:
 		var neighborhood = region.neighborhoods[neighborhood_index]
 		var screen_position: Vector2 = _world_to_screen(neighborhood.position_km)
-		if not _screen_visible(screen_position, 15.0) or (neighborhood.id % stride != 0 and neighborhood.id != selected_id and neighborhood.id != hovered_id):
+		if not _screen_visible(screen_position, 15.0) or (neighborhood.id % stride != 0 and not neighborhood.initially_developed and neighborhood.id != selected_id and neighborhood.id != hovered_id):
 			continue
 		var radius: float = _node_radius(neighborhood.population)
+		if neighborhood.development_state == "Dormant":
+			if region.is_large_scale and zoom < 2.0 and neighborhood.id != selected_id and neighborhood.id != hovered_id:
+				continue
+			draw_arc(screen_position, 3.0, 0.0, TAU, 12, Color("82938e", 0.65), 1.0, true)
+			if neighborhood.id == selected_id or neighborhood.id == hovered_id:
+				draw_arc(screen_position, 7.0, 0.0, TAU, 16, Color("f5d482"), 1.5, true)
+			continue
 		var color := _access_color((region.accessibility[neighborhood.id] - min_access) / maxf(1.0, max_access - min_access))
 		var desirability_color := Color("cf6075").lerp(Color("61c99a"), neighborhood.desirability / 100.0)
 		if batch_nodes:
@@ -1677,18 +1820,69 @@ func _draw_legend() -> void:
 		draw_rect(Rect2(origin + Vector2(step * 17.0, 0), Vector2(16, 9)), _access_color(float(step) / 7.0))
 	draw_string(font, origin + Vector2(0, 26), "lower", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	draw_string(font, origin + Vector2(102, 26), "higher", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, Vector2(size.x - 178, size.y - 15), "Drag to pan  •  Scroll to zoom", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("8fa4ba"))
+
+
+func _draw_map_scale() -> void:
+	var pixels_per_km: float = _map_scale() * zoom
+	if pixels_per_km <= 0.0:
+		return
+	var maximum_km: float = 110.0 / pixels_per_km
+	var magnitude: float = pow(10.0, floorf(log(maximum_km) / log(10.0)))
+	var distance_km: float = magnitude
+	for multiplier in [5.0, 2.0]:
+		if magnitude * multiplier <= maximum_km:
+			distance_km = magnitude * multiplier
+			break
+	var origin := Vector2(size.x - 150.0, 94.0 if size.x < 800.0 else size.y - 48.0)
+	var width: float = distance_km * pixels_per_km
+	draw_rect(Rect2(origin - Vector2(10, 24), Vector2(140, 38)), Color("0b1927", 0.9))
+	var label: String = "%.0f km" % distance_km if distance_km >= 1.0 else "%.0f m" % (distance_km * 1000.0)
+	draw_string(get_theme_default_font(), origin + Vector2(0, -7), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("d7e7f1"))
+	draw_line(origin, origin + Vector2(width, 0), Color("d7e7f1"), 2.0)
+	for offset in [0.0, width]:
+		draw_line(origin + Vector2(offset, -3), origin + Vector2(offset, 3), Color("d7e7f1"), 2.0)
+
+
+func reset_view() -> void:
+	zoom = 1.0
+	pan = Vector2.ZERO
+	pointer_down = false
+	queue_redraw()
+
+
+func _zoom_at(screen_position: Vector2, factor: float) -> void:
+	if not is_finite(factor) or factor <= 0.0:
+		return
+	var old_zoom: float = zoom
+	zoom = clampf(zoom * factor, 1.0, MAX_ZOOM)
+	var ratio: float = zoom / old_zoom
+	pan = screen_position - size * 0.5 - (screen_position - size * 0.5 - pan) * ratio
+	if pointer_down:
+		pointer_dragged = true
+	hover_world_position = _screen_to_world(screen_position)
+	queue_redraw()
 
 
 func _gui_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton:
+	if event is InputEventMagnifyGesture:
+		_zoom_at(event.position, event.factor)
+		accept_event()
+	elif event is InputEventPanGesture:
+		if event.ctrl_pressed or event.meta_pressed:
+			_zoom_at(event.position, exp(-event.delta.y * 0.08))
+		else:
+			pan -= event.delta * TRACKPAD_PAN_PIXELS
+			if pointer_down:
+				pointer_dragged = true
+			hover_world_position = _screen_to_world(event.position)
+			queue_redraw()
+		accept_event()
+	elif event is InputEventMouseButton:
 		var mouse_button := event as InputEventMouseButton
 		if mouse_button.pressed and (mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP or mouse_button.button_index == MOUSE_BUTTON_WHEEL_DOWN):
-			var old_zoom := zoom
-			zoom = clampf(zoom * (1.12 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.12), 1.0, 32.0 if region != null and region.is_large_scale else 2.8)
-			var ratio := zoom / old_zoom
-			pan = mouse_button.position - size * 0.5 - (mouse_button.position - size * 0.5 - pan) * ratio
-			queue_redraw()
+			var direction: float = 1.0 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
+			var amount: float = mouse_button.factor if mouse_button.factor > 0.0 else 1.0
+			_zoom_at(mouse_button.position, pow(1.12, direction * amount))
 			accept_event()
 		elif mouse_button.button_index == MOUSE_BUTTON_LEFT:
 			if mouse_button.pressed:
@@ -1815,7 +2009,7 @@ func _hit_jurisdiction_label(screen_position: Vector2) -> int:
 		return -1
 	for kind in ["City", "County", "Region"]:
 		for area in region.jurisdictions:
-			if area.kind == kind and _jurisdiction_label_rect(area).has_point(screen_position):
+			if area.kind == kind and _jurisdiction_label_visible(area) and _jurisdiction_label_rect(area).has_point(screen_position):
 				return area.id
 	return -1
 
@@ -1827,10 +2021,10 @@ func _hit_jurisdiction_border(screen_position: Vector2) -> int:
 		for area in region.jurisdictions:
 			if area.kind != kind:
 				continue
-			var bounds: Rect2 = _jurisdiction_screen_rect(area)
-			if screen_position.x >= bounds.position.x - 4.0 and screen_position.x <= bounds.end.x + 4.0 and screen_position.y >= bounds.position.y - 4.0 and screen_position.y <= bounds.end.y + 4.0:
-				var edge_distance: float = minf(minf(absf(screen_position.x - bounds.position.x), absf(screen_position.x - bounds.end.x)), minf(absf(screen_position.y - bounds.position.y), absf(screen_position.y - bounds.end.y)))
-				if edge_distance <= 4.0:
+			var polygon: PackedVector2Array = _screen_polyline(area.polygon_km)
+			for vertex in range(polygon.size()):
+				var closest: Vector2 = Geometry2D.get_closest_point_to_segment(screen_position, polygon[vertex], polygon[(vertex + 1) % polygon.size()])
+				if closest.distance_to(screen_position) <= 4.0:
 					return area.id
 	return -1
 
@@ -1838,13 +2032,20 @@ func _hit_jurisdiction_border(screen_position: Vector2) -> int:
 func _jurisdiction_at(screen_position: Vector2) -> int:
 	if region == null:
 		return -1
+	var world_position: Vector2 = _screen_to_world(screen_position)
+	for city_id in region.city_jurisdiction_ids:
+		var city = region.jurisdictions[city_id]
+		if _neighborhood_borders_visible(city) and city.contains_point(world_position):
+			return region.jurisdiction_at_point(world_position)
 	var selected_kind: String = region.jurisdictions[selected_jurisdiction_id].kind if selected_jurisdiction_id >= 0 else "State"
 	var target_kind: String = {"State": "Region", "Region": "County", "County": "City", "City": "City", "Neighborhood": "City"}.get(selected_kind, "City")
-	if selected_kind in ["Region", "County"] and not _jurisdiction_screen_rect(region.jurisdictions[selected_jurisdiction_id]).has_point(screen_position):
+	if selected_kind in ["Region", "County"] and not region.jurisdictions[selected_jurisdiction_id].contains_point(world_position):
 		target_kind = selected_kind
 	for area in region.jurisdictions:
-		if area.kind == target_kind and _jurisdiction_screen_rect(area).has_point(screen_position):
+		if area.kind == target_kind and area.contains_point(world_position):
 			return area.id
+	if region.jurisdictions[0].contains_point(world_position):
+		return region.jurisdiction_at_point(world_position)
 	return -1
 
 
