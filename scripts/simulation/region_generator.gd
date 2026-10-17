@@ -20,12 +20,12 @@ const JOB_SKILL_MIX = {"Commercial": [0.55, 0.35, 0.10], "Office": [0.10, 0.35, 
 
 
 static func generate_region(seed_value: int):
-	return _generate(seed_value, 16, 96, 4, 8, false)
+	return _generate(seed_value, 32, 32, 4, 8, false)
 
 
-static func generate_large_region(seed_value: int, city_count: int = 128, neighborhoods_per_city: int = 40):
+static func generate_large_region(seed_value: int, city_count: int = 256):
 	var county_count: int = mini(64, city_count)
-	return _generate(seed_value, city_count, city_count * maxi(4, neighborhoods_per_city), mini(16, county_count), county_count, true)
+	return _generate(seed_value, city_count, city_count, mini(16, county_count), county_count, true)
 
 
 static func _generate(seed_value: int, city_count: int, neighborhood_count: int, region_count: int, county_count: int, large_scale: bool):
@@ -39,7 +39,7 @@ static func _generate(seed_value: int, city_count: int, neighborhood_count: int,
 	state.treasury = 500000000.0
 	var counties_per_region: PackedInt32Array = _distribute(county_count, region_count, 1, rng)
 	var cities_per_county: PackedInt32Array = _distribute(city_count, county_count, 1, rng)
-	var neighborhoods_per_city: PackedInt32Array = _distribute(neighborhood_count, city_count, 4, rng)
+	var neighborhoods_per_city: PackedInt32Array = _distribute(neighborhood_count, city_count, 1, rng)
 	for region_index in range(region_count):
 		var region_name: String = "Region %d" % (region_index + 1) if large_scale else REGION_NAMES[region_index]
 		var planning_region = _add_jurisdiction(region, JurisdictionData.REGION, region_name, state.id)
@@ -90,10 +90,107 @@ static func _generate(seed_value: int, city_count: int, neighborhood_count: int,
 		if area.kind in [JurisdictionData.REGION, JurisdictionData.COUNTY, JurisdictionData.CITY]:
 			area.generation_weight = pow(float(area.neighborhood_ids.size()), 0.65) * rng.randf_range(0.55, 1.8)
 	StateGeography.generate(region, rng)
+	_seed_anchor_neighborhoods(region)
 	for neighborhood in region.neighborhoods:
 		_populate_capacity_and_occupancy(neighborhood, rng, region.cities[neighborhood.city_id]["density"])
 	StateGeography.initialize_development(region)
+	_cap_starting_population(region)
 	return region
+
+
+static func _seed_anchor_neighborhoods(region) -> void:
+	for city_id in region.starting_city_ids:
+		var center: Vector2 = region.cities[city_id]["center_km"]
+		var origin: Vector2i = StateGeography.cell_grid_at_point(region.generation_seed, center)
+		var occupied: Dictionary = {}
+		for neighborhood_id in region.cities[city_id]["neighborhood_ids"]:
+			occupied[region.neighborhoods[neighborhood_id].cell_grid] = true
+		var added := 0
+		for radius in range(1, 10):
+			for offset_y in range(-radius, radius + 1):
+				for offset_x in range(-radius, radius + 1):
+					if maxi(absi(offset_x), absi(offset_y)) != radius or added >= 3:
+						continue
+					var grid := origin + Vector2i(offset_x, offset_y)
+					if occupied.has(grid):
+						continue
+					var cell_center: Vector2 = StateGeography.cell_site(region.generation_seed, grid)
+					if not region.jurisdictions[region.city_jurisdiction_ids[city_id]].contains_point(cell_center):
+						continue
+					var polygon: PackedVector2Array = StateGeography.cell_polygon(region, city_id, grid)
+					if polygon.size() < 3 or StateGeography.polygon_area(polygon) < 0.4:
+						continue
+					append_neighborhood(region, city_id, polygon, grid, false)
+					occupied[grid] = true
+					added += 1
+			if added >= 3:
+				break
+
+
+static func append_neighborhood(region, city_id: int, polygon: PackedVector2Array, grid: Vector2i, populate: bool = true):
+	var city: Dictionary = region.cities[city_id]
+	var local_id: int = city["neighborhood_ids"].size()
+	var neighborhood = NeighborhoodData.new()
+	neighborhood.id = region.neighborhoods.size()
+	neighborhood.city_id = city_id
+	neighborhood.county_id = city["county_id"]
+	neighborhood.region_id = city["region_id"]
+	neighborhood.name = "%s · %d" % [city["name"], local_id + 1]
+	var district = _add_jurisdiction(region, JurisdictionData.NEIGHBORHOOD, neighborhood.name, city["jurisdiction_id"])
+	district.polygon_km = polygon
+	StateGeography.update_bounds(district)
+	neighborhood.jurisdiction_id = district.id
+	neighborhood.position_km = district.center_km
+	neighborhood.cell_grid = grid
+	neighborhood.land_area_ha = StateGeography.polygon_area(polygon) * 100.0
+	neighborhood.developable_area_ha = minf(105.0, neighborhood.land_area_ha)
+	var defaults: Dictionary = zone_defaults(region, city_id, grid)
+	neighborhood.zone_shares = defaults["shares"]
+	neighborhood.zone_density = defaults["density"]
+	var local_rng := RandomNumberGenerator.new()
+	local_rng.seed = absi(region.generation_seed * 1000003 + city_id * 9176 + grid.x * 7309 + grid.y * 1543 + 7919)
+	region.neighborhoods.append(neighborhood)
+	city["neighborhood_ids"].append(neighborhood.id)
+	region.neighborhood_jurisdiction_ids.append(district.id)
+	var parent_id: int = district.id
+	while parent_id >= 0:
+		region.jurisdictions[parent_id].neighborhood_ids.append(neighborhood.id)
+		parent_id = region.jurisdictions[parent_id].parent_id
+	if populate:
+		_populate_capacity_and_occupancy(neighborhood, local_rng, int(city["density"]))
+	return neighborhood
+
+
+static func zone_defaults(region, city_id: int, grid: Vector2i) -> Dictionary:
+	var shares: Dictionary = ARCHETYPES[posmod(city_id * 13 + grid.x * 7 + grid.y * 11, ARCHETYPES.size())].duplicate(true)
+	var density: Dictionary = {}
+	var rng := RandomNumberGenerator.new()
+	rng.seed = absi(region.generation_seed * 1000003 + city_id * 9176 + grid.x * 7309 + grid.y * 1543)
+	for zone in RegionData.ZONE_TYPES:
+		density[zone] = clampi(int(region.cities[city_id]["density"]) + rng.randi_range(-1, 1), 0, 2)
+	return {"shares": shares, "density": density}
+
+
+static func _cap_starting_population(region) -> void:
+	var total: int = int(region.get_region_totals()["population"])
+	if total <= 100000:
+		return
+	var ratio: float = 100000.0 / float(total)
+	for neighborhood in region.neighborhoods:
+		if not neighborhood.initially_developed:
+			continue
+		neighborhood.households = floori(float(neighborhood.households) * ratio)
+		neighborhood.population = roundi(float(neighborhood.households) * neighborhood.people_per_household)
+	var capped_total: int = int(region.get_region_totals()["population"])
+	while capped_total > 100000:
+		for neighborhood in region.neighborhoods:
+			if not neighborhood.initially_developed or neighborhood.households == 0:
+				continue
+			var previous: int = neighborhood.population
+			neighborhood.households -= 1
+			neighborhood.population = roundi(float(neighborhood.households) * neighborhood.people_per_household)
+			capped_total -= previous - neighborhood.population
+			break
 
 
 static func _distribute(total: int, parent_count: int, minimum: int, rng: RandomNumberGenerator) -> PackedInt32Array:

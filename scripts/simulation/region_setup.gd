@@ -6,13 +6,15 @@ const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_
 const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 
 
 static func build(seed_value: int, city_count: int, state_tax_rate: float) -> Dictionary:
-	var region = RegionGenerator.generate_region(seed_value) if city_count == 16 else RegionGenerator.generate_large_region(seed_value, city_count, 40)
+	var region = RegionGenerator.generate_region(seed_value) if city_count == 32 else RegionGenerator.generate_large_region(seed_value, city_count)
 	RoadNetworkGenerator.generate(region)
+	DevelopmentPlanner.refresh_candidates(region)
 	AccessibilityCalculator.recalculate(region)
 	region.jurisdictions[0].income_tax_rate = state_tax_rate
 	NeighborhoodDynamics.initialize(region)

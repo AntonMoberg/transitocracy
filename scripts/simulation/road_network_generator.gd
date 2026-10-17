@@ -6,6 +6,7 @@ const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 
 
 static func generate(region) -> void:
+	region.road_geometry_revision += 1
 	region.road_nodes.clear()
 	region.road_links.clear()
 	region.road_projects.clear()

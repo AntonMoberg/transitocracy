@@ -1,5 +1,8 @@
 extends RefCounted
 
+const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
+const StateGeography = preload("res://scripts/simulation/state_geography.gd")
+
 const ZONE_TYPES = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 const DENSITY_NAMES = ["Low", "Medium", "High"]
 
@@ -22,6 +25,7 @@ var last_population_change: int = 0
 var last_household_change: int = 0
 var next_road_link_id: int = 0
 var next_road_project_id: int = 0
+var road_geometry_revision: int = 0
 
 # Each city has an id, name, center_km, and neighborhood_ids.
 var cities: Array[Dictionary] = []
@@ -35,6 +39,26 @@ var neighborhood_gateway_node_ids: Array[int] = []
 var city_hub_node_ids: Array[int] = []
 var city_route_node_ids: Array[int] = []
 var neighborhood_spoke_link_ids: Array[int] = []
+var development_candidates: Array = []
+var development_candidate_keys: Dictionary = {}
+var development_candidate_cells: Dictionary = {}
+
+
+func city_id_at_point(point: Vector2) -> int:
+	for city_id in range(city_jurisdiction_ids.size()):
+		if jurisdictions[city_jurisdiction_ids[city_id]].contains_point(point):
+			return city_id
+	return -1
+
+
+func development_candidate_at_point(point: Vector2) -> int:
+	var grid: Vector2i = StateGeography.cell_grid_at_point(generation_seed, point)
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			for candidate_id in development_candidate_cells.get("%d:%d" % [grid.x + offset_x, grid.y + offset_y], []):
+				if JurisdictionData.polygon_contains_point(point, development_candidates[candidate_id]["polygon"]):
+					return candidate_id
+	return -1
 
 
 func travel_time_between(origin_id: int, destination_id: int) -> float:
@@ -231,6 +255,15 @@ func validation_errors() -> PackedStringArray:
 			errors.append("Job skill counts do not match total jobs in %s." % neighborhood.name)
 		if neighborhood.development_state == "Dormant" and (neighborhood.households != 0 or neighborhood.population != 0 or neighborhood.jobs != 0 or neighborhood.average_household_wealth != 0.0):
 			errors.append("Dormant neighborhood %s has occupied development." % neighborhood.name)
+	for candidate_id in range(development_candidates.size()):
+		var candidate: Dictionary = development_candidates[candidate_id]
+		var city_id: int = candidate.get("city_id", -1)
+		var neighborhood_id: int = candidate.get("neighborhood_id", -1)
+		if int(candidate.get("id", -1)) != candidate_id or city_id < 0 or city_id >= cities.size():
+			errors.append("Invalid development candidate %d." % candidate_id)
+			continue
+		if neighborhood_id >= 0 and (neighborhood_id >= neighborhoods.size() or neighborhoods[neighborhood_id].city_id != city_id):
+			errors.append("Candidate %d has an invalid neighborhood." % candidate_id)
 	if accessibility.size() != neighborhoods.size() or (is_large_scale and city_travel_times.size() != cities.size()) or (not is_large_scale and travel_times.size() != neighborhoods.size()):
 		errors.append("Travel-time or accessibility data is incomplete.")
 	elif not is_large_scale:

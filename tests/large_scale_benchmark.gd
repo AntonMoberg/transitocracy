@@ -11,7 +11,7 @@ func _initialize() -> void:
 
 
 func _run() -> void:
-	var city_count := 128
+	var city_count := 256
 	for argument in OS.get_cmdline_user_args():
 		if argument.begins_with("--cities="):
 			city_count = int(argument.trim_prefix("--cities="))
@@ -38,6 +38,10 @@ func _run() -> void:
 		total_origin_error += absf(actual - target)
 		total_origin_target += target
 	print("Work OD max origin error: %.3f%%; aggregate absolute error: %.3f%%" % [max_origin_error * 100.0, total_origin_error / maxf(1.0, total_origin_target) * 100.0])
+	if max_origin_error > 0.01:
+		push_error("The compact commuter matrix did not balance within 1%.")
+		quit(1)
+		return
 	start_us = Time.get_ticks_usec()
 	var copy = DayCycleCalculator.copy_region(region)
 	print("Region copy: %.1f ms" % (float(Time.get_ticks_usec() - start_us) / 1000.0))

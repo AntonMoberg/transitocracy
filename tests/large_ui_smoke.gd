@@ -26,7 +26,7 @@ func _run() -> void:
 	print("Large neighborhood draw stages (µs): ", main.map_view.last_draw_stages_us)
 	if neighborhood_draw_ms >= 100.0:
 		errors.append("Neighborhood map draw took %.1f ms." % neighborhood_draw_ms)
-	if main.region.neighborhoods.size() != 5120:
+	if main.region.neighborhoods.size() != 286:
 		errors.append("Large region was not selected by default.")
 	if main.map_view.region != main.region:
 		errors.append("Map did not receive the generated region.")

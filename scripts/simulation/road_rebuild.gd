@@ -1,6 +1,7 @@
 extends RefCounted
 
 const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
@@ -10,6 +11,7 @@ const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dyna
 
 static func build(source_region, previous_state, unix_seconds: int) -> Dictionary:
 	var region = DayCycleCalculator.copy_region(source_region)
+	DevelopmentPlanner.refresh_candidates(region)
 	region.city_od_candidates.clear()
 	AccessibilityCalculator.recalculate(region)
 	NeighborhoodDynamics.refresh_desirability(region)

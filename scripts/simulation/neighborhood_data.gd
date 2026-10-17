@@ -7,6 +7,7 @@ var region_id: int = -1
 var jurisdiction_id: int = -1
 var name: String = ""
 var position_km: Vector2 = Vector2.ZERO
+var cell_grid: Vector2i = Vector2i.ZERO
 var land_area_ha: float = 0.0
 var developable_area_ha: float = 0.0
 
@@ -36,6 +37,7 @@ var migration_remainder: float = 0.0
 var last_household_change: int = 0
 var last_population_change: int = 0
 var initially_developed: bool = false
+var development_approved: bool = false
 var development_state: String = "Established"
 var development_jobs_by_skill: Dictionary = {}
 var development_retail_share: float = 0.0

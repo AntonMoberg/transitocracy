@@ -48,7 +48,9 @@ static func refresh_desirability(region) -> void:
 	FiscalCalculator.refresh_tax_estimates(region)
 	for neighborhood in region.neighborhoods:
 		var connected: bool = _development_connected(region, neighborhood)
-		if not connected:
+		if not neighborhood.development_approved and neighborhood.households == 0 and neighborhood.jobs == 0:
+			neighborhood.development_state = "Dormant"
+		elif not connected:
 			neighborhood.development_state = "Disconnected" if neighborhood.households > 0 or neighborhood.jobs > 0 else "Dormant"
 		elif neighborhood.development_state != "Established" or neighborhood.households == 0:
 			var occupancy: float = float(neighborhood.households) / maxf(1.0, float(neighborhood.housing_capacity))
@@ -99,7 +101,11 @@ static func advance_day(region) -> void:
 		if not connected:
 			daily_change = -float(old_households) * DAILY_DECLINE_RATE
 		elif neighborhood.development_state == "Developing":
-			daily_change = float(neighborhood.housing_capacity) * DAILY_DEVELOPMENT_RATE * clampf(neighborhood.desirability / NEUTRAL_DESIRABILITY, 0.3, 1.0)
+			var city_distance: float = neighborhood.position_km.distance_to(region.cities[neighborhood.city_id]["center_km"])
+			var location_factor: float = 0.02 + 0.98 * exp(-city_distance / 12.0)
+			daily_change = float(neighborhood.housing_capacity) * DAILY_DEVELOPMENT_RATE * clampf(neighborhood.desirability / NEUTRAL_DESIRABILITY, 0.3, 1.0) * location_factor
+		if not neighborhood.development_approved:
+			daily_change = minf(daily_change, 0.0)
 		var exact_change: float = daily_change + neighborhood.migration_remainder
 		var requested_change: int = roundi(exact_change)
 		var next_households: int = clampi(old_households + requested_change, 0, neighborhood.housing_capacity)
@@ -112,7 +118,9 @@ static func advance_day(region) -> void:
 		region.last_population_change += neighborhood.last_population_change
 		var daily_jobs: float = -float(neighborhood.jobs) * DAILY_DECLINE_RATE
 		if connected:
-			daily_jobs = float(neighborhood.job_capacity) * DAILY_DEVELOPMENT_RATE if neighborhood.jobs < roundi(float(neighborhood.job_capacity) * 0.7) else 0.0
+			var city_distance: float = neighborhood.position_km.distance_to(region.cities[neighborhood.city_id]["center_km"])
+			var location_factor: float = 0.02 + 0.98 * exp(-city_distance / 12.0)
+			daily_jobs = float(neighborhood.job_capacity) * DAILY_DEVELOPMENT_RATE * location_factor if neighborhood.development_approved and neighborhood.jobs < roundi(float(neighborhood.job_capacity) * 0.7) else 0.0
 		var exact_jobs: float = daily_jobs + neighborhood.job_growth_remainder
 		var job_change: int = roundi(exact_jobs)
 		var next_jobs: int = clampi(neighborhood.jobs + job_change, 0, neighborhood.job_capacity)

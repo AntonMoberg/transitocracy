@@ -4,7 +4,7 @@ const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 const WORKERS_PER_HOUSEHOLD = 1.1
 const TRAVEL_TIME_DECAY_MINUTES = 30.0
-const BALANCING_PASSES = 40
+const BALANCING_PASSES = 400
 const MAX_COMMUTE_DESTINATIONS = 64
 const WEEKEND_COMMUTE_FRACTION = 0.25
 const WEEKDAY_SHOPPING_VISITS_PER_PERSON = 0.20
@@ -62,9 +62,10 @@ static func build(region):
 		region.city_od_candidates.clear()
 		for origin_city in range(city_count):
 			var candidate_ids: Array[int] = []
-			for destination_city in range(city_count):
-				if region.city_travel_times[origin_city][destination_city] < 1000000.0:
-					candidate_ids.append(destination_city)
+			if row_targets[origin_city] > 0.0:
+				for destination_city in range(city_count):
+					if column_targets[destination_city] > 0.0 and region.city_travel_times[origin_city][destination_city] < 1000000.0:
+						candidate_ids.append(destination_city)
 			var times: PackedFloat32Array = region.city_travel_times[origin_city]
 			candidate_ids.sort_custom(func(a: int, b: int) -> bool: return times[a] < times[b])
 			var selected := PackedInt32Array()
@@ -80,7 +81,7 @@ static func build(region):
 			var destination_city: int = destinations[index]
 			var minutes: float = region.city_travel_times[origin_city][destination_city]
 			if minutes < 1000000.0:
-				row[index] = exp(-minutes / TRAVEL_TIME_DECAY_MINUTES)
+				row[index] = maxf(exp(-minutes / TRAVEL_TIME_DECAY_MINUTES), 0.000001)
 		weights.append(row)
 	profile.build_timings_us["kernel"] = Time.get_ticks_usec() - stage_started
 	stage_started = Time.get_ticks_usec()
@@ -107,6 +108,19 @@ static func build(region):
 				column_sums[destinations[index]] += row_weights[index] * row_factors[origin_city]
 		for destination_city in range(city_count):
 			column_factors[destination_city] = column_targets[destination_city] / maxf(0.000001, column_sums[destination_city])
+		if _pass_index % 8 == 7:
+			var largest_error := 0.0
+			for origin_city in range(city_count):
+				if row_targets[origin_city] <= 0.0:
+					continue
+				var assigned_total := 0.0
+				var destinations: PackedInt32Array = region.city_od_candidates[origin_city]
+				var row_weights: PackedFloat32Array = weights[origin_city]
+				for index in range(destinations.size()):
+					assigned_total += row_weights[index] * row_factors[origin_city] * column_factors[destinations[index]]
+				largest_error = maxf(largest_error, absf(assigned_total - row_targets[origin_city]) / maxf(1.0, row_targets[origin_city]))
+			if largest_error < 0.005:
+				break
 	profile.build_timings_us["balance"] = Time.get_ticks_usec() - stage_started
 	stage_started = Time.get_ticks_usec()
 	var matrix: Array[PackedFloat32Array] = []

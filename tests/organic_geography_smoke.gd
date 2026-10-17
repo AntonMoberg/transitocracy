@@ -14,9 +14,9 @@ func _initialize() -> void:
 
 
 func _run() -> void:
-	for city_count in [16, 128, 512]:
+	for city_count in [32, 256, 768]:
 		for seed_value in [1729, 42]:
-			var region = RegionGenerator.generate_region(seed_value) if city_count == 16 else RegionGenerator.generate_large_region(seed_value, city_count)
+			var region = RegionGenerator.generate_region(seed_value) if city_count == 32 else RegionGenerator.generate_large_region(seed_value, city_count)
 			var county_counts: Dictionary = {}
 			var city_counts: Dictionary = {}
 			var neighborhood_counts: Dictionary = {}
@@ -45,6 +45,8 @@ func _run() -> void:
 					shape_counts[area.kind].y += 1
 				_check(not Geometry2D.triangulate_polygon(area.polygon_km).is_empty(), "organic boundaries must remain simple renderable polygons")
 			for kind in shape_counts:
+				if kind == "Neighborhood":
+					continue
 				_check(shape_counts[kind].y > shape_counts[kind].x * 0.6, "%s boundaries must have varied bends instead of four-sided boxes" % kind)
 			for parent in region.jurisdictions:
 				if not parent.child_ids.is_empty():
@@ -58,7 +60,7 @@ func _run() -> void:
 					_check(region.jurisdiction_at_point(neighborhood.position_km) == district.id, "neighborhood ownership must follow parcel borders")
 					_check(is_equal_approx(neighborhood.land_area_ha, StateGeography._area(district.polygon_km) * 100.0), "neighborhood land area must include its entire boundary")
 					_check(neighborhood.developable_area_ha > 0.0 and neighborhood.developable_area_ha <= minf(130.0, neighborhood.land_area_ha), "larger administrative boundaries must not inflate developable housing and job capacity")
-			_check(neighborhood_counts.size() >= 3, "cities must have different neighborhood counts")
+			_check(neighborhood_counts.size() >= 2, "anchor and dormant cities must have different neighborhood counts")
 			if region.is_large_scale:
 				var snapshot = DayCycleCalculator.copy_region(region)
 				var district_id: int = region.neighborhoods[0].jurisdiction_id
@@ -81,7 +83,7 @@ func _run() -> void:
 	_check(map._jurisdiction_at(map._world_to_screen(parcel_position)) == district.id, "clicking inside a visible neighborhood must select that polygon")
 	var county = main.region.jurisdictions[main.region.county_ids[0]]
 	var ownership = main.region.jurisdictions[main.region.jurisdiction_at_point(county.center_km)]
-	_check(ownership.kind == "Neighborhood" and county.neighborhood_ids.has(ownership.neighborhood_ids[0]), "all county land must belong to a city and neighborhood")
+	_check(ownership.kind in ["City", "Neighborhood"] and ownership.id != county.id, "empty county land must still belong to a city")
 	if failures == 0:
 		print("Uneven hierarchies, organic boundaries, full administrative tiling, and polygon selection passed.")
 	quit(1 if failures > 0 else 0)
@@ -107,7 +109,10 @@ func _check_partition(region, parent) -> void:
 			for intersection in Geometry2D.intersect_polygons(child.polygon_km, other.polygon_km):
 				overlap += StateGeography._area(intersection)
 			_check(overlap < tolerance, "sibling polygons must not overlap")
-	_check(absf(covered_area - parent_area) < tolerance, "%s children must cover their parent without gaps" % parent.kind)
+	if parent.kind == "City":
+		_check(covered_area < parent_area and covered_area > 0.0, "small neighborhoods must leave undeveloped city land")
+	else:
+		_check(absf(covered_area - parent_area) < tolerance, "%s children must cover their parent without gaps" % parent.kind)
 
 
 func _check(condition: bool, description: String) -> void:

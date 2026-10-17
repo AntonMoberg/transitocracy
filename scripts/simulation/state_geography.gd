@@ -2,6 +2,8 @@ extends RefCounted
 
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
 const STATE_LAND_AREA_KM2 = 400000.0
+const CELL_SIZE_KM = 1.6
+const TRIANGLE_ROW_HEIGHT = 0.8660254
 
 
 static func generate(region, rng: RandomNumberGenerator) -> void:
@@ -11,25 +13,40 @@ static func generate(region, rng: RandomNumberGenerator) -> void:
 	_partition(region, state, rng)
 	for city in region.cities:
 		var area = region.jurisdictions[city["jurisdiction_id"]]
-		var center: Vector2 = area.center_km
+		var center: Vector2 = _settlement_point(area, rng)
 		city["center_km"] = center
-		var neighborhood_ids: Array = city["neighborhood_ids"]
-		_divide_children(region, area.child_ids, area.polygon_km, rng)
-		var parcels: Array = []
-		for neighborhood_id in neighborhood_ids:
-			var district = region.jurisdictions[region.neighborhoods[neighborhood_id].jurisdiction_id]
-			parcels.append({"polygon": district.polygon_km, "center": district.center_km})
-		parcels.sort_custom(func(first: Dictionary, second: Dictionary) -> bool: return first["center"].distance_squared_to(center) < second["center"].distance_squared_to(center))
-		for local_id in range(neighborhood_ids.size()):
-			var neighborhood = region.neighborhoods[neighborhood_ids[local_id]]
+		for neighborhood_id in city["neighborhood_ids"]:
+			var neighborhood = region.neighborhoods[neighborhood_id]
 			var district = region.jurisdictions[neighborhood.jurisdiction_id]
-			district.polygon_km = parcels[local_id]["polygon"]
+			var grid: Vector2i = cell_grid_at_point(region.generation_seed, center)
+			var seed_polygon: PackedVector2Array = cell_polygon(region, city["id"], grid)
+			if polygon_area(seed_polygon) < 0.4 or not area.contains_point(cell_site(region.generation_seed, grid)):
+				for radius in range(1, 12):
+					for offset_y in range(-radius, radius + 1):
+						for offset_x in range(-radius, radius + 1):
+							if maxi(absi(offset_x), absi(offset_y)) != radius:
+								continue
+							var trial_grid := grid + Vector2i(offset_x, offset_y)
+							var trial_center: Vector2 = cell_site(region.generation_seed, trial_grid)
+							if not area.contains_point(trial_center):
+								continue
+							var trial_polygon: PackedVector2Array = cell_polygon(region, city["id"], trial_grid)
+							if polygon_area(trial_polygon) >= 0.4:
+								seed_polygon = trial_polygon
+								grid = trial_grid
+								break
+						if polygon_area(seed_polygon) >= 0.4:
+							break
+					if polygon_area(seed_polygon) >= 0.4:
+						break
+			district.polygon_km = seed_polygon
 			_update_bounds(district)
 			neighborhood.position_km = district.center_km
+			neighborhood.cell_grid = grid
 			neighborhood.land_area_ha = _area(district.polygon_km) * 100.0
 			neighborhood.developable_area_ha = minf(neighborhood.developable_area_ha, neighborhood.land_area_ha)
 	region.starting_city_ids.append(0)
-	while region.starting_city_ids.size() < mini(4, region.cities.size()):
+	while region.starting_city_ids.size() < mini(10, region.cities.size()):
 		var best_id := -1
 		var best_distance := -1.0
 		for city in region.cities:
@@ -51,7 +68,8 @@ static func initialize_development(region) -> void:
 		neighborhood.people_per_household = float(neighborhood.population) / maxf(1.0, float(neighborhood.households))
 		neighborhood.baseline_monthly_rent = neighborhood.monthly_rent
 		var local_id: int = region.cities[neighborhood.city_id]["neighborhood_ids"].find(neighborhood.id)
-		neighborhood.initially_developed = region.starting_city_ids.has(neighborhood.city_id) and local_id < 3
+		neighborhood.initially_developed = region.starting_city_ids.has(neighborhood.city_id) and local_id < 4
+		neighborhood.development_approved = neighborhood.initially_developed
 		neighborhood.development_state = "Established" if neighborhood.initially_developed else "Dormant"
 		if not neighborhood.initially_developed:
 			neighborhood.households = 0
@@ -151,8 +169,10 @@ static func _divide_children(region, child_ids: Array[int], polygon: PackedVecto
 	var total_area: float = _area(polygon)
 	var best_split: Array = []
 	var best_score := INF
-	for attempt in range(12):
-		var axis: int = preferred_axis if attempt < 8 else 1 - preferred_axis
+	var child_kind: String = region.jurisdictions[child_ids[0]].kind
+	var shape_weight: float = 0.06 if child_kind == "City" else (0.02 if child_kind == "County" else 0.005)
+	for attempt in range(18):
+		var axis: int = preferred_axis if attempt < 12 else 1 - preferred_axis
 		var angle: float = float(axis) * PI * 0.5 + rng.randf_range(-0.65, 0.65)
 		var normal := Vector2.from_angle(angle)
 		var tangent := Vector2(-normal.y, normal.x)
@@ -187,20 +207,21 @@ static func _divide_children(region, child_ids: Array[int], polygon: PackedVecto
 		var area_fraction: float = _area(first_parts[0]) / total_area
 		if area_fraction < 0.06 or area_fraction > 0.94:
 			continue
-		var score: float = absf(area_fraction - target)
+		var score: float = absf(area_fraction - target) + shape_weight * (_shape_penalty(first_parts[0]) + _shape_penalty(second_parts[0]))
 		if score < best_score:
 			best_score = score
 			best_split = [first_parts[0], second_parts[0]]
-		if score < 0.08:
-			break
-	if best_split.is_empty():
-		best_split = _straight_split(polygon, bounds, preferred_axis, target)
+	var straight_split: Array = _straight_split(polygon, bounds, preferred_axis, target, shape_weight)
+	if not straight_split.is_empty():
+		var straight_score: float = absf(_area(straight_split[0]) / total_area - target) + shape_weight * (_shape_penalty(straight_split[0]) + _shape_penalty(straight_split[1]))
+		if straight_score < best_score:
+			best_split = straight_split
 	assert(not best_split.is_empty(), "State geography needs a connected administrative split.")
 	_divide_children(region, child_ids.slice(0, first_count), best_split[0], rng)
 	_divide_children(region, child_ids.slice(first_count), best_split[1], rng)
 
 
-static func _straight_split(polygon: PackedVector2Array, bounds: Rect2, preferred_axis: int, target: float) -> Array:
+static func _straight_split(polygon: PackedVector2Array, bounds: Rect2, preferred_axis: int, target: float, shape_weight: float) -> Array:
 	var total_area: float = _area(polygon)
 	var best_split: Array = []
 	var best_score := INF
@@ -220,15 +241,128 @@ static func _straight_split(polygon: PackedVector2Array, bounds: Rect2, preferre
 			var area_fraction: float = _area(first_parts[0]) / total_area
 			if area_fraction < 0.08 or area_fraction > 0.92:
 				continue
-			var score: float = absf(area_fraction - target) + (0.15 if axis != preferred_axis else 0.0)
+			var score: float = absf(area_fraction - target) + (0.15 if axis != preferred_axis else 0.0) + shape_weight * (_shape_penalty(first_parts[0]) + _shape_penalty(second_parts[0]))
 			if score < best_score:
 				best_score = score
 				best_split = [first_parts[0], second_parts[0]]
 	return best_split
 
 
+static func _shape_penalty(polygon: PackedVector2Array) -> float:
+	var area: float = _area(polygon)
+	if area <= 0.0:
+		return 1000.0
+	var longest := 0.0
+	for axis in [Vector2.RIGHT, Vector2.UP, Vector2(0.7071068, 0.7071068), Vector2(0.7071068, -0.7071068)]:
+		var low := INF
+		var high := -INF
+		for vertex in polygon:
+			var projection: float = vertex.dot(axis)
+			low = minf(low, projection)
+			high = maxf(high, projection)
+		longest = maxf(longest, high - low)
+	var excess: float = maxf(0.0, longest * longest / area - 4.0)
+	return excess * excess
+
+
 static func _rectangle(bounds: Rect2) -> PackedVector2Array:
 	return PackedVector2Array([bounds.position, Vector2(bounds.end.x, bounds.position.y), bounds.end, Vector2(bounds.position.x, bounds.end.y)])
+
+
+static func cell_polygon(region, city_id: int, grid: Vector2i) -> PackedVector2Array:
+	var city = region.jurisdictions[region.city_jurisdiction_ids[city_id]]
+	var cell: PackedVector2Array = _cell_outline(region.generation_seed, grid)
+	var parts: Array[PackedVector2Array] = Geometry2D.intersect_polygons(city.polygon_km, cell)
+	var cell_center: Vector2 = cell_site(region.generation_seed, grid)
+	var best := PackedVector2Array()
+	var largest := 0.0
+	for part in parts:
+		if JurisdictionData.polygon_contains_point(cell_center, part):
+			return part
+		var area: float = _area(part)
+		if area > largest:
+			best = part
+			largest = area
+	return best
+
+
+static func _cell_outline(seed_value: int, grid: Vector2i) -> PackedVector2Array:
+	var site: Vector2 = cell_site(seed_value, grid)
+	var reach: float = CELL_SIZE_KM * 2.0
+	var polygon := _rectangle(Rect2(site - Vector2.ONE * reach, Vector2.ONE * reach * 2.0))
+	for offset_y in range(-2, 3):
+		for offset_x in range(-2, 3):
+			if offset_x == 0 and offset_y == 0:
+				continue
+			var neighbor: Vector2 = cell_site(seed_value, grid + Vector2i(offset_x, offset_y))
+			polygon = _clip_cell_to_bisector(polygon, site, neighbor)
+			if polygon.is_empty():
+				return polygon
+	return polygon
+
+
+static func cell_site(seed_value: int, grid: Vector2i) -> Vector2:
+	var base := Vector2(float(grid.x) + float(grid.y) * 0.5, float(grid.y) * TRIANGLE_ROW_HEIGHT) * CELL_SIZE_KM
+	var jitter := Vector2(_cell_random(seed_value, grid.x, grid.y, 0) - 0.5, _cell_random(seed_value, grid.x, grid.y, 1) - 0.5) * CELL_SIZE_KM * 0.75
+	return base + jitter
+
+
+static func cell_grid_at_point(seed_value: int, point: Vector2) -> Vector2i:
+	var row: float = point.y / (CELL_SIZE_KM * TRIANGLE_ROW_HEIGHT)
+	var column: float = point.x / CELL_SIZE_KM - row * 0.5
+	var approximate := Vector2i(roundi(column), roundi(row))
+	var best: Vector2i = approximate
+	var best_distance := INF
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			var grid := approximate + Vector2i(offset_x, offset_y)
+			var distance: float = point.distance_squared_to(cell_site(seed_value, grid))
+			if distance < best_distance:
+				best_distance = distance
+				best = grid
+	return best
+
+
+static func cell_axial_coordinates(point: Vector2) -> Vector2:
+	var row: float = point.y / (CELL_SIZE_KM * TRIANGLE_ROW_HEIGHT)
+	return Vector2(point.x / CELL_SIZE_KM - row * 0.5, row)
+
+
+static func _clip_cell_to_bisector(polygon: PackedVector2Array, site: Vector2, neighbor: Vector2) -> PackedVector2Array:
+	if polygon.is_empty():
+		return polygon
+	var midpoint: Vector2 = (site + neighbor) * 0.5
+	var normal: Vector2 = neighbor - site
+	var clipped := PackedVector2Array()
+	var previous: Vector2 = polygon[-1]
+	var previous_distance: float = (previous - midpoint).dot(normal)
+	for current in polygon:
+		var current_distance: float = (current - midpoint).dot(normal)
+		var previous_inside: bool = previous_distance <= 0.0
+		var current_inside: bool = current_distance <= 0.0
+		if previous_inside != current_inside:
+			clipped.append(previous.lerp(current, previous_distance / (previous_distance - current_distance)))
+		if current_inside:
+			clipped.append(current)
+		previous = current
+		previous_distance = current_distance
+	return clipped
+
+
+static func _cell_random(seed_value: int, x: int, y: int, salt: int) -> float:
+	var value: int = posmod(seed_value * 1000003 + x * 73856093 + y * 19349663 + salt * 83492791, 2147483647)
+	value = (((value >> 16) ^ value) * 0x45d9f3b) & 0x7fffffff
+	value = (((value >> 16) ^ value) * 0x45d9f3b) & 0x7fffffff
+	value = (value >> 16) ^ value
+	return float(value) / 2147483647.0
+
+
+static func polygon_area(polygon: PackedVector2Array) -> float:
+	return _area(polygon) if polygon.size() >= 3 else 0.0
+
+
+static func update_bounds(area) -> void:
+	_update_bounds(area)
 
 
 static func _bounds(polygon: PackedVector2Array) -> Rect2:
@@ -269,6 +403,47 @@ static func _update_bounds(area) -> void:
 				largest_area = triangle_area
 				center = (first + second + third) / 3.0
 	area.center_km = center
+
+
+static func _settlement_point(area, rng: RandomNumberGenerator) -> Vector2:
+	var triangles: PackedInt32Array = Geometry2D.triangulate_polygon(area.polygon_km)
+	if triangles.is_empty():
+		return area.center_km
+	var cumulative := PackedFloat32Array()
+	var total_area := 0.0
+	for triangle_index in range(0, triangles.size(), 3):
+		var first: Vector2 = area.polygon_km[triangles[triangle_index]]
+		var second: Vector2 = area.polygon_km[triangles[triangle_index + 1]]
+		var third: Vector2 = area.polygon_km[triangles[triangle_index + 2]]
+		total_area += absf((second - first).cross(third - first)) * 0.5
+		cumulative.append(total_area)
+	if total_area <= 0.0:
+		return area.center_km
+	var minimum_clearance: float = minf(2.0, sqrt(total_area) * 0.08)
+	var minimum_offset: float = minf(3.0, sqrt(total_area) * 0.12)
+	var best_point: Vector2 = area.center_km
+	var best_clearance := -1.0
+	for attempt in range(16):
+		var pick: float = rng.randf() * total_area
+		var triangle_slot := 0
+		while triangle_slot < cumulative.size() - 1 and pick > cumulative[triangle_slot]:
+			triangle_slot += 1
+		var offset: int = triangle_slot * 3
+		var first: Vector2 = area.polygon_km[triangles[offset]]
+		var second: Vector2 = area.polygon_km[triangles[offset + 1]]
+		var third: Vector2 = area.polygon_km[triangles[offset + 2]]
+		var spread: float = sqrt(rng.randf())
+		var along: float = rng.randf()
+		var point: Vector2 = first * (1.0 - spread) + second * (spread * (1.0 - along)) + third * (spread * along)
+		var clearance := INF
+		for vertex in range(area.polygon_km.size()):
+			clearance = minf(clearance, point.distance_to(Geometry2D.get_closest_point_to_segment(point, area.polygon_km[vertex], area.polygon_km[(vertex + 1) % area.polygon_km.size()])))
+		if point.distance_to(area.center_km) >= minimum_offset * 0.4 and clearance > best_clearance:
+			best_clearance = clearance
+			best_point = point
+		if clearance >= minimum_clearance and point.distance_to(area.center_km) >= minimum_offset:
+			return point
+	return best_point
 
 
 static func segment_on_land(polygon: PackedVector2Array, first: Vector2, second: Vector2) -> bool:

@@ -16,7 +16,7 @@ func _initialize() -> void:
 	RoadNetworkGenerator.generate(region)
 	AccessibilityCalculator.recalculate(region)
 	NeighborhoodDynamics.initialize(region)
-	_check(region.region_ids.size() == 4 and region.county_ids.size() == 8 and region.cities.size() == 16 and region.neighborhoods.size() == 96, "state hierarchy must have the requested counts")
+	_check(region.region_ids.size() == 4 and region.county_ids.size() == 8 and region.cities.size() == 32 and region.neighborhoods.size() == 62, "state hierarchy must have the requested counts")
 	for neighborhood in region.neighborhoods:
 		var city_area = region.jurisdiction_for_neighborhood(neighborhood.id, "City")
 		var county_area = region.jurisdiction_for_neighborhood(neighborhood.id, "County")
@@ -45,7 +45,8 @@ func _initialize() -> void:
 	var after_profile = TripFlowCalculator.build(region)
 	var after_visits := _county_visits(after_profile.weekday_shopping_od, region, 0, 0)
 	_check(after_visits < before_visits, "higher destination sales tax must divert some shopping visits")
-	_check(after_profile.weekday_social_od[1][0] < before_profile.weekday_social_od[1][0], "destination parking must reduce social attraction")
+	var social_origin: int = region.cities[0]["neighborhood_ids"][1]
+	_check(after_profile.weekday_social_od[social_origin][home.id] < before_profile.weekday_social_od[social_origin][home.id], "destination parking must reduce social attraction")
 	var clock = CalendarClock.new()
 	var initial_rate: float = county.income_tax_rate
 	var tax_time: int = FiscalCalculator.queue_policy(region, county.id, "income_tax_rate", 0.08, clock.unix_seconds)

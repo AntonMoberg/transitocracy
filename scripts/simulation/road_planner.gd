@@ -80,6 +80,7 @@ static func demolish(region, link_id: int) -> Dictionary:
 		return preview
 	var index: int = RoadGraph.link_index(region, link_id)
 	region.road_links.remove_at(index)
+	region.road_geometry_revision += 1
 	refresh_upkeep(region)
 	return preview
 
@@ -93,7 +94,8 @@ static func interchange_preview(region, node_id: int, link_id: int, point: Vecto
 				return {"ok": false, "reason": "An interchange is already being built here."}
 		var days := _construction_days(45)
 		var node_point: Vector2 = region.road_nodes[node_id].position_km
-		var owner_id: int = region.jurisdiction_for_neighborhood(region.nearest_neighborhood_id(node_point), "City").id
+		var city_id: int = region.city_id_at_point(node_point)
+		var owner_id: int = region.city_jurisdiction_ids[city_id] if city_id >= 0 else region.jurisdiction_at_point(node_point)
 		return {"ok": true, "kind": RoadProjectData.INTERCHANGE_NODE, "target_node_id": node_id, "cost": INTERCHANGE_COST, "days": days, "open_day_key": day_key + days, "owner_id": owner_id}
 	var index: int = RoadGraph.link_index(region, link_id)
 	if index < 0 or region.road_links[index].road_class != RoadLinkData.HIGHWAY:
@@ -174,8 +176,9 @@ static func add_junction(region, point: Vector2, split_link_id: int = -1) -> Dic
 	var junction = RoadNodeData.new()
 	junction.id = region.road_nodes.size()
 	junction.position_km = point
-	junction.city_id = region.neighborhoods[region.nearest_neighborhood_id(point)].city_id
+	junction.city_id = region.city_id_at_point(point)
 	region.road_nodes.append(junction)
+	region.road_geometry_revision += 1
 	if split_link_id >= 0:
 		_split_link(region, split_link_id, junction.id, point)
 	refresh_upkeep(region)
@@ -209,13 +212,14 @@ static func advance_day(region, day_key: int) -> bool:
 				var exit_node = RoadNodeData.new()
 				exit_node.id = region.road_nodes.size()
 				exit_node.position_km = project.position_km
-				exit_node.city_id = region.neighborhoods[region.nearest_neighborhood_id(project.position_km)].city_id
+				exit_node.city_id = region.city_id_at_point(project.position_km)
 				exit_node.is_interchange = true
 				region.road_nodes.append(exit_node)
 				_split_link(region, project.target_link_id, exit_node.id, project.position_km)
 		changed = true
 	region.road_projects = remaining
 	if changed:
+		region.road_geometry_revision += 1
 		refresh_upkeep(region)
 	return changed
 
@@ -227,7 +231,8 @@ static func refresh_upkeep(region) -> void:
 		region.jurisdictions[link.owner_jurisdiction_id].daily_road_upkeep += link.length_km * link.lanes_per_direction * (600.0 if link.road_class == RoadLinkData.HIGHWAY else 200.0)
 	for node in region.road_nodes:
 		if node.is_interchange:
-			var owner_id: int = region.jurisdiction_for_neighborhood(region.nearest_neighborhood_id(node.position_km), "City").id
+			var city_id: int = region.city_id_at_point(node.position_km)
+			var owner_id: int = region.city_jurisdiction_ids[city_id] if city_id >= 0 else region.jurisdiction_at_point(node.position_km)
 			region.jurisdictions[owner_id].daily_road_upkeep += INTERCHANGE_UPKEEP
 
 
@@ -278,6 +283,8 @@ static func _split_link(region, link_id: int, new_node_id: int, point: Vector2) 
 	old_link.recalculate_length()
 	old_link.owner_jurisdiction_id = region.road_owner_for_points(first)
 	_append_link(region, new_node_id, old_to, old_link.road_class, old_link.lanes_per_direction, second)
+	region.road_links[-1].toll_forward = old_link.toll_forward
+	region.road_links[-1].toll_reverse = old_link.toll_reverse
 
 
 static func _append_link(region, from_id: int, to_id: int, road_class: String, lanes: int, points: PackedVector2Array) -> void:

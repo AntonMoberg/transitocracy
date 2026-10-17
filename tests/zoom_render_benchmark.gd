@@ -34,6 +34,7 @@ func _run() -> void:
 				push_error("Batched road arrows were not built")
 				quit(1)
 				return
+		if magnification == 16.0:
 			if map.neighborhood_batches.is_empty() or map.neighborhood_batches[0].visible_instance_count == 0:
 				push_error("Neighborhood GPU instances were not built")
 				quit(1)

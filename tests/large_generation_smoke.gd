@@ -15,7 +15,7 @@ func _initialize() -> void:
 
 func _run() -> void:
 	var start: int = Time.get_ticks_msec()
-	var region = RegionGenerator.generate_large_region(1729, 128, 40)
+	var region = RegionGenerator.generate_large_region(1729, 256)
 	RoadNetworkGenerator.generate(region)
 	AccessibilityCalculator.recalculate(region)
 	var clock = CalendarClock.new()

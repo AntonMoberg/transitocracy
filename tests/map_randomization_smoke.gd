@@ -28,7 +28,7 @@ func _run() -> void:
 			if area.kind == "Neighborhood":
 				continue
 			_check(area.contains_point(area.center_km), "district centers must stay on land for every random seed")
-			if not area.child_ids.is_empty():
+			if not area.child_ids.is_empty() and area.kind != "City":
 				var child_area := 0.0
 				for child_id in area.child_ids:
 					child_area += StateGeography._area(region.jurisdictions[child_id].polygon_km)
@@ -40,10 +40,10 @@ func _run() -> void:
 		for neighborhood in region.neighborhoods:
 			_check(state.contains_point(neighborhood.position_km), "random settlements must remain on land")
 			var city = region.jurisdictions[region.city_jurisdiction_ids[neighborhood.city_id]]
-			_check(city.contains_point(neighborhood.position_km), "neighborhoods must fill their actual municipal footprint")
+			_check(city.contains_point(neighborhood.position_km), "small neighborhoods must remain inside their city")
 	_check(coastline_sizes.size() >= 4, "different seeds must change coastline structure rather than perturb a fixed outline")
 	var small = RegionGenerator.generate_region(1729)
-	for city_count in [128, 512]:
+	for city_count in [256, 768]:
 		var region = RegionGenerator.generate_large_region(1729, city_count)
 		_check(region.jurisdictions[0].polygon_km == small.jurisdictions[0].polygon_km, "detail settings must retain the same seeded coastline and physical state size")
 	var main = load("res://scenes/main.tscn").instantiate()
@@ -68,7 +68,7 @@ func _run() -> void:
 	main.playing = false
 	_check(main.region.generation_seed == random_seed and main.region.jurisdictions[0].polygon_km == coastline and main.region.neighborhoods[0].position_km == position, "From seed must reproduce the displayed map")
 	if failures == 0:
-		print("Procedural coastlines, California scale, tiled cities, random startup, and seed replay passed.")
+		print("Procedural coastlines, California scale, city ownership, random startup, and seed replay passed.")
 	quit(1 if failures > 0 else 0)
 
 

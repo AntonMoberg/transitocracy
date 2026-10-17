@@ -145,6 +145,7 @@ func _shopping_choice_region():
 		neighborhood.id = neighborhood_id
 		neighborhood.position_km = Vector2(0, 0) if neighborhood_id == 0 else Vector2(10 if neighborhood_id == 1 else -10, 0)
 		neighborhood.land_area_ha = 100.0
+		neighborhood.developable_area_ha = 100.0
 		neighborhood.zone_shares = {"Residential": 100, "Commercial": 0, "Office": 0, "Mixed": 0, "Industry": 0}
 		neighborhood.zone_density = {"Residential": 0, "Commercial": 0, "Office": 0, "Mixed": 0, "Industry": 0}
 		if neighborhood_id != 0:

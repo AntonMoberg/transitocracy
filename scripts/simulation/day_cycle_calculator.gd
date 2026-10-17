@@ -1,6 +1,7 @@
 extends RefCounted
 
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
 const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
@@ -24,8 +25,8 @@ static func copy_region(source):
 
 
 static func _copy_large_region(source):
-	# Geography and ownership are immutable. Copy the changing economic and road
-	# objects while sharing the large static ID lists and packed geometry.
+	# Packed geometry is immutable. Ownership lists may grow when zoning creates
+	# a neighborhood, so worker snapshots need their own copies of those lists.
 	var copy = RegionData.new()
 	copy.generation_seed = source.generation_seed
 	copy.starting_city_ids = source.starting_city_ids.duplicate()
@@ -37,7 +38,6 @@ static func _copy_large_region(source):
 	copy.county_ids = source.county_ids.duplicate()
 	copy.city_jurisdiction_ids = source.city_jurisdiction_ids.duplicate()
 	copy.neighborhood_jurisdiction_ids = source.neighborhood_jurisdiction_ids.duplicate()
-	copy.cities = source.cities.duplicate()
 	copy.city_travel_times = source.city_travel_times.duplicate()
 	copy.city_od_candidates = source.city_od_candidates.duplicate()
 	copy.neighborhood_accessible = source.neighborhood_accessible.duplicate()
@@ -48,10 +48,15 @@ static func _copy_large_region(source):
 	copy.last_household_change = source.last_household_change
 	copy.next_road_link_id = source.next_road_link_id
 	copy.next_road_project_id = source.next_road_project_id
+	copy.road_geometry_revision = source.road_geometry_revision
 	copy.neighborhood_gateway_node_ids = source.neighborhood_gateway_node_ids.duplicate()
 	copy.city_hub_node_ids = source.city_hub_node_ids.duplicate()
 	copy.city_route_node_ids = source.city_route_node_ids.duplicate()
 	copy.neighborhood_spoke_link_ids = source.neighborhood_spoke_link_ids.duplicate()
+	copy.development_candidates = source.development_candidates.duplicate(true)
+	copy.development_candidate_keys = source.development_candidate_keys.duplicate(true)
+	copy.development_candidate_cells = source.development_candidate_cells.duplicate(true)
+	copy.cities = source.cities.duplicate(true)
 	for original in source.neighborhoods:
 		var n = NeighborhoodData.new()
 		n.id = original.id
@@ -61,6 +66,7 @@ static func _copy_large_region(source):
 		n.jurisdiction_id = original.jurisdiction_id
 		n.name = original.name
 		n.position_km = original.position_km
+		n.cell_grid = original.cell_grid
 		n.land_area_ha = original.land_area_ha
 		n.developable_area_ha = original.developable_area_ha
 		n.zone_shares = original.zone_shares.duplicate()
@@ -85,6 +91,7 @@ static func _copy_large_region(source):
 		n.last_household_change = original.last_household_change
 		n.last_population_change = original.last_population_change
 		n.initially_developed = original.initially_developed
+		n.development_approved = original.development_approved
 		n.development_state = original.development_state
 		n.development_jobs_by_skill = original.development_jobs_by_skill.duplicate()
 		n.development_retail_share = original.development_retail_share
@@ -97,8 +104,8 @@ static func _copy_large_region(source):
 		j.kind = original.kind
 		j.name = original.name
 		j.parent_id = original.parent_id
-		j.child_ids = original.child_ids
-		j.neighborhood_ids = original.neighborhood_ids
+		j.child_ids = original.child_ids.duplicate()
+		j.neighborhood_ids = original.neighborhood_ids.duplicate()
 		j.center_km = original.center_km
 		j.bounds_km = original.bounds_km
 		j.polygon_km = original.polygon_km
@@ -153,6 +160,7 @@ static func advance_day(region, day_key: int, previous_flow, previous_traffic, p
 	FiscalCalculator.apply_due_policies(region, day_key * 86400)
 	var roads_changed: bool = RoadPlanner.advance_day(region, day_key)
 	if roads_changed:
+		DevelopmentPlanner.refresh_candidates(region)
 		AccessibilityCalculator.recalculate(region)
 	elif previous_flow != null and previous_traffic != null and previous_state != null and previous_state.next_bin >= 96:
 		var weighted_times: Array[PackedFloat32Array] = RoadTrafficCalculator.generalized_travel_times(region, previous_flow, previous_traffic)

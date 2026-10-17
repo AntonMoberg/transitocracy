@@ -11,7 +11,7 @@ func _initialize() -> void:
 
 
 func _run() -> void:
-	var result: Dictionary = RegionSetup.build(1729, 128, 0.1)
+	var result: Dictionary = RegionSetup.build(1729, 256, 0.1)
 	var region = result["region"]
 	var first_spoke_id: int = region.neighborhood_spoke_link_ids[0]
 	var started: int = Time.get_ticks_usec()

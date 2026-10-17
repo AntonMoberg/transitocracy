@@ -1,6 +1,7 @@
 extends Control
 
 const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
+const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
@@ -20,6 +21,7 @@ const MultiScaleWeekBuffer = preload("res://scripts/simulation/multiscale_week_b
 const CompactHourPrecompute = preload("res://scripts/simulation/compact_hour_precompute.gd")
 const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
 const RoadRebuild = preload("res://scripts/simulation/road_rebuild.gd")
+const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const RoadTrafficSummary = preload("res://scripts/simulation/road_traffic_summary.gd")
 
 
@@ -104,6 +106,10 @@ var pending_road_preview: Dictionary = {}
 var road_start_node: int = -1
 var road_waypoints: PackedVector2Array = PackedVector2Array()
 var selected_road_link_id: int = -1
+var selected_candidate_id: int = -1
+var zoning_controls: HBoxContainer
+var zoning_button: Button
+var zoning_status_label: Label
 var last_process_us: int = 0
 var last_handoff_us: int = 0
 var last_advance_us: int = 0
@@ -318,11 +324,11 @@ func _build_interface() -> void:
 	map_size_label.add_theme_color_override("font_color", Color("b8c9d6"))
 	header.add_child(map_size_label)
 	map_size_selector = OptionButton.new()
-	map_size_selector.add_item("96 neighborhoods", 16)
-	map_size_selector.add_item("5,120 neighborhoods", 128)
-	map_size_selector.add_item("20,480 neighborhoods", 512)
+	map_size_selector.add_item("32 cities", 32)
+	map_size_selector.add_item("256 cities", 256)
+	map_size_selector.add_item("768 cities", 768)
 	map_size_selector.select(1)
-	map_size_selector.tooltip_text = "Neighborhood detail within the same California-sized state"
+	map_size_selector.tooltip_text = "City detail within the same California-sized state"
 	header.add_child(map_size_selector)
 	generate_button = Button.new()
 	generate_button.text = "New map"
@@ -398,6 +404,7 @@ func _build_interface() -> void:
 	map_mode_selector = OptionButton.new()
 	map_mode_selector.add_item("Roads")
 	map_mode_selector.add_item("Trips")
+	map_mode_selector.add_item("Zoning")
 	map_mode_selector.selected = 0
 	map_mode_selector.item_selected.connect(_on_map_mode_selected)
 	road_controls.add_child(map_mode_selector)
@@ -472,6 +479,7 @@ func _build_interface() -> void:
 	map_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	map_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	map_view.neighborhood_selected.connect(_on_neighborhood_selected)
+	map_view.candidate_selected.connect(_on_candidate_selected)
 	map_view.jurisdiction_selected.connect(_on_map_jurisdiction_selected)
 	map_view.road_node_clicked.connect(_on_road_node_clicked)
 	map_view.road_link_clicked.connect(_on_road_link_clicked)
@@ -507,6 +515,16 @@ func _build_interface() -> void:
 	fiscal_label.clip_text = true
 	fiscal_label.add_theme_color_override("font_color", Color("93b9ac"))
 	inspector_layout.add_child(fiscal_label)
+	zoning_controls = HBoxContainer.new()
+	zoning_controls.visible = false
+	inspector_layout.add_child(zoning_controls)
+	zoning_button = Button.new()
+	zoning_button.pressed.connect(_on_zoning_pressed)
+	zoning_controls.add_child(zoning_button)
+	zoning_status_label = Label.new()
+	zoning_status_label.clip_text = true
+	zoning_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	zoning_controls.add_child(zoning_status_label)
 	state_tax_controls = HBoxContainer.new()
 	state_tax_controls.add_theme_constant_override("separation", 8)
 	inspector_layout.add_child(state_tax_controls)
@@ -663,6 +681,9 @@ func _on_tax_changed(value: float) -> void:
 func _on_jurisdiction_selected(area_id: int) -> void:
 	if region == null or area_id < 0 or area_id >= region.jurisdictions.size():
 		return
+	selected_candidate_id = -1
+	zoning_controls.visible = false
+	map_view.set_selected_candidate(-1)
 	selected_jurisdiction_id = area_id
 	var area = region.jurisdictions[area_id]
 	var local_scope: bool = area.kind not in ["State", "Region"]
@@ -892,6 +913,8 @@ func _apply_generated_region(result: Dictionary) -> void:
 	road_waypoints.clear()
 	pending_road_preview.clear()
 	selected_road_link_id = -1
+	selected_candidate_id = -1
+	zoning_controls.visible = false
 	map_view.set_region(region)
 	map_view.set_map_mode("Roads")
 	map_view.set_detail_level("Neighborhood" if simulation_mode <= MultiScaleTraffic.MINUTE else ("Region" if simulation_mode == MultiScaleTraffic.HOUR else "State"))
@@ -1289,6 +1312,9 @@ func _update_flow_detail() -> void:
 
 
 func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) -> void:
+	selected_candidate_id = -1
+	zoning_controls.visible = false
+	map_view.set_selected_candidate(-1)
 	selected_road_link_id = -1
 	_refresh_toll_controls()
 	map_view.set_selected_road_link(-1)
@@ -1393,15 +1419,98 @@ func _current_day_key() -> int:
 	return floori(float(calendar_clock.unix_seconds) / 86400.0)
 
 
+func _on_candidate_selected(candidate_id: int) -> void:
+	if region == null or candidate_id < 0 or candidate_id >= region.development_candidates.size():
+		return
+	var candidate: Dictionary = region.development_candidates[candidate_id]
+	_on_jurisdiction_selected(region.city_jurisdiction_ids[candidate["city_id"]])
+	selected_candidate_id = candidate_id
+	map_view.set_selected_candidate(candidate_id)
+	map_view.set_selected(-1)
+	_show_candidate_inspector()
+
+
+func _show_candidate_inspector(reset_scroll: bool = true) -> void:
+	if region == null or selected_candidate_id < 0 or selected_candidate_id >= region.development_candidates.size():
+		zoning_controls.visible = false
+		return
+	var candidate: Dictionary = region.development_candidates[selected_candidate_id]
+	var neighborhood_id: int = candidate["neighborhood_id"]
+	var approved: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
+	var city_id: int = candidate["city_id"]
+	var center: Vector2 = candidate["center_km"]
+	var distance: float = center.distance_to(region.cities[city_id]["center_km"])
+	var hectares: float = minf(105.0, StateGeography.polygon_area(candidate["polygon"]) * 100.0)
+	zoning_controls.visible = true
+	zoning_button.text = "Withdraw approval" if approved else "Approve development"
+	zoning_button.disabled = not approved and neighborhood_id < 0 and int(candidate["frontage_link_id"]) < 0
+	zoning_status_label.text = "Road access lost" if int(candidate["frontage_link_id"]) < 0 else "Growth updates next day"
+	var lines := PackedStringArray()
+	lines.append("[font_size=22][b]Neighborhood candidate[/b][/font_size]")
+	lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(city_id), hectares])
+	lines.append("Distance to city center: %.1f km" % distance)
+	lines.append("Zoning: %s" % ("Approved" if approved else "Awaiting approval"))
+	if neighborhood_id >= 0:
+		var neighborhood = region.neighborhoods[neighborhood_id]
+		lines.append("Development: %s" % neighborhood.development_state)
+		lines.append("Population: %s  •  Jobs: %s" % [_format_count(neighborhood.population), _format_count(neighborhood.jobs)])
+		lines.append("Desirability: %.1f / 100" % neighborhood.desirability)
+		lines.append("")
+		lines.append("[color=#78c8dc][b]DEFAULT LAND USE · SHARE / DENSITY[/b][/color]")
+		for zone in RegionData.ZONE_TYPES:
+			lines.append("%s: %d%% / %s" % [zone, neighborhood.zone_shares[zone], RegionData.DENSITY_NAMES[neighborhood.zone_density[zone]]])
+	else:
+		var defaults: Dictionary = RegionGenerator.zone_defaults(region, city_id, candidate["grid"])
+		lines.append("")
+		lines.append("[color=#78c8dc][b]DEFAULT LAND USE · SHARE / DENSITY[/b][/color]")
+		for zone in RegionData.ZONE_TYPES:
+			lines.append("%s: %d%% / %s" % [zone, defaults["shares"][zone], RegionData.DENSITY_NAMES[defaults["density"][zone]]])
+	lines.append("")
+	lines.append("Approval permits gradual growth while connected to an arterial. Withdrawing approval keeps existing homes and jobs.")
+	var previous_scroll: float = inspector.get_v_scroll_bar().value
+	inspector.text = "\n".join(lines)
+	if reset_scroll:
+		inspector.scroll_to_line(0)
+	else:
+		inspector.get_v_scroll_bar().value = previous_scroll
+
+
+func _on_zoning_pressed() -> void:
+	if region == null or selected_candidate_id < 0:
+		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_zoning_pressed"))
+		return
+	var candidate: Dictionary = region.development_candidates[selected_candidate_id]
+	var neighborhood_id: int = candidate["neighborhood_id"]
+	var approved: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
+	var result: Dictionary = DevelopmentPlanner.set_approval(region, selected_candidate_id, not approved)
+	if not result["ok"]:
+		zoning_status_label.text = result["reason"]
+		return
+	_discard_pending_day()
+	if result["new_neighborhood"]:
+		_rebuild_after_road_change()
+	else:
+		_invalidate_traffic_forecast()
+		_queue_next_day(last_dynamics_day_key)
+	_show_candidate_inspector(false)
+	map_view.queue_redraw()
+
+
 func _on_map_mode_selected(index: int) -> void:
-	map_view.set_map_mode("Roads" if index == 0 else "Trips")
+	map_view.set_map_mode(["Roads", "Trips", "Zoning"][index])
 	flow_detail_label.visible = index == 1
 	flow_detail_separator.visible = index == 1
 	_cancel_road_preview()
-	if index == 1:
+	if index != 0:
 		selected_road_link_id = -1
 		map_view.set_selected_road_link(-1)
 		_refresh_toll_controls()
+	if index != 2:
+		selected_candidate_id = -1
+		zoning_controls.visible = false
+		map_view.set_selected_candidate(-1)
 	_refresh_inspector(false)
 
 
@@ -1616,7 +1725,9 @@ func _poll_road_rebuild() -> void:
 
 
 func _refresh_inspector(reset_scroll: bool = true) -> void:
-	if selected_road_link_id >= 0 and map_mode_selector.selected == 0:
+	if selected_candidate_id >= 0 and map_view.map_mode == "Zoning":
+		_show_candidate_inspector(reset_scroll)
+	elif selected_road_link_id >= 0 and map_mode_selector.selected == 0:
 		_show_road_inspector(selected_road_link_id)
 	else:
 		_show_jurisdiction_inspector(reset_scroll)

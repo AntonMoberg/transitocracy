@@ -1,6 +1,7 @@
 extends Control
 
 signal neighborhood_selected(neighborhood_id: int)
+signal candidate_selected(candidate_id: int)
 signal road_node_clicked(node_id: int)
 signal road_link_clicked(link_id: int, world_position: Vector2)
 signal road_empty_clicked(world_position: Vector2)
@@ -8,6 +9,7 @@ signal road_cancel_requested
 signal jurisdiction_selected(jurisdiction_id: int)
 
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
+const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
@@ -57,6 +59,7 @@ var current_day_road_summary: Dictionary = {}
 var day_road_fraction: float = 0.0
 var selected_purpose: String = FlowProfile.ALL
 var selected_id: int = -1
+var selected_candidate_id: int = -1
 var selected_jurisdiction_id: int = -1
 var hovered_id: int = -1
 var aggregate_cache_region
@@ -72,6 +75,9 @@ var pointer_start: Vector2 = Vector2.ZERO
 var last_draw_us: int = 0
 var last_draw_stages_us: Dictionary = {}
 var spatial_region
+var spatial_seed: int = -1
+var spatial_geometry_revision: int = -1
+var spatial_neighborhood_count: int = -1
 var spatial_link_count: int = -1
 var spatial_node_count: int = -1
 var spatial_origin: Vector2 = Vector2.ZERO
@@ -125,6 +131,7 @@ func set_region(new_region) -> void:
 	if new_region != null:
 		call_deferred("_ensure_spatial_index")
 	selected_id = -1
+	selected_candidate_id = -1
 	selected_road_link_id = -1
 	hovered_id = -1
 	zoom = 1.0
@@ -153,6 +160,11 @@ func set_traffic_profile(new_profile) -> void:
 
 func set_map_mode(mode: String) -> void:
 	map_mode = mode
+	queue_redraw()
+
+
+func set_selected_candidate(candidate_id: int) -> void:
+	selected_candidate_id = candidate_id
 	queue_redraw()
 
 
@@ -369,6 +381,10 @@ func _is_strategic_road(link) -> bool:
 	return _is_strategic_road_nodes(link.from_node_id, link.to_node_id, link.road_class)
 
 
+func _show_local_road_detail() -> bool:
+	return not region.is_large_scale or _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 8.0
+
+
 func _draw_aggregate_roads() -> void:
 	_ensure_spatial_index()
 	var local_km: float = spatial_local_road_km
@@ -505,9 +521,12 @@ func _draw() -> void:
 	last_draw_stages_us["cities"] = Time.get_ticks_usec() - draw_started
 	_draw_roads()
 	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
+	if map_mode == "Zoning":
+		_draw_zoning_candidates()
 	if map_mode == "Trips":
 		_draw_hourly_flows()
-	_draw_neighborhoods()
+	if map_mode != "Zoning":
+		_draw_neighborhoods()
 	last_draw_stages_us["neighborhoods"] = Time.get_ticks_usec() - draw_started
 	_draw_jurisdiction_labels()
 	last_draw_stages_us["labels"] = Time.get_ticks_usec() - draw_started
@@ -516,8 +535,10 @@ func _draw() -> void:
 		_draw_road_nodes()
 		_draw_road_preview()
 		_draw_road_legend()
-	else:
+	elif map_mode == "Trips":
 		_draw_legend()
+	else:
+		_draw_zoning_legend()
 	_draw_map_scale()
 	var font := get_theme_default_font()
 	var hint: String = "Pinch / wheel: zoom  •  Two fingers / drag: pan"
@@ -544,9 +565,15 @@ func _spatial_add_point(buckets: Dictionary, point: Vector2, index: int) -> void
 
 
 func _ensure_spatial_index() -> void:
-	if region == null or (spatial_region == region and spatial_link_count == region.road_links.size() and spatial_node_count == region.road_nodes.size()):
+	if region == null:
+		return
+	if spatial_region != null and spatial_seed == region.generation_seed and spatial_geometry_revision == region.road_geometry_revision and spatial_neighborhood_count == region.neighborhoods.size() and spatial_link_count == region.road_links.size() and spatial_node_count == region.road_nodes.size():
+		spatial_region = region
 		return
 	spatial_region = region
+	spatial_seed = region.generation_seed
+	spatial_geometry_revision = region.road_geometry_revision
+	spatial_neighborhood_count = region.neighborhoods.size()
 	spatial_link_count = region.road_links.size()
 	spatial_node_count = region.road_nodes.size()
 	spatial_neighborhoods.clear()
@@ -626,6 +653,7 @@ func _draw_roads() -> void:
 		return
 	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, 25.0, true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
 	var batch_roads: bool = region.is_large_scale and zoom >= 2.0
+	var show_local_roads: bool = _show_local_road_detail()
 	var casing_lines: Dictionary = {}
 	var lane_lines := PackedVector2Array()
 	var lane_colors := PackedColorArray()
@@ -635,7 +663,7 @@ func _draw_roads() -> void:
 	var selected_lanes: int = 0
 	for link_index in road_indices:
 		var link = region.road_links[link_index]
-		if region.is_large_scale and zoom < 2.0 and not _is_strategic_road(link):
+		if not show_local_roads and not _is_strategic_road(link):
 			continue
 		if not _polyline_visible(link.points):
 			continue
@@ -1052,16 +1080,14 @@ func get_road_traffic_metrics(link_index: int, link) -> Dictionary:
 
 
 func _draw_road_nodes() -> void:
-	var first_node: int = region.neighborhoods.size() if region.is_large_scale and zoom < 2.0 else 0
+	var show_local_roads: bool = _show_local_road_detail()
 	var node_indices: Array[int] = _spatial_visible_indices(spatial_road_nodes, 16.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_id in node_indices:
-		if node_id < first_node:
-			continue
 		var node = region.road_nodes[node_id]
+		if not show_local_roads and node.kind != "City" and not node.is_interchange:
+			continue
 		var position_on_screen: Vector2 = _world_to_screen(node.position_km)
 		if not _screen_visible(position_on_screen, 16.0):
-			continue
-		if region.is_large_scale and zoom < 2.0 and node.neighborhood_id >= 0:
 			continue
 		if detail_level != "Neighborhood" and node.neighborhood_id >= 0 and not node.is_interchange:
 			draw_circle(position_on_screen, 2.0, Color("8ea3b1", 0.48))
@@ -1111,6 +1137,55 @@ func _draw_road_legend() -> void:
 	draw_string(font, base + Vector2(0, 4), "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 
+func _draw_zoning_legend() -> void:
+	var font := get_theme_default_font()
+	var base := Vector2(18.0, size.y - 16.0)
+	draw_rect(Rect2(base - Vector2(9, 60), Vector2(440, 81)), Color(0.04, 0.09, 0.16, 0.90))
+	draw_string(font, base + Vector2(0, -42), "ZONING · CLICK A ROAD-FRONTAGE CELL", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
+	draw_string(font, base + Vector2(0, -17), "Amber = awaiting approval  •  Green = approved", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	draw_string(font, base + Vector2(0, 4), "Zoom in to see neighborhood candidates", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+
+
+func _draw_zoning_candidates() -> void:
+	var detailed: bool = _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 10.0
+	if not detailed and selected_candidate_id < 0:
+		return
+	var visible_ids: Array[int] = []
+	if detailed:
+		var first: Vector2 = _screen_to_world(Vector2(-30.0, -30.0))
+		var last: Vector2 = _screen_to_world(size + Vector2(30.0, 30.0))
+		var minimum := Vector2(INF, INF)
+		var maximum := Vector2(-INF, -INF)
+		for corner in [first, Vector2(last.x, first.y), last, Vector2(first.x, last.y)]:
+			var axial: Vector2 = StateGeography.cell_axial_coordinates(corner)
+			minimum = minimum.min(axial)
+			maximum = maximum.max(axial)
+		for grid_y in range(floori(minimum.y) - 2, ceili(maximum.y) + 3):
+			for grid_x in range(floori(minimum.x) - 2, ceili(maximum.x) + 3):
+				for candidate_id in region.development_candidate_cells.get("%d:%d" % [grid_x, grid_y], []):
+					visible_ids.append(candidate_id)
+	else:
+		visible_ids.append(selected_candidate_id)
+	for candidate_id in visible_ids:
+		var candidate: Dictionary = region.development_candidates[candidate_id]
+		var id: int = candidate["id"]
+		var center: Vector2 = _world_to_screen(candidate["center_km"])
+		if not _screen_visible(center, 20.0):
+			continue
+		var polygon: PackedVector2Array = _screen_polyline(candidate["polygon"])
+		if polygon.size() < 3:
+			continue
+		var neighborhood_id: int = candidate["neighborhood_id"]
+		var approved: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
+		var color: Color = Color("62c89d") if approved else Color("e4bd70")
+		if int(candidate["frontage_link_id"]) < 0:
+			color = Color("7d888d")
+		color.a = 0.22 if id == selected_candidate_id else 0.10
+		draw_colored_polygon(polygon, color)
+		polygon.append(polygon[0])
+		draw_polyline(polygon, Color("fff0b0") if id == selected_candidate_id else Color(color.r, color.g, color.b, 0.65), 2.5 if id == selected_candidate_id else 1.0, true)
+
+
 func _draw_boundaries() -> void:
 	var state_polygon: PackedVector2Array = _screen_polyline(region.jurisdictions[0].polygon_km)
 	if state_polygon.size() >= 3:
@@ -1146,7 +1221,7 @@ func _draw_boundaries() -> void:
 
 
 func _neighborhood_borders_visible(city) -> bool:
-	if region.is_large_scale and zoom < 2.0:
+	if region.is_large_scale and (zoom < 3.0 or _map_scale() * zoom * StateGeography.CELL_SIZE_KM < 12.0):
 		return false
 	var bounds: Rect2 = _jurisdiction_screen_rect(city)
 	if not bounds.intersects(Rect2(Vector2.ZERO, size)):
@@ -1261,12 +1336,15 @@ func _ensure_jurisdiction_labels() -> void:
 		for area in region.jurisdictions:
 			if area.kind == kind and area.id != selected_jurisdiction_id and _jurisdiction_label_eligible(area):
 				ordered.append(area)
+	var city_label_points: Dictionary = {}
+	for city in region.cities:
+		city_label_points[city["jurisdiction_id"]] = city["center_km"]
 	var occupied: Array[Rect2] = []
 	var font := get_theme_default_font()
 	for area in ordered:
 		var font_size := 11 if area.kind == "Region" else (10 if area.kind == "County" else 9)
 		var width: float = maxf(20.0, font.get_string_size(_jurisdiction_label_text(area), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + 8.0)
-		var center: Vector2 = _world_to_screen(area.center_km)
+		var center: Vector2 = _world_to_screen(city_label_points.get(area.id, area.center_km))
 		var top: float = -30.0 if area.kind == "City" else (8.0 if area.kind == "County" else -12.0)
 		for offset in [Vector2.ZERO, Vector2(0, -20), Vector2(0, 20), Vector2(0, -40), Vector2(0, 40), Vector2(-30, 0), Vector2(30, 0)]:
 			var candidate := Rect2(center + Vector2(-width * 0.5, top) + offset, Vector2(width, 14.0 if area.kind == "City" else 18.0))
@@ -1389,6 +1467,8 @@ func _set_neighborhood_batch(batch: MultiMesh, index: int, center: Vector2, radi
 
 
 func _draw_neighborhoods() -> void:
+	if region.is_large_scale and _map_scale() * zoom * StateGeography.CELL_SIZE_KM < 8.0:
+		return
 	var neighborhood_indices: Array[int] = _spatial_visible_indices(spatial_neighborhoods, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.neighborhoods.size())
 	if detail_level != "Neighborhood":
 		if region.is_large_scale and detail_level in ["State", "Region"]:
@@ -1464,7 +1544,7 @@ func _draw_neighborhoods() -> void:
 		label_order.append(selected_id)
 	if hovered_id >= 0 and hovered_id != selected_id:
 		label_order.append(hovered_id)
-	if zoom >= 1.8:
+	if zoom >= 1.8 and (not region.is_large_scale or _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 20.0):
 		for neighborhood_index in neighborhood_indices:
 			var neighborhood = region.neighborhoods[neighborhood_index]
 			if neighborhood.id != selected_id and neighborhood.id != hovered_id and _screen_visible(_world_to_screen(neighborhood.position_km), 25.0) and neighborhood.id % stride == 0:
@@ -1898,7 +1978,15 @@ func _gui_input(event: InputEvent) -> void:
 						pointer_down = false
 						accept_event()
 						return
-					if map_mode == "Roads":
+					if map_mode == "Zoning":
+						var candidate_id: int = region.development_candidate_at_point(_screen_to_world(mouse_button.position)) if _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 10.0 else -1
+						if candidate_id >= 0:
+							candidate_selected.emit(candidate_id)
+						else:
+							var zone_area_id: int = _jurisdiction_at(mouse_button.position)
+							if zone_area_id >= 0:
+								jurisdiction_selected.emit(zone_area_id)
+					elif map_mode == "Roads":
 						var node_id := _hit_road_node(mouse_button.position)
 						var link_id := _hit_road_link(mouse_button.position)
 						if node_id >= 0:
@@ -1940,11 +2028,12 @@ func _gui_input(event: InputEvent) -> void:
 				pan += motion.relative
 				queue_redraw()
 		else:
-			var new_hover: int = _hit_test(motion.position)
+			var new_hover: int = -1 if map_mode == "Zoning" else _hit_test(motion.position)
+			var candidate_hover: int = region.development_candidate_at_point(_screen_to_world(motion.position)) if map_mode == "Zoning" and region != null and _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 10.0 else -1
 			var hovered_area_id: int = _hit_jurisdiction_label(motion.position)
 			if hovered_area_id < 0 and (map_mode == "Trips" or road_tool == "Inspect"):
 				hovered_area_id = _hit_jurisdiction_border(motion.position)
-			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if hovered_area_id >= 0 or new_hover >= 0 else Control.CURSOR_ARROW
+			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if hovered_area_id >= 0 or new_hover >= 0 or candidate_hover >= 0 else Control.CURSOR_ARROW
 			if new_hover != hovered_id:
 				hovered_id = new_hover
 				queue_redraw()
@@ -1957,9 +2046,12 @@ func _hit_road_node(screen_position: Vector2) -> int:
 		return -1
 	var closest := -1
 	var best := INF
+	var show_local_roads: bool = _show_local_road_detail()
 	var node_indices: Array[int] = _spatial_near_indices(spatial_road_nodes, screen_position, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_index in node_indices:
 		var node = region.road_nodes[node_index]
+		if not show_local_roads and node.kind != "City" and not node.is_interchange:
+			continue
 		var distance: float = screen_position.distance_to(_world_to_screen(node.position_km))
 		var hit_radius: float = _node_radius(region.neighborhoods[node.neighborhood_id].population) + 3.0 if node.neighborhood_id >= 0 else 13.0
 		if distance <= hit_radius and distance < best:
@@ -1973,9 +2065,12 @@ func _hit_road_link(screen_position: Vector2) -> int:
 		return -1
 	var closest := -1
 	var best := 4.5
+	var show_local_roads: bool = _show_local_road_detail()
 	var link_indices: Array[int] = _spatial_near_indices(spatial_road_links, screen_position, 25.0, true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
 	for link_index in link_indices:
 		var link = region.road_links[link_index]
+		if not show_local_roads and not _is_strategic_road(link):
+			continue
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
 		for direction in range(2):
 			for lane_index in range(link.lanes_per_direction):
@@ -1991,6 +2086,8 @@ func _hit_road_link(screen_position: Vector2) -> int:
 
 func _hit_test(screen_position: Vector2) -> int:
 	if region == null:
+		return -1
+	if region.is_large_scale and _map_scale() * zoom * StateGeography.CELL_SIZE_KM < 8.0:
 		return -1
 	var closest_id := -1
 	var closest_distance := INF

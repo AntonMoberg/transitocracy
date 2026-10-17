@@ -21,7 +21,7 @@ func _run() -> void:
 	while main.generation_thread != null and Time.get_ticks_msec() < deadline:
 		await process_frame
 	var errors := PackedStringArray()
-	if main.generation_thread != null or main.region.neighborhoods.size() != 20480:
+	if main.generation_thread != null or main.region.neighborhoods.size() != 798:
 		errors.append("Stretch region did not generate.")
 	else:
 		main.playing = false

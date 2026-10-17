@@ -20,7 +20,7 @@ func _initialize() -> void:
 	var clock = CalendarClock.new()
 	var day_key: int = clock.unix_seconds / 86400
 	var initial_links: int = region.road_links.size()
-	_check(initial_links == 15 and RoadGraph.is_forest(region), "starter roads must connect only the twelve developed neighborhoods and four city hubs")
+	_check(initial_links == 49 and RoadGraph.is_forest(region), "starter roads must connect forty developed neighborhoods and ten city hubs")
 	var interchange: Dictionary = RoadPlanner.interchange_preview(region, region.neighborhood_gateway_node_ids[0], -1, Vector2.ZERO, day_key)
 	_check(interchange["ok"] and region.jurisdictions[interchange["owner_id"]].kind == "City" and region.jurisdictions[interchange["owner_id"]].treasury >= interchange["cost"], "a starting city must be able to fund a junction interchange")
 	var state_roads := 0

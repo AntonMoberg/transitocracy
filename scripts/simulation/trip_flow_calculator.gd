@@ -8,7 +8,7 @@ const CompactTripFlowCalculator = preload("res://scripts/simulation/compact_trip
 
 const WORKERS_PER_HOUSEHOLD = 1.1
 const TRAVEL_TIME_DECAY_MINUTES = 30.0
-const BALANCING_PASSES = 40
+const BALANCING_PASSES = 400
 const WEEKEND_COMMUTE_FRACTION = 0.25
 const WEEKDAY_SHOPPING_VISITS_PER_PERSON = 0.20
 const WEEKEND_SHOPPING_VISITS_PER_PERSON = 0.34
@@ -62,10 +62,11 @@ static func build(region):
 		var row := PackedFloat32Array()
 		row.resize(count)
 		for destination_id in range(count):
-			row[destination_id] = exp(-region.travel_times[origin_id][destination_id] / TRAVEL_TIME_DECAY_MINUTES)
+			var minutes: float = region.travel_times[origin_id][destination_id]
+			row[destination_id] = maxf(exp(-minutes / TRAVEL_TIME_DECAY_MINUTES), 0.000001) if minutes < 1000000.0 else 0.0
 		profile.daily_work_od.append(row)
 	if profile.daily_commuters > 0.0:
-		for _pass_index in range(BALANCING_PASSES):
+		for pass_index in range(BALANCING_PASSES):
 			for origin_id in range(count):
 				var row_sum := 0.0
 				for destination_id in range(count):
@@ -80,6 +81,15 @@ static func build(region):
 				var column_scale: float = column_targets[destination_id] / maxf(column_sum, 0.000001)
 				for origin_id in range(count):
 					profile.daily_work_od[origin_id][destination_id] *= column_scale
+			if pass_index % 10 == 9:
+				var largest_error := 0.0
+				for origin_id in range(count):
+					var actual := 0.0
+					for commuters in profile.daily_work_od[origin_id]:
+						actual += commuters
+					largest_error = maxf(largest_error, absf(actual - row_targets[origin_id]) / maxf(1.0, row_targets[origin_id]))
+				if largest_error < 0.005:
+					break
 	else:
 		for row in profile.daily_work_od:
 			row.fill(0.0)

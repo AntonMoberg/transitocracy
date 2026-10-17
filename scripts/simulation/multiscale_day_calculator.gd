@@ -1,6 +1,7 @@
 extends RefCounted
 
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
 const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
@@ -19,6 +20,7 @@ static func advance_day(region, day_key: int, previous_flow, previous_state) -> 
 	FiscalCalculator.apply_due_policies(region, day_key * 86400)
 	var roads_changed: bool = RoadPlanner.advance_day(region, day_key)
 	if roads_changed:
+		DevelopmentPlanner.refresh_candidates(region)
 		region.city_od_candidates.clear()
 		AccessibilityCalculator.recalculate(region)
 	elif previous_flow != null and previous_state != null:

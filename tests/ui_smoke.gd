@@ -13,7 +13,7 @@ func _run_checks() -> void:
 	var main = await UiFixture.attach_small(self)
 	main._on_play_pressed()
 	await process_frame
-	_check(main.region.region_ids.size() == 4 and main.region.county_ids.size() == 8 and main.region.cities.size() == 16 and main.region.neighborhoods.size() == 96, "main scene must generate the state hierarchy")
+	_check(main.region.region_ids.size() == 4 and main.region.county_ids.size() == 8 and main.region.cities.size() == 32 and main.region.neighborhoods.size() == 62, "main scene must generate the state hierarchy")
 	_check(main.flow_timeline.size.x > 0 and main.map_view.size.y > 0, "timeline and map must be visible")
 	_check(main.selected_jurisdiction_id == 0 and main.map_view.detail_level == "Neighborhood" and main.inspector.text.contains("REGIONS"), "the full map must start with the state inspector")
 	_check(main.state_tax_controls.visible and not main.jurisdiction_policy_controls.visible and not main.toll_controls.visible and not main.flow_detail_label.visible, "only controls for the selected scope and map mode should be visible")
