@@ -2,6 +2,7 @@ extends RefCounted
 
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
+const StreetLayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
 
 # One aggregate update per simulated day. Income is a proxy derived from the
 # local job mix; tax, housing costs, job access and amenities affect migration.
@@ -108,7 +109,10 @@ static func advance_day(region) -> void:
 			daily_change = minf(daily_change, 0.0)
 		var exact_change: float = daily_change + neighborhood.migration_remainder
 		var requested_change: int = roundi(exact_change)
-		var next_households: int = clampi(old_households + requested_change, 0, neighborhood.housing_capacity)
+		var housing_limit: int = neighborhood.housing_capacity
+		if neighborhood.development_plan != null:
+			housing_limit = maxi(old_households, roundi(neighborhood.development_plan.target_housing * neighborhood.development_plan.serviced_fraction()))
+		var next_households: int = clampi(old_households + requested_change, 0, mini(neighborhood.housing_capacity, housing_limit))
 		neighborhood.last_household_change = next_households - old_households
 		neighborhood.migration_remainder = exact_change - float(requested_change) if next_households == old_households + requested_change else 0.0
 		neighborhood.households = next_households
@@ -123,9 +127,13 @@ static func advance_day(region) -> void:
 			daily_jobs = float(neighborhood.job_capacity) * DAILY_DEVELOPMENT_RATE * location_factor if neighborhood.development_approved and neighborhood.jobs < roundi(float(neighborhood.job_capacity) * 0.7) else 0.0
 		var exact_jobs: float = daily_jobs + neighborhood.job_growth_remainder
 		var job_change: int = roundi(exact_jobs)
-		var next_jobs: int = clampi(neighborhood.jobs + job_change, 0, neighborhood.job_capacity)
+		var job_limit: int = neighborhood.job_capacity
+		if neighborhood.development_plan != null:
+			job_limit = maxi(neighborhood.jobs, roundi(neighborhood.development_plan.target_jobs * neighborhood.development_plan.serviced_fraction()))
+		var next_jobs: int = clampi(neighborhood.jobs + job_change, 0, mini(neighborhood.job_capacity, job_limit))
 		neighborhood.job_growth_remainder = exact_jobs - float(job_change) if next_jobs == neighborhood.jobs + job_change else 0.0
 		_set_jobs(neighborhood, next_jobs)
+		StreetLayoutGenerator.update_buildings(neighborhood)
 		if neighborhood.households == 0:
 			neighborhood.average_monthly_income = 0
 			neighborhood.average_household_wealth = 0.0

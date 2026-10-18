@@ -5,6 +5,7 @@ const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadTrafficProfile = preload("res://scripts/simulation/road_traffic_profile.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 const CompactTrafficCalculator = preload("res://scripts/simulation/compact_traffic_calculator.gd")
+const LocalStreetTraffic = preload("res://scripts/simulation/local_street_traffic.gd")
 
 const SECOND = 0
 const MINUTE = 1
@@ -57,6 +58,7 @@ static func new_day(region, flow_profile, unix_seconds: int, previous_state = nu
 	state.next_bin = state.first_recorded_bin + 1
 	state.profile.first_recorded_bin = state.first_recorded_bin
 	state.profile.recorded_bin = state.next_bin
+	LocalStreetTraffic.prepare(region, state, previous_state)
 	return state
 
 
@@ -102,12 +104,13 @@ static func fork_for_day(state):
 	# The worker reads a detached traffic snapshot while the UI remains free to
 	# change mode or queue a policy at the day boundary.
 	var fork = State.new()
+	fork.local_districts = LocalStreetTraffic.copy_districts(state.local_districts)
+	fork.local_clock = state.local_clock
 	fork.link_ids = state.link_ids.duplicate()
 	fork.queues = state.queues.duplicate()
 	fork.free_pair_times = state.free_pair_times
 	fork.paths_by_mode = state.paths_by_mode.duplicate()
 	fork.compact_trees_by_mode = state.compact_trees_by_mode.duplicate()
-	fork.spoke_indices = state.spoke_indices.duplicate()
 	fork.link_capacity_hr = state.link_capacity_hr
 	fork.link_from_nodes = state.link_from_nodes
 	fork.link_to_nodes = state.link_to_nodes
@@ -121,6 +124,8 @@ static func fork_for_week(state):
 	# Daily playback and the week producer advance independently. OD demand,
 	# routes, and completed pair-time rows are immutable and can be shared.
 	var fork = State.new()
+	fork.local_districts = LocalStreetTraffic.copy_districts(state.local_districts)
+	fork.local_clock = state.local_clock
 	fork.unix_seconds = state.unix_seconds
 	fork.day_key = state.day_key
 	fork.next_bin = state.next_bin
@@ -136,7 +141,6 @@ static func fork_for_week(state):
 	fork.cached_revenue = state.cached_revenue.duplicate(true)
 	fork.paths_by_mode = state.paths_by_mode.duplicate()
 	fork.compact_trees_by_mode = state.compact_trees_by_mode.duplicate()
-	fork.spoke_indices = state.spoke_indices.duplicate()
 	fork.link_capacity_hr = state.link_capacity_hr
 	fork.link_from_nodes = state.link_from_nodes
 	fork.link_to_nodes = state.link_to_nodes
@@ -190,7 +194,9 @@ static func change_mode(region, flow_profile, state, old_mode: int, new_mode: in
 	if old_mode >= HOUR and new_mode <= MINUTE:
 		# Retain the number of queued cars while distributing them over the
 		# currently likely local roads. This seeds detailed flow after a macro run.
-		var total: float = state.queued_cars()
+		var total := 0.0
+		for queue in state.queues:
+			total += queue.x + queue.y
 		_build_hour(region, flow_profile, state, new_mode, (state.unix_seconds % SECONDS_PER_DAY) / 3600)
 		var weights := PackedVector2Array()
 		weights.resize(state.queues.size())
@@ -214,6 +220,7 @@ static func advance(region, flow_profile, state, target_seconds: int, mode: int)
 	var day_end: int = (state.day_key + 1) * SECONDS_PER_DAY
 	if region.is_large_scale and mode == DAY and target_seconds >= day_end:
 		_advance_compact_day(region, flow_profile, state, day_end)
+		LocalStreetTraffic.advance_to(region, flow_profile, state, state.unix_seconds)
 		return
 	while state.unix_seconds < mini(target_seconds, day_end):
 		if FiscalCalculator.apply_due_policies(region, state.unix_seconds):
@@ -253,6 +260,7 @@ static func advance(region, flow_profile, state, target_seconds: int, mode: int)
 			_finish_hour(region, state, hour)
 			if region.is_large_scale:
 				state.stage_totals_us["finish_hour"] = int(state.stage_totals_us.get("finish_hour", 0)) + Time.get_ticks_usec() - finish_started
+	LocalStreetTraffic.advance_to(region, flow_profile, state, state.unix_seconds)
 
 
 static func _advance_compact_day(region, flow_profile, state, day_end: int) -> void:

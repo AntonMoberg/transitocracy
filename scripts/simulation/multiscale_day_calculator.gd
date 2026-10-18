@@ -2,6 +2,7 @@ extends RefCounted
 
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
+const DevelopmentBudget = preload("res://scripts/simulation/development_budget.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
 const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
@@ -19,6 +20,7 @@ static func advance_day(region, day_key: int, previous_flow, previous_state) -> 
 	region.current_day_key = day_key
 	FiscalCalculator.apply_due_policies(region, day_key * 86400)
 	var roads_changed: bool = RoadPlanner.advance_day(region, day_key)
+	roads_changed = DevelopmentBudget.advance_day(region, day_key) or roads_changed
 	if roads_changed:
 		DevelopmentPlanner.refresh_candidates(region)
 		region.city_od_candidates.clear()
@@ -55,6 +57,7 @@ static func advance_day(region, day_key: int, previous_flow, previous_state) -> 
 	for area in region.jurisdictions:
 		balance += area.treasury
 		net += area.daily_net()
+	balance += region.reserved_development_funds()
 	var summary_stats := {"population": totals["population"], "jobs": totals["jobs"], "balance": balance, "net": net}
 	return {"region": region, "flow": flow, "traffic_state": traffic, "traffic": traffic.profile, "summary_stats": summary_stats, "timings_us": timings}
 

@@ -4,6 +4,7 @@ const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadTrafficProfile = preload("res://scripts/simulation/road_traffic_profile.gd")
 const RollingTrafficState = preload("res://scripts/simulation/rolling_traffic_state.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
+const LocalStreetTraffic = preload("res://scripts/simulation/local_street_traffic.gd")
 
 const BINS_PER_HOUR = 4
 const BINS_PER_DAY = 96
@@ -89,7 +90,10 @@ static func new_day(region, flow_profile, previous_state = null, replan_paths: b
 		state.profile.quarter_hour_queues.append(_empty_vectors(link_count))
 		state.profile.quarter_hour_served.append(_empty_vectors(link_count))
 		state.profile.quarter_hour_link_times.append(free_costs.duplicate())
+	LocalStreetTraffic.prepare(region, state, previous_state, state.day_key * 86400)
 	state.checkpoints[0] = {
+		"local_districts": LocalStreetTraffic.copy_districts(state.local_districts),
+		"local_clock": state.local_clock,
 		"next_bin": 0,
 		"queues": state.queues.duplicate(true),
 		"scheduled": state.scheduled.duplicate(true),
@@ -120,6 +124,8 @@ static func advance_chunk_with_fork(region, flow_profile, state, target_bin: int
 # on the UI thread was hundreds of milliseconds per eight-bin chunk.
 static func fork_for_worker(state):
 	var fork = RollingTrafficState.new()
+	fork.local_districts = LocalStreetTraffic.copy_districts(state.local_districts)
+	fork.local_clock = state.local_clock
 	fork.day_key = state.day_key
 	fork.next_bin = state.next_bin
 	fork.first_recorded_bin = state.first_recorded_bin
@@ -166,8 +172,10 @@ static func start_at_bin(state, bin_index: int) -> void:
 	state.first_recorded_bin = state.next_bin
 	state.profile.first_recorded_bin = state.next_bin
 	state.profile.recorded_bin = state.next_bin
+	state.local_clock = state.day_key * 86400 + state.next_bin * 900
 	state.checkpoints[state.next_bin] = state.checkpoints[0]
 	state.checkpoints[state.next_bin]["next_bin"] = state.next_bin
+	state.checkpoints[state.next_bin]["local_clock"] = state.local_clock
 	state.checkpoints.erase(0)
 
 
@@ -220,7 +228,10 @@ static func step_bin(region, flow_profile, state) -> void:
 		state.profile.hourly_pair_times[hour] = RoadGraph.route_pairs(region, state.profile.hourly_link_times[hour], [], false)["times"]
 	state.next_bin += 1
 	state.profile.recorded_bin = state.next_bin
+	LocalStreetTraffic.advance_to(region, flow_profile, state, state.day_key * 86400 + state.next_bin * 900)
 	state.checkpoints[state.next_bin] = {
+		"local_districts": LocalStreetTraffic.copy_districts(state.local_districts),
+		"local_clock": state.local_clock,
 		"next_bin": state.next_bin,
 		"queues": _copy_queue_containers(state.queues),
 		"scheduled": _copy_scheduled_containers(state.scheduled),
@@ -235,6 +246,8 @@ static func step_bin(region, flow_profile, state) -> void:
 
 
 static func restore_checkpoint(region, state, checkpoint: Dictionary) -> void:
+	state.local_districts = LocalStreetTraffic.copy_districts(checkpoint["local_districts"])
+	state.local_clock = checkpoint["local_clock"]
 	state.next_bin = checkpoint["next_bin"]
 	state.profile.recorded_bin = state.next_bin
 	state.queues = checkpoint["queues"].duplicate(true)
@@ -266,6 +279,8 @@ static func restore_checkpoint(region, state, checkpoint: Dictionary) -> void:
 
 static func after_network_edit(region, flow_profile, old_state, checkpoint: Dictionary):
 	var state = new_day(region, flow_profile)
+	state.local_districts = LocalStreetTraffic.copy_districts(checkpoint["local_districts"])
+	LocalStreetTraffic.prepare(region, state, state, checkpoint["local_clock"])
 	var start_bin: int = checkpoint["next_bin"]
 	state.next_bin = start_bin
 	state.first_recorded_bin = old_state.first_recorded_bin
@@ -324,6 +339,7 @@ static func after_network_edit(region, flow_profile, old_state, checkpoint: Dict
 		state.profile.end_queues[index] = Vector2(_queue_total(state.queues[index * 2]), _queue_total(state.queues[index * 2 + 1]))
 	state.checkpoints.clear()
 	state.checkpoints[start_bin] = {
+		"local_districts": LocalStreetTraffic.copy_districts(state.local_districts), "local_clock": state.local_clock,
 		"next_bin": start_bin, "queues": state.queues.duplicate(true), "scheduled": state.scheduled.duplicate(true), "stranded": state.stranded.duplicate(true),
 		"departed_cars": state.departed_cars, "completed_cars": state.completed_cars,
 		"hourly_volumes": state.profile.hourly_volumes.duplicate(true), "hourly_served": state.profile.hourly_served.duplicate(true),

@@ -2,6 +2,7 @@ extends RefCounted
 
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
+const DevelopmentBudget = preload("res://scripts/simulation/development_budget.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
 const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
@@ -56,6 +57,11 @@ static func _copy_large_region(source):
 	copy.development_candidates = source.development_candidates.duplicate(true)
 	copy.development_candidate_keys = source.development_candidate_keys.duplicate(true)
 	copy.development_candidate_cells = source.development_candidate_cells.duplicate(true)
+	copy.urban_route_revision = source.urban_route_revision
+	for city_id in source.urban_route_cache:
+		var graph: Dictionary = source.urban_route_cache[city_id].duplicate()
+		graph["trees"] = graph["trees"].duplicate()
+		copy.urban_route_cache[city_id] = graph
 	copy.cities = source.cities.duplicate(true)
 	for original in source.neighborhoods:
 		var n = NeighborhoodData.new()
@@ -97,6 +103,12 @@ static func _copy_large_region(source):
 		n.development_retail_share = original.development_retail_share
 		n.development_income = original.development_income
 		n.job_growth_remainder = original.job_growth_remainder
+		n.street_layout = original.street_layout
+		n.development_plan = original.development_plan.copy() if original.development_plan != null else null
+		n.access_node_ids = original.access_node_ids.duplicate()
+		n.access_minutes = original.access_minutes
+		n.built_fraction = original.built_fraction
+		n.block_zoning = original.block_zoning.duplicate()
 		copy.neighborhoods.append(n)
 	for original in source.jurisdictions:
 		var j = JurisdictionData.new()
@@ -136,6 +148,7 @@ static func _copy_large_region(source):
 		node.city_id = original.city_id
 		node.is_interchange = original.is_interchange
 		node.interchange_owner_jurisdiction_id = original.interchange_owner_jurisdiction_id
+		node.managed_neighborhood_id = original.managed_neighborhood_id
 		copy.road_nodes.append(node)
 	for original in source.road_links:
 		var link = RoadLinkData.new()
@@ -149,6 +162,9 @@ static func _copy_large_region(source):
 		link.owner_jurisdiction_id = original.owner_jurisdiction_id
 		link.toll_forward = original.toll_forward
 		link.toll_reverse = original.toll_reverse
+		link.corridor_id = original.corridor_id
+		link.corridor_start_km = original.corridor_start_km
+		link.managed_neighborhood_id = original.managed_neighborhood_id
 		copy.road_links.append(link)
 	copy.road_projects = source.road_projects.duplicate()
 	return copy
@@ -162,6 +178,7 @@ static func advance_day(region, day_key: int, previous_flow, previous_traffic, p
 	region.current_day_key = day_key
 	FiscalCalculator.apply_due_policies(region, day_key * 86400)
 	var roads_changed: bool = RoadPlanner.advance_day(region, day_key)
+	roads_changed = DevelopmentBudget.advance_day(region, day_key) or roads_changed
 	if roads_changed:
 		DevelopmentPlanner.refresh_candidates(region)
 		AccessibilityCalculator.recalculate(region)
@@ -184,9 +201,13 @@ static func _copy_value(value):
 		TYPE_OBJECT:
 			if value == null or value.get_script() == null:
 				return value
+			if value.get_script() == preload("res://scripts/simulation/street_layout.gd"):
+				return value
 			var copy = value.get_script().new()
 			for property in value.get_property_list():
 				if int(property["usage"]) & PROPERTY_USAGE_SCRIPT_VARIABLE:
+					if property["name"] in ["street_spatial_cache", "urban_route_cache", "urban_route_revision"]:
+						continue
 					copy.set(property["name"], _copy_value(value.get(property["name"])))
 			return copy
 		TYPE_ARRAY:

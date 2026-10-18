@@ -18,7 +18,6 @@ var compact_hourly_links: Array[PackedVector2Array] = []
 var compact_hourly_revenue: Array[Dictionary] = []
 var paths_by_mode: Dictionary = {}
 var compact_trees_by_mode: Dictionary = {}
-var spoke_indices: PackedInt32Array = PackedInt32Array()
 var link_capacity_hr: PackedFloat32Array = PackedFloat32Array()
 var link_from_nodes: PackedInt32Array = PackedInt32Array()
 var link_to_nodes: PackedInt32Array = PackedInt32Array()
@@ -32,12 +31,16 @@ var served_cars: float = 0.0
 var estimated: bool = false
 var has_live_sample: bool = false
 var stage_totals_us: Dictionary = {}
+var local_districts: Dictionary = {}
+var local_clock: int = 0
 
 
 func queued_cars() -> float:
 	var result := 0.0
 	for lane in queues:
 		result += lane.x + lane.y
+	for district in local_districts.values():
+		result += district["queued"]
 	return result
 
 

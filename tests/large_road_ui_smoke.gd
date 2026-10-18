@@ -18,8 +18,13 @@ func _run() -> void:
 		quit(1)
 		return
 	main.playing = false
-	var first_spoke_id: int = main.region.neighborhood_spoke_link_ids[0]
-	main.pending_road_preview = RoadPlanner.demolish_preview(main.region, first_spoke_id)
+	var arterial_id := -1
+	for link in main.region.road_links:
+		if link.road_class == "Arterial":
+			arterial_id = link.id
+			break
+	var initial_links: int = main.region.road_links.size()
+	main.pending_road_preview = RoadPlanner.demolish_preview(main.region, arterial_id)
 	var started: int = Time.get_ticks_usec()
 	main._on_road_build_pressed()
 	var action_ms: float = float(Time.get_ticks_usec() - started) / 1000.0
@@ -31,8 +36,8 @@ func _run() -> void:
 		errors.append("Road action blocked the UI for %.1f ms." % action_ms)
 	if main.road_rebuild_thread != null:
 		errors.append("Road recalculation did not finish.")
-	elif main.region.neighborhood_accessible[0] != 0 or main.flow_profile.compact_origin_daily["Work"][0] != 0.0:
-		errors.append("Road recalculation did not remove access and demand.")
+	elif main.region.road_links.size() != initial_links - 1 or main.region.neighborhood_accessible[0] == 0 or main.flow_profile.compact_origin_daily["Work"][0] <= 0.0:
+		errors.append("Road recalculation must remove the selected arterial while retaining alternate street access.")
 	elif main.map_view.region != main.region or main.traffic_state.link_ids.size() != main.region.road_links.size():
 		errors.append("Road map or traffic state is stale after demolition.")
 	print("Large road UI action: %.1f ms" % action_ms)

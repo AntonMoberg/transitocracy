@@ -22,6 +22,8 @@ const CompactHourPrecompute = preload("res://scripts/simulation/compact_hour_pre
 const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
 const RoadRebuild = preload("res://scripts/simulation/road_rebuild.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
+const DevelopmentBudget = preload("res://scripts/simulation/development_budget.gd")
+const DevelopmentControls = preload("res://scripts/ui/development_controls.gd")
 const RoadTrafficSummary = preload("res://scripts/simulation/road_traffic_summary.gd")
 
 
@@ -110,6 +112,7 @@ var selected_candidate_id: int = -1
 var zoning_controls: HBoxContainer
 var zoning_button: Button
 var zoning_status_label: Label
+var development_controls
 var last_process_us: int = 0
 var last_handoff_us: int = 0
 var last_advance_us: int = 0
@@ -480,6 +483,7 @@ func _build_interface() -> void:
 	map_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	map_view.neighborhood_selected.connect(_on_neighborhood_selected)
 	map_view.candidate_selected.connect(_on_candidate_selected)
+	map_view.local_street_selected.connect(_on_local_street_selected)
 	map_view.jurisdiction_selected.connect(_on_map_jurisdiction_selected)
 	map_view.road_node_clicked.connect(_on_road_node_clicked)
 	map_view.road_link_clicked.connect(_on_road_link_clicked)
@@ -525,6 +529,12 @@ func _build_interface() -> void:
 	zoning_status_label.clip_text = true
 	zoning_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	zoning_controls.add_child(zoning_status_label)
+	development_controls = DevelopmentControls.new()
+	development_controls.visible = false
+	development_controls.allocation_requested.connect(_on_development_allocation)
+	development_controls.zoning_requested.connect(_on_development_zoning)
+	inspector_layout.add_child(development_controls)
+	zoning_controls.visibility_changed.connect(func() -> void: development_controls.visible = zoning_controls.visible)
 	state_tax_controls = HBoxContainer.new()
 	state_tax_controls.add_theme_constant_override("separation", 8)
 	inspector_layout.add_child(state_tax_controls)
@@ -681,6 +691,7 @@ func _on_tax_changed(value: float) -> void:
 func _on_jurisdiction_selected(area_id: int) -> void:
 	if region == null or area_id < 0 or area_id >= region.jurisdictions.size():
 		return
+	map_view.selected_local_street = Vector2i(-1, -1)
 	selected_candidate_id = -1
 	zoning_controls.visible = false
 	map_view.set_selected_candidate(-1)
@@ -787,9 +798,9 @@ func _refresh_fiscal_controls() -> void:
 			child_balance += child.treasury
 			stack.append_array(child.child_ids)
 	var totals: Dictionary = region.get_jurisdiction_totals(area.id)
-	fiscal_label.text = "%s  •  $%s funds  •  $%s/day net%s" % [area.name, _format_count(roundi(balance)), _format_count(roundi(income + property + sales + fees + grants - upkeep - transfers)), pending_text]
-	fiscal_label.tooltip_text = "%s: %s people, %s jobs\nTreasury $%s\nIncome $%s/day  •  Property $%s/day\nSales $%s today  •  Fees $%s today\nState grants $%s/day  •  Transfers $%s/day\nRoad upkeep $%s/day" % [
-		area.name, _format_count(totals["population"]), _format_count(totals["jobs"]), _format_count(roundi(balance)),
+	fiscal_label.text = "%s  •  $%s available  •  $%s reserved  •  $%s/day net%s" % [area.name, _format_count(roundi(balance)), _format_count(region.reserved_development_funds(area.id)), _format_count(roundi(income + property + sales + fees + grants - upkeep - transfers)), pending_text]
+	fiscal_label.tooltip_text = "%s: %s people, %s jobs\nAvailable treasury $%s • Development reserves $%s\nIncome $%s/day  •  Property $%s/day\nSales $%s today  •  Fees $%s today\nState grants $%s/day  •  Transfers $%s/day\nRoad upkeep $%s/day" % [
+		area.name, _format_count(totals["population"]), _format_count(totals["jobs"]), _format_count(roundi(balance)), _format_count(region.reserved_development_funds(area.id)),
 		_format_count(roundi(income)), _format_count(roundi(property)),
 		_format_count(roundi(sales)), _format_count(roundi(fees)), _format_count(roundi(grants)), _format_count(roundi(transfers)), _format_count(roundi(upkeep))]
 	if area.kind == "Region":
@@ -807,6 +818,12 @@ func _refresh_scope_breadcrumb() -> void:
 
 func _on_inspector_meta_clicked(meta: Variant) -> void:
 	var link: String = str(meta)
+	if link.begins_with("development:"):
+		var neighborhood_id: int = int(link.trim_prefix("development:"))
+		for candidate in region.development_candidates:
+			if int(candidate["neighborhood_id"]) == neighborhood_id:
+				_on_candidate_selected(candidate["id"])
+				return
 	if not link.begins_with("jurisdiction:"):
 		return
 	var id_text: String = link.trim_prefix("jurisdiction:")
@@ -910,6 +927,7 @@ func _apply_generated_region(result: Dictionary) -> void:
 	selected_candidate_id = -1
 	zoning_controls.visible = false
 	map_view.set_region(region)
+	map_view.selected_local_street = Vector2i(-1, -1)
 	map_view.set_map_mode("Roads")
 	map_view.set_detail_level("Neighborhood" if simulation_mode <= MultiScaleTraffic.MINUTE else ("Region" if simulation_mode == MultiScaleTraffic.HOUR else "State"))
 	map_mode_selector.select(0)
@@ -942,6 +960,7 @@ func _refresh_region_summary(prepared_stats: Dictionary = {}) -> void:
 		for area in region.jurisdictions:
 			balance += area.treasury
 			net += area.daily_net()
+		balance += region.reserved_development_funds()
 	dynamics_label.text = "Today: %+d households / %+d people  •  Total funds $%s  •  Net $%s/day" % [
 		region.last_household_change, region.last_population_change, _format_count(roundi(balance)), _format_count(roundi(net))
 	]
@@ -1304,6 +1323,7 @@ func _update_flow_detail() -> void:
 
 
 func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) -> void:
+	map_view.selected_local_street = Vector2i(-1, -1)
 	selected_candidate_id = -1
 	zoning_controls.visible = false
 	map_view.set_selected_candidate(-1)
@@ -1338,6 +1358,9 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	text_lines.append("[font_size=22][b]%s[/b][/font_size]" % neighborhood.name)
 	text_lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(neighborhood.city_id), neighborhood.land_area_ha])
 	text_lines.append("[color=#91abc0]Developable area: %.0f ha[/color]" % neighborhood.developable_area_ha)
+	if neighborhood.development_plan != null:
+		text_lines.append("[url=development:%d]Manage development budget and zoning[/url]" % neighborhood_id)
+		text_lines.append("Plan: %s • Phase %d/3 • Reserved $%d" % [neighborhood.development_plan.status, neighborhood.development_plan.completed_phase, neighborhood.development_plan.reserved])
 	text_lines.append("")
 	text_lines.append("[color=#78c8dc][b]NEIGHBORHOOD[/b][/color]")
 	text_lines.append("Development: %s" % neighborhood.development_state)
@@ -1411,6 +1434,32 @@ func _current_day_key() -> int:
 	return floori(float(calendar_clock.unix_seconds) / 86400.0)
 
 
+func _on_local_street_selected(neighborhood_id: int, edge_id: int) -> void:
+	_on_neighborhood_selected(neighborhood_id)
+	map_view.selected_local_street = Vector2i(neighborhood_id, edge_id)
+	_show_local_street_inspector()
+	map_view.queue_redraw()
+
+
+func _show_local_street_inspector(reset_scroll: bool = true) -> void:
+	var neighborhood_id: int = map_view.selected_local_street.x
+	var edge_id: int = map_view.selected_local_street.y
+	if neighborhood_id < 0 or neighborhood_id >= region.neighborhoods.size():
+		return
+	var neighborhood = region.neighborhoods[neighborhood_id]
+	var layout = neighborhood.street_layout
+	var record: Dictionary = traffic_state.local_districts.get(neighborhood_id, {})
+	var rate: Vector2 = preload("res://scripts/simulation/local_street_traffic.gd").edge_rate(record, edge_id) if not record.is_empty() else Vector2.ZERO
+	var queues: Vector2 = record["queues"][edge_id] if not record.is_empty() else Vector2.ZERO
+	var multiplier: float = neighborhood.development_plan.installed_multiplier
+	var previous_scroll: float = inspector.get_v_scroll_bar().value
+	inspector.text = "[font_size=22][b]Local street[/b][/font_size]\n%s • %.0f m\nCity-managed development infrastructure\n\nArrival demand: %.1f / %.1f vehicles/h\nQueued: %.1f / %.1f vehicles\nFree speed: 20 km/h\nCapacity: %.0f vehicles/h\nJunction-adjusted discharge: %.0f vehicles/h\n\n[url=development:%d]Manage neighborhood funding and zoning[/url]" % [neighborhood.name, layout.lengths[edge_id] * 1000.0, rate.x, rate.y, queues.x, queues.y, 300.0 * multiplier, 225.0 * multiplier, neighborhood_id]
+	if reset_scroll:
+		inspector.scroll_to_line(0)
+	else:
+		inspector.get_v_scroll_bar().value = previous_scroll
+
+
 func _on_candidate_selected(candidate_id: int) -> void:
 	if region == null or candidate_id < 0 or candidate_id >= region.development_candidates.size():
 		return
@@ -1434,9 +1483,12 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 	var distance: float = center.distance_to(region.cities[city_id]["center_km"])
 	var hectares: float = minf(105.0, StateGeography.polygon_area(candidate["polygon"]) * 100.0)
 	zoning_controls.visible = true
+	state_tax_controls.visible = false
+	jurisdiction_policy_controls.visible = false
 	zoning_button.text = "Withdraw approval" if approved else "Approve development"
 	zoning_button.disabled = not approved and neighborhood_id < 0 and int(candidate["frontage_link_id"]) < 0
-	zoning_status_label.text = "Road access lost" if int(candidate["frontage_link_id"]) < 0 else "Growth updates next day"
+	zoning_status_label.text = "Road access lost" if int(candidate["frontage_link_id"]) < 0 else "Funding and zoning update daily"
+	development_controls.show_plan(region, candidate, reset_scroll)
 	var lines := PackedStringArray()
 	lines.append("[font_size=22][b]Neighborhood candidate[/b][/font_size]")
 	lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(city_id), hectares])
@@ -1447,8 +1499,13 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 		lines.append("Development: %s" % neighborhood.development_state)
 		lines.append("Population: %s  •  Jobs: %s" % [_format_count(neighborhood.population), _format_count(neighborhood.jobs)])
 		lines.append("Desirability: %.1f / 100" % neighborhood.desirability)
+		if neighborhood.development_plan != null:
+			var plan = neighborhood.development_plan
+			lines.append("Plan: %s • Phase %d / 3" % [plan.status, plan.completed_phase])
+			lines.append("Reserved $%d • Spent $%d" % [plan.reserved, plan.spent])
+			lines.append("Remaining construction $%d" % DevelopmentBudget.remaining_cost(neighborhood))
 		lines.append("")
-		lines.append("[color=#78c8dc][b]DEFAULT LAND USE · SHARE / DENSITY[/b][/color]")
+		lines.append("[color=#78c8dc][b]CURRENT LAND USE · SHARE / DENSITY[/b][/color]")
 		for zone in RegionData.ZONE_TYPES:
 			lines.append("%s: %d%% / %s" % [zone, neighborhood.zone_shares[zone], RegionData.DENSITY_NAMES[neighborhood.zone_density[zone]]])
 	else:
@@ -1458,7 +1515,7 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 		for zone in RegionData.ZONE_TYPES:
 			lines.append("%s: %d%% / %s" % [zone, defaults["shares"][zone], RegionData.DENSITY_NAMES[defaults["density"][zone]]])
 	lines.append("")
-	lines.append("Approval permits gradual growth while connected to an arterial. Withdrawing approval keeps existing homes and jobs.")
+	lines.append("Approval reserves city funds. Infrastructure opens in phases before residents arrive. Cancellation returns unspent funds; paid construction finishes and existing buildings remain.")
 	var previous_scroll: float = inspector.get_v_scroll_bar().value
 	inspector.text = "\n".join(lines)
 	if reset_scroll:
@@ -1470,24 +1527,64 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 func _on_zoning_pressed() -> void:
 	if region == null or selected_candidate_id < 0:
 		return
-	if _region_snapshot_busy():
-		deferred_region_edits.append(Callable(self, "_on_zoning_pressed"))
-		return
 	var candidate: Dictionary = region.development_candidates[selected_candidate_id]
 	var neighborhood_id: int = candidate["neighborhood_id"]
 	var approved: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
-	var result: Dictionary = DevelopmentPlanner.set_approval(region, selected_candidate_id, not approved)
+	_apply_candidate_approval(selected_candidate_id, not approved, roundi(development_controls.allocation_input.value), development_controls.shares(), development_controls.densities())
+
+
+func _apply_candidate_approval(candidate_id: int, approved: bool, allocation: int, shares: Dictionary, density: Dictionary) -> void:
+	if region == null or candidate_id < 0 or candidate_id >= region.development_candidates.size():
+		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_apply_candidate_approval").bind(candidate_id, approved, allocation, shares.duplicate(), density.duplicate()))
+		return
+	var candidate: Dictionary = region.development_candidates[candidate_id]
+	var neighborhood_id: int = candidate["neighborhood_id"]
+	var current: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
+	if current == approved:
+		return
+	var result: Dictionary = DevelopmentPlanner.set_approval(region, candidate_id, approved, allocation, shares, density)
 	if not result["ok"]:
 		zoning_status_label.text = result["reason"]
 		return
 	_discard_pending_day()
+	_refresh_region_summary()
 	if result["new_neighborhood"]:
 		_rebuild_after_road_change()
 	else:
 		_invalidate_traffic_forecast()
 		_queue_next_day(last_dynamics_day_key)
-	_show_candidate_inspector(false)
+	_refresh_inspector(false)
 	map_view.queue_redraw()
+
+
+func _on_development_allocation(neighborhood_id: int, amount: int) -> void:
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_development_allocation").bind(neighborhood_id, amount))
+		return
+	var result: Dictionary = DevelopmentBudget.allocate(region, neighborhood_id, amount)
+	if not result["ok"]:
+		zoning_status_label.text = result["reason"]
+		development_controls.editor_status_label.text = result["reason"]
+		return
+	_discard_pending_day()
+	_refresh_region_summary()
+	_queue_next_day(last_dynamics_day_key)
+	_show_candidate_inspector(false)
+
+
+func _on_development_zoning(neighborhood_id: int, shares: Dictionary, density: Dictionary) -> void:
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_development_zoning").bind(neighborhood_id, shares.duplicate(), density.duplicate()))
+		return
+	var result: Dictionary = DevelopmentBudget.queue_zoning(region, neighborhood_id, shares, density, _current_day_key())
+	if not result["ok"]:
+		zoning_status_label.text = result["reason"]
+		return
+	_discard_pending_day()
+	_queue_next_day(last_dynamics_day_key)
+	zoning_status_label.text = "Zoning applies next day"
 
 
 func _on_map_mode_selected(index: int) -> void:
@@ -1496,6 +1593,7 @@ func _on_map_mode_selected(index: int) -> void:
 	flow_detail_separator.visible = index == 1
 	_cancel_road_preview()
 	if index != 0:
+		map_view.selected_local_street = Vector2i(-1, -1)
 		selected_road_link_id = -1
 		map_view.set_selected_road_link(-1)
 		_refresh_toll_controls()
@@ -1518,6 +1616,7 @@ func _on_road_tool_selected(index: int) -> void:
 
 
 func _on_road_node_clicked(node_id: int) -> void:
+	map_view.selected_local_street = Vector2i(-1, -1)
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
 	match tool_name:
 		"Arterial", "Highway":
@@ -1548,6 +1647,7 @@ func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
 		return
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
 	if tool_name != "Junction":
+		map_view.selected_local_street = Vector2i(-1, -1)
 		selected_road_link_id = link_id
 		_refresh_toll_controls()
 		map_view.set_selected_road_link(link_id)
@@ -1719,6 +1819,8 @@ func _poll_road_rebuild() -> void:
 func _refresh_inspector(reset_scroll: bool = true) -> void:
 	if selected_candidate_id >= 0 and map_view.map_mode == "Zoning":
 		_show_candidate_inspector(reset_scroll)
+	elif map_view.selected_local_street.x >= 0 and map_view.map_mode == "Roads":
+		_show_local_street_inspector(reset_scroll)
 	elif selected_road_link_id >= 0 and map_mode_selector.selected == 0:
 		_show_road_inspector(selected_road_link_id)
 	else:

@@ -3,6 +3,7 @@ extends SceneTree
 const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
+const DevelopmentBudget = preload("res://scripts/simulation/development_budget.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
 const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
@@ -32,7 +33,7 @@ func _run() -> void:
 				for link in region.road_links:
 					if link.road_class == "Arterial" and (link.from_node_id == hub_id or link.to_node_id == hub_id):
 						feeder_count += 1
-				_check(feeder_count >= 1 and feeder_count <= 2, "every starting highway hub must have one or two arterial trunks")
+				_check(feeder_count >= 1 and feeder_count <= 4, "every starting highway hub must connect to its urban arterial grid")
 			_check(int(region.get_region_totals()["population"]) <= 100000, "launch population must stay below 100,000")
 			var developed := 0
 			for neighborhood in region.neighborhoods:
@@ -41,7 +42,7 @@ func _run() -> void:
 				_check(region.jurisdictions[region.city_jurisdiction_ids[neighborhood.city_id]].contains_point(neighborhood.position_km), "neighborhood must belong to its city")
 				if neighborhood.initially_developed:
 					developed += 1
-					_check(region.neighborhood_spoke_link_ids[neighborhood.id] >= 0 and region.neighborhood_development_connected[neighborhood.id] != 0, "developed neighborhoods must reach an arterial trunk")
+					_check(neighborhood.access_node_ids.size() >= 2 and region.neighborhood_development_connected[neighborhood.id] != 0, "developed neighborhoods must reach the arterial network through multiple streets: seed %d, %d cities, district %d" % [seed_value, city_count, neighborhood.id])
 					_check(neighborhood.development_approved and neighborhood.population > 0, "anchor cells must start approved and populated")
 				else:
 					_check(not neighborhood.development_approved and neighborhood.population == 0 and neighborhood.jobs == 0, "other city seed cells stay empty")
@@ -109,6 +110,9 @@ func _check_approval() -> void:
 	var neighborhood = region.neighborhoods[neighborhood_id]
 	_check(region.validation_errors().is_empty(), "approved growth must preserve region invariants")
 	for day in range(35):
+		region.current_day_key += 1
+		if DevelopmentBudget.advance_day(region, region.current_day_key):
+			AccessibilityCalculator.recalculate(region)
 		NeighborhoodDynamics.advance_day(region)
 	_check(neighborhood.households > 0 and neighborhood.jobs > 0, "approved connected land must gain homes and jobs")
 	var homes: int = neighborhood.households
@@ -165,15 +169,20 @@ func _check_new_road_candidates() -> void:
 	var before: int = region.development_candidates.size()
 	DevelopmentPlanner.refresh_candidates(region)
 	_check(region.development_candidates.size() == before, "unfinished roads must not expose candidates")
+	var corridor_id: int = region.next_road_link_id
 	var opened: Dictionary = MultiScaleDayCalculator.advance_day(region, int(preview["open_day_key"]), null, null)
 	region = opened["region"]
-	var opened_link_id: int = region.road_links[-1].id
+	var corridor_links: Array[int] = []
+	for link in region.road_links:
+		if link.corridor_id == corridor_id:
+			corridor_links.append(link.id)
 	var new_candidates := 0
 	for candidate in region.development_candidates:
-		if int(candidate["city_id"]) == city_id and int(candidate["frontage_link_id"]) == opened_link_id:
+		if int(candidate["city_id"]) == city_id and corridor_links.has(int(candidate["frontage_link_id"])):
 			new_candidates += 1
 	_check(new_candidates > 0, "completed connected arterials must create candidates along the route")
-	RoadPlanner.demolish(region, opened_link_id)
+	for link_id in corridor_links:
+		RoadPlanner.demolish(region, link_id)
 	DevelopmentPlanner.refresh_candidates(region)
 	for candidate in region.development_candidates:
 		if int(candidate["city_id"]) == city_id:

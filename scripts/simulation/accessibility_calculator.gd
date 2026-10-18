@@ -1,6 +1,7 @@
 extends RefCounted
 
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
+const UrbanRouting = preload("res://scripts/simulation/urban_routing.gd")
 
 const ROAD_SPEED_KMH = 35.0
 const ACCESS_TIME_DECAY_MINUTES = 30.0
@@ -70,7 +71,16 @@ static func _recalculate_large(region, supplied_costs: PackedVector2Array = Pack
 	region.neighborhood_accessible.resize(region.neighborhoods.size())
 	region.neighborhood_accessible.fill(0)
 	var costs: PackedVector2Array = supplied_costs if not supplied_costs.is_empty() else RoadGraph.free_flow_costs(region)
-	var neighbors: Array = adjacency
+	var neighbors: Array = RoadGraph.strategic_adjacency(region)
+	for city in region.cities:
+		var city_id: int = city["id"]
+		var selected_node: int = region.city_route_node_ids[city_id]
+		if not neighbors[selected_node].is_empty():
+			continue
+		for node in region.road_nodes:
+			if node.city_id == city_id and rooted_nodes[node.id] != 0 and not neighbors[node.id].is_empty():
+				region.city_route_node_ids[city_id] = node.id
+				break
 	var forest: bool = RoadGraph.is_forest(region)
 	var rows: Array = []
 	rows.resize(city_count)
@@ -89,7 +99,8 @@ static func _recalculate_large(region, supplied_costs: PackedVector2Array = Pack
 		region.city_travel_times.append(rows[city_id]["times"])
 		var neighborhood_ids: Array = region.cities[city_id]["neighborhood_ids"]
 		for local_id in range(neighborhood_ids.size()):
-			region.neighborhood_accessible[neighborhood_ids[local_id]] = rows[city_id]["accessible"][local_id]
+			region.neighborhood_accessible[neighborhood_ids[local_id]] = 1 if region.neighborhood_development_connected[neighborhood_ids[local_id]] != 0 else rows[city_id]["accessible"][local_id]
+	UrbanRouting.prepare(region, supplied_costs)
 	_recalculate_large_jobs(region)
 
 
@@ -128,5 +139,5 @@ static func _recalculate_large_jobs(region) -> void:
 		if region.neighborhood_accessible[neighborhood.id] == 0:
 			region.accessibility[neighborhood.id] = 0.0
 			continue
-		var local_minutes: float = neighborhood.position_km.distance_to(region.cities[neighborhood.city_id]["center_km"]) * 1.2
+		var local_minutes: float = UrbanRouting.hub_route(region, neighborhood.id)["minutes"] if neighborhood.street_layout != null else 0.0
 		region.accessibility[neighborhood.id] = city_access[neighborhood.city_id] * exp(-local_minutes / ACCESS_TIME_DECAY_MINUTES)

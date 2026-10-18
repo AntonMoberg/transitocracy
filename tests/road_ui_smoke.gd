@@ -81,7 +81,7 @@ func _run_checks() -> void:
 	main._on_jurisdiction_selected(main.region.region_ids[0])
 	_check(not main.road_tool_selector.disabled and main.map_view.detail_level == "Neighborhood", "selecting a region must retain detailed road tools and map")
 	_check(main.fiscal_label.tooltip_text.contains("State grants"), "regional inspector must disclose grants alongside road upkeep")
-	_check(main.fiscal_label.text.contains("$%s funds" % main._format_count(roundi(main.region.jurisdictions[main.region.region_ids[0]].treasury))), "regional inspector must show its own spendable treasury")
+	_check(main.fiscal_label.text.contains("$%s available" % main._format_count(roundi(main.region.jurisdictions[main.region.region_ids[0]].treasury))), "regional inspector must show its own spendable treasury")
 	main.map_mode_selector.select(1)
 	main._on_map_mode_selected(1)
 	_check(main.map_view.map_mode == "Trips", "full map must retain the trip layer")

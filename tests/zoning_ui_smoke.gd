@@ -52,8 +52,23 @@ func _run() -> void:
 		push_error("Clicking a candidate did not open its zoning approval panel.")
 		quit(1)
 		return
+	var controls = main.development_controls
+	for zone in controls.zone_inputs:
+		controls.zone_inputs[zone].value = 100 if zone == "Residential" else 0
+		controls.density_inputs[zone].select(2)
+	controls._preview()
+	controls.allocation_input.value = 123456
+	if not controls.preview_label.text.contains("homes") or controls.apply_button.disabled == false:
+		push_error("Unapproved zoning must preview capacity without applying edits early.")
+		quit(1)
+		return
 	var initial_count: int = main.region.neighborhoods.size()
+	var snapshot_buffer = preload("res://scripts/simulation/multiscale_week_buffer.gd").new()
+	main.active_snapshot_buffers.append(snapshot_buffer)
 	main.zoning_button.pressed.emit()
+	main.zoning_button.pressed.emit()
+	main._on_jurisdiction_selected(0)
+	snapshot_buffer.mark_snapshot_ready()
 	deadline = Time.get_ticks_msec() + 10000
 	while (main.region.neighborhoods.size() == initial_count or main.road_rebuild_thread != null) and Time.get_ticks_msec() < deadline:
 		await process_frame
@@ -62,8 +77,31 @@ func _run() -> void:
 		quit(1)
 		return
 	var neighborhood_id: int = main.region.development_candidates[candidate_id]["neighborhood_id"]
+	var plan = main.region.neighborhoods[neighborhood_id].development_plan
+	if plan.reserved != 123456 or plan.pending_zoning.get("shares", {}).get("Residential", 0) != 100:
+		push_error("Approval must retain the custom allocation and draft zoning for the next day.")
+		quit(1)
+		return
 	if not main.region.neighborhoods[neighborhood_id].development_approved or main.map_view.region != main.region:
 		push_error("Approved neighborhood or map state was stale after the worker rebuild.")
+		quit(1)
+		return
+	main._on_candidate_selected(candidate_id)
+	controls.allocation_input.value = 100
+	controls.allocation_buttons[0].pressed.emit()
+	deadline = Time.get_ticks_msec() + 10000
+	while plan.reserved == 123456 and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if plan.reserved != 123556:
+		push_error("The top-up control must add the entered amount to the selected plan.")
+		quit(1)
+		return
+	controls.allocation_buttons[1].pressed.emit()
+	deadline = Time.get_ticks_msec() + 10000
+	while plan.reserved == 123556 and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if plan.reserved != 123456:
+		push_error("The return control must release only the entered amount of unused reserves.")
 		quit(1)
 		return
 	main.zoning_button.pressed.emit()
@@ -74,5 +112,5 @@ func _run() -> void:
 		push_error("Withdraw approval did not update the selected neighborhood.")
 		quit(1)
 		return
-	print("Zoning map selection, approval, async rebuild, and withdrawal passed.")
+	print("Zoning selection, draft allocation, deferred approval isolation, async rebuild, and withdrawal passed.")
 	quit(0)

@@ -20,14 +20,14 @@ func _initialize() -> void:
 	var clock = CalendarClock.new()
 	var day_key: int = clock.unix_seconds / 86400
 	var initial_links: int = region.road_links.size()
-	_check(initial_links >= 49 and RoadGraph.is_forest(region) and _all_connected(region), "starter roads must connect forty developed neighborhoods and ten city hubs as a tree")
+	_check(initial_links >= 49 and not RoadGraph.is_forest(region) and _all_connected(region), "starter roads must connect forty developed neighborhoods and ten city hubs with a looped urban network")
 	for city_id in region.starting_city_ids:
 		var hub_id: int = region.city_hub_node_ids[city_id]
 		var arterial_count := 0
 		for link in region.road_links:
 			if link.road_class == "Arterial" and (link.from_node_id == hub_id or link.to_node_id == hub_id):
 				arterial_count += 1
-		_check(arterial_count >= 1 and arterial_count <= 2, "each highway hub must feed only one or two arterial trunks")
+		_check(arterial_count >= 1 and arterial_count <= 4, "each highway hub must connect to the urban arterial grid")
 	var interchange: Dictionary = RoadPlanner.interchange_preview(region, region.neighborhood_gateway_node_ids[0], -1, Vector2.ZERO, day_key)
 	_check(interchange["ok"] and region.jurisdictions[interchange["owner_id"]].kind == "City" and region.jurisdictions[interchange["owner_id"]].treasury >= interchange["cost"], "a starting city must be able to fund a junction interchange")
 	var state_roads := 0
@@ -37,7 +37,11 @@ func _initialize() -> void:
 		state_roads += 1 if link.owner_jurisdiction_id == 0 else 0
 		local_roads += 1 if region.jurisdictions[link.owner_jurisdiction_id].kind in ["City", "Neighborhood"] else 0
 	_check(state_roads > 0 and local_roads > 0, "the generated network must have both state and local road owners")
-	var removed = region.road_links[0]
+	var removed = region.road_links[-1]
+	for link in region.road_links:
+		if link.road_class == "Highway":
+			removed = link
+			break
 	var removed_owner_id: int = removed.owner_jurisdiction_id
 	var funds_before: float = region.jurisdictions[removed_owner_id].treasury
 	var upkeep_before: float = RoadPlanner.calculate_upkeep(region)
@@ -48,7 +52,7 @@ func _initialize() -> void:
 	_check(RoadPlanner.calculate_upkeep(region) < upkeep_before, "demolition must lower road upkeep")
 	AccessibilityCalculator.recalculate(region)
 	_check(region.travel_times[0][1] >= RoadGraph.UNREACHABLE_MINUTES or not _all_connected(region), "demolition must create a disconnected travel component")
-	var reconnect: Dictionary = RoadPlanner.link_preview(region, removed.from_node_id, removed.to_node_id, "Arterial", PackedVector2Array(), day_key)
+	var reconnect: Dictionary = RoadPlanner.link_preview(region, removed.from_node_id, removed.to_node_id, removed.road_class, PackedVector2Array(), day_key)
 	_check(reconnect["ok"] and reconnect["owner_id"] == removed_owner_id, "rebuilding a corridor must assign its original paying jurisdiction")
 	var owner = region.jurisdictions[reconnect["owner_id"]]
 	owner.treasury = float(reconnect["cost"]) - 1.0

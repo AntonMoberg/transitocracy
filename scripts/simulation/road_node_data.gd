@@ -7,6 +7,7 @@ var neighborhood_id: int = -1
 var city_id: int = -1
 var is_interchange: bool = false
 var interchange_owner_jurisdiction_id: int = -1
+var managed_neighborhood_id: int = -1
 
 
 func display_name() -> String:

@@ -1,0 +1,60 @@
+extends RefCounted
+
+
+static func cache(region) -> Dictionary:
+	var data: Dictionary = region.street_spatial_cache
+	var count: int = data.get("link_count", 0)
+	if count > region.road_links.size() or (count > 0 and region.road_links[count - 1].id != data.get("last_link", -1)):
+		data = {}
+		region.street_spatial_cache = data
+	if data.is_empty():
+		data.assign({"nodes": {}, "links": {}, "pairs": {}, "id_indices": {}, "used_nodes": {}, "node_count": 0, "link_count": 0, "last_link": -1})
+	for node_id in range(data["node_count"], region.road_nodes.size()):
+		index_node(data, region.road_nodes[node_id])
+	data["node_count"] = region.road_nodes.size()
+	for link_index in range(data["link_count"], region.road_links.size()):
+		var link = region.road_links[link_index]
+		data["id_indices"][link.id] = link_index
+		data["used_nodes"][link.from_node_id] = true
+		data["used_nodes"][link.to_node_id] = true
+		data["pairs"][pair_key(link.from_node_id, link.to_node_id, link.road_class)] = link_index
+		if link.road_class not in ["Arterial", "Collector"]:
+			continue
+		for segment in range(1, link.points.size()):
+			var low: Vector2 = link.points[segment - 1].min(link.points[segment]) - Vector2.ONE * 0.01
+			var high: Vector2 = link.points[segment - 1].max(link.points[segment]) + Vector2.ONE * 0.01
+			for grid_y in range(floori(low.y), floori(high.y) + 1):
+				for grid_x in range(floori(low.x), floori(high.x) + 1):
+					var cell := Vector2i(grid_x, grid_y)
+					if not data["links"].has(cell):
+						data["links"][cell] = []
+					if not data["links"][cell].has(link_index):
+						data["links"][cell].append(link_index)
+	data["link_count"] = region.road_links.size()
+	data["last_link"] = region.road_links[-1].id if not region.road_links.is_empty() else -1
+	return data
+
+
+static func index_node(data: Dictionary, node) -> void:
+	var cell := Vector2i(floori(node.position_km.x / 0.02), floori(node.position_km.y / 0.02))
+	if not data["nodes"].has(cell):
+		data["nodes"][cell] = []
+	data["nodes"][cell].append(node.id)
+
+
+static func near_nodes(region, point: Vector2) -> Array:
+	var data: Dictionary = cache(region)
+	var cell := Vector2i(floori(point.x / 0.02), floori(point.y / 0.02))
+	var result: Array = []
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			result.append_array(data["nodes"].get(cell + Vector2i(offset_x, offset_y), []))
+	return result
+
+
+static func near_links(region, point: Vector2) -> Array:
+	return cache(region)["links"].get(Vector2i(floori(point.x), floori(point.y)), [])
+
+
+static func pair_key(first: int, last: int, road_class: String) -> String:
+	return "%d:%d:%s" % [mini(first, last), maxi(first, last), road_class]

@@ -78,8 +78,10 @@ func _run() -> void:
 	map.reset_view()
 	map.zoom = 8.0
 	map.pan = -(main.region.neighborhoods[0].position_km - map._world_center()) * map._map_scale() * map.zoom
-	var node_position: Vector2 = map._world_to_screen(main.region.neighborhoods[0].position_km)
+	var node_position: Vector2 = map._world_to_screen(main.region.road_nodes[main.region.neighborhood_gateway_node_ids[0]].position_km)
+	map.set_road_tool("Arterial")
 	_check(map._hit_road_node(node_position) == main.region.neighborhood_gateway_node_ids[0], "road targets must remain selectable after panning and zooming")
+	map.set_road_tool("Inspect")
 	var longest_segment_km := 0.0
 	var street_link_id := -1
 	var street_link_lanes := 0

@@ -2,6 +2,7 @@ extends Control
 
 signal neighborhood_selected(neighborhood_id: int)
 signal candidate_selected(candidate_id: int)
+signal local_street_selected(neighborhood_id: int, edge_id: int)
 signal road_node_clicked(node_id: int)
 signal road_link_clicked(link_id: int, world_position: Vector2)
 signal road_empty_clicked(world_position: Vector2)
@@ -10,6 +11,7 @@ signal jurisdiction_selected(jurisdiction_id: int)
 
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
+const UrbanMapLayer = preload("res://scripts/ui/urban_map_layer.gd")
 const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
@@ -33,6 +35,7 @@ const CITY_COLORS = [
 ]
 
 var region
+var urban_layer = UrbanMapLayer.new()
 var flow_profile
 var next_day_profile
 var traffic_profile
@@ -40,6 +43,7 @@ var map_mode: String = "Roads"
 var detail_level: String = "Neighborhood"
 var road_tool: String = "Inspect"
 var selected_road_link_id: int = -1
+var selected_local_street := Vector2i(-1, -1)
 var preview_start_node: int = -1
 var preview_waypoints: PackedVector2Array = PackedVector2Array()
 var road_preview: Dictionary = {}
@@ -525,6 +529,7 @@ func _draw() -> void:
 	last_draw_stages_us["boundaries"] = Time.get_ticks_usec() - draw_started
 	_draw_cities()
 	last_draw_stages_us["cities"] = Time.get_ticks_usec() - draw_started
+	urban_layer.draw(self)
 	_draw_roads()
 	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
 	if map_mode == "Zoning":
@@ -658,7 +663,7 @@ func _draw_roads() -> void:
 		_draw_aggregate_road_projects()
 		return
 	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, _road_cull_margin(), true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
-	var batch_roads: bool = region.is_large_scale and zoom >= 2.0 and _pixels_per_meter() < 0.3
+	var batch_roads: bool = region.is_large_scale and zoom >= 2.0 and _pixels_per_meter() < 0.025
 	var show_local_roads: bool = _show_local_road_detail()
 	var casing_lines: Dictionary = {}
 	var lane_lines := PackedVector2Array()
@@ -779,6 +784,8 @@ func _draw_active_road(screen_points: PackedVector2Array, lanes: int, road_class
 
 
 func _draw_road_direction_arrows(screen_points: PackedVector2Array, lanes: int, road_class: String) -> void:
+	if road_class == "Collector" and _pixels_per_meter() >= 0.025:
+		return
 	var lane_width: float = _road_lane_width(road_class)
 	var arrow_spacing: float = maxf(180.0, lane_width * 7.0)
 	var bundle_offset: float = _road_median_half_gap(road_class) + _road_lane_spacing(road_class) * float(lanes) * 0.5
@@ -853,16 +860,22 @@ func _pixels_per_meter() -> float:
 
 func _road_lane_spacing(road_class: String) -> float:
 	var lane_meters: float = 3.6 if road_class == "Highway" else 3.25
+	if road_class == "Collector" and _pixels_per_meter() >= 0.025:
+		return maxf(0.9, lane_meters * _pixels_per_meter())
 	return maxf(clampf(2.7 * sqrt(zoom), 2.3, 4.2), lane_meters * _pixels_per_meter())
 
 
 func _road_lane_width(road_class: String) -> float:
 	var lane_meters: float = 3.5 if road_class == "Highway" else 3.15
+	if road_class == "Collector" and _pixels_per_meter() >= 0.025:
+		return maxf(0.8, lane_meters * _pixels_per_meter())
 	return maxf(clampf(1.8 * sqrt(zoom), 1.5, 2.5), lane_meters * _pixels_per_meter())
 
 
 func _road_median_half_gap(road_class: String) -> float:
 	var half_meters: float = 1.5 if road_class == "Highway" else 0.35
+	if road_class == "Collector" and _pixels_per_meter() >= 0.025:
+		return half_meters * _pixels_per_meter()
 	return maxf(clampf(1.6 * sqrt(zoom), 1.4, 2.4), half_meters * _pixels_per_meter())
 
 
@@ -1127,6 +1140,10 @@ func _draw_road_nodes() -> void:
 	var node_indices: Array[int] = _spatial_visible_indices(spatial_road_nodes, 16.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_id in node_indices:
 		var node = region.road_nodes[node_id]
+		if node.managed_neighborhood_id >= 0 and road_tool == "Inspect":
+			continue
+		if road_tool == "Inspect" and _pixels_per_meter() >= 0.03 and not node.is_interchange:
+			continue
 		if not show_local_roads and node.kind != "City" and not node.is_interchange:
 			continue
 		var position_on_screen: Vector2 = _world_to_screen(node.position_km)
@@ -1222,7 +1239,8 @@ func _draw_zoning_candidates() -> void:
 		if int(candidate["frontage_link_id"]) < 0:
 			color = Color("7d888d")
 		color.a = 0.22 if id == selected_candidate_id else 0.10
-		draw_colored_polygon(polygon, color)
+		if not Geometry2D.triangulate_polygon(polygon).is_empty():
+			draw_colored_polygon(polygon, color)
 		polygon.append(polygon[0])
 		draw_polyline(polygon, Color("fff0b0") if id == selected_candidate_id else Color(color.r, color.g, color.b, 0.65), 2.5 if id == selected_candidate_id else 1.0, true)
 
@@ -1541,6 +1559,8 @@ func _draw_neighborhoods() -> void:
 	for neighborhood_index in neighborhood_indices:
 		var neighborhood = region.neighborhoods[neighborhood_index]
 		var screen_position: Vector2 = _world_to_screen(neighborhood.position_km)
+		if neighborhood.street_layout != null and _pixels_per_meter() >= 0.04:
+			continue
 		if not _screen_visible(screen_position, 15.0) or (neighborhood.id % stride != 0 and not neighborhood.initially_developed and neighborhood.id != selected_id and neighborhood.id != hovered_id):
 			continue
 		var radius: float = _node_radius(neighborhood.population)
@@ -2040,6 +2060,12 @@ func _gui_input(event: InputEvent) -> void:
 						elif link_id >= 0:
 							road_link_clicked.emit(link_id, _screen_to_world(mouse_button.position))
 						else:
+							var local_street: Vector2i = urban_layer.hit_street(self, mouse_button.position) if road_tool == "Inspect" else Vector2i(-1, -1)
+							if local_street.x >= 0:
+								local_street_selected.emit(local_street.x, local_street.y)
+								pointer_down = false
+								accept_event()
+								return
 							var road_area_id: int = -1
 							if road_tool == "Inspect":
 								road_area_id = _hit_jurisdiction_border(mouse_button.position)
@@ -2096,6 +2122,10 @@ func _hit_road_node(screen_position: Vector2) -> int:
 	var node_indices: Array[int] = _spatial_near_indices(spatial_road_nodes, screen_position, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_index in node_indices:
 		var node = region.road_nodes[node_index]
+		if node.managed_neighborhood_id >= 0 and road_tool == "Inspect":
+			continue
+		if road_tool == "Inspect" and _pixels_per_meter() >= 0.03 and not node.is_interchange:
+			continue
 		if not show_local_roads and node.kind != "City" and not node.is_interchange:
 			continue
 		var distance: float = screen_position.distance_to(_world_to_screen(node.position_km))

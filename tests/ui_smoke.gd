@@ -30,7 +30,7 @@ func _run_checks() -> void:
 	main.map_view._gui_input(mouse_click)
 	mouse_click.pressed = false
 	main.map_view._gui_input(mouse_click)
-	_check(main.selected_jurisdiction_id == first_region_id and main.map_view.detail_level == "Neighborhood" and main.fiscal_label.text.contains("funds"), "clicking a region label must show its finances without changing the map")
+	_check(main.selected_jurisdiction_id == first_region_id and main.map_view.detail_level == "Neighborhood" and main.fiscal_label.text.contains("available") and main.fiscal_label.text.contains("reserved"), "clicking a region label must show its available and reserved finances without changing the map")
 	_check(main.inspector.text.contains("jurisdiction:%d" % main.region.jurisdictions[first_region_id].child_ids[0]), "the selected region must list its counties")
 	var distant_neighborhood = main.region.neighborhoods[-1]
 	_check(main.map_view._hit_test(main.map_view._world_to_screen(distant_neighborhood.position_km)) == distant_neighborhood.id, "selecting a region must leave distant neighborhoods visible and clickable")

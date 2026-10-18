@@ -2,6 +2,7 @@ extends RefCounted
 
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
+const UrbanRouting = preload("res://scripts/simulation/urban_routing.gd")
 
 const ZONE_TYPES = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 const DENSITY_NAMES = ["Low", "Medium", "High"]
@@ -42,6 +43,19 @@ var neighborhood_spoke_link_ids: Array[int] = []
 var development_candidates: Array = []
 var development_candidate_keys: Dictionary = {}
 var development_candidate_cells: Dictionary = {}
+var urban_route_cache: Dictionary = {}
+var urban_route_revision: int = -1
+var street_spatial_cache: Dictionary = {}
+
+
+func reserved_development_funds(jurisdiction_id: int = 0) -> int:
+	var total := 0
+	for neighborhood in neighborhoods:
+		if neighborhood.development_plan == null:
+			continue
+		if jurisdiction_id == 0 or jurisdictions[jurisdiction_id].neighborhood_ids.has(neighborhood.id):
+			total += neighborhood.development_plan.reserved
+	return total
 
 
 func city_id_at_point(point: Vector2) -> int:
@@ -58,6 +72,9 @@ func development_candidate_at_point(point: Vector2) -> int:
 			for candidate_id in development_candidate_cells.get("%d:%d" % [grid.x + offset_x, grid.y + offset_y], []):
 				if JurisdictionData.polygon_contains_point(point, development_candidates[candidate_id]["polygon"]):
 					return candidate_id
+	for candidate in development_candidates:
+		if JurisdictionData.polygon_contains_point(point, candidate["polygon"]):
+			return candidate["id"]
 	return -1
 
 
@@ -70,8 +87,8 @@ func travel_time_between(origin_id: int, destination_id: int) -> float:
 	var destination = neighborhoods[destination_id]
 	var city_minutes: float = city_travel_times[origin.city_id][destination.city_id]
 	if origin.city_id == destination.city_id:
-		return 5.0 + origin.position_km.distance_to(destination.position_km) * 1.2
-	return city_minutes + origin.position_km.distance_to(cities[origin.city_id]["center_km"]) * 1.2 + destination.position_km.distance_to(cities[destination.city_id]["center_km"]) * 1.2
+		return UrbanRouting.route(self, origin_id, destination_id)["minutes"]
+	return city_minutes + UrbanRouting.hub_route(self, origin_id)["minutes"] + UrbanRouting.hub_route(self, destination_id)["minutes"]
 
 
 func jurisdiction_for_neighborhood(neighborhood_id: int, kind: String):
@@ -135,6 +152,10 @@ func jurisdiction_at_point(point: Vector2) -> int:
 
 
 func road_owner_for_points(points: PackedVector2Array, road_class: String) -> int:
+	if road_class in ["Collector", "Local"]:
+		var city_id: int = city_id_at_point(points[points.size() / 2])
+		if city_id >= 0:
+			return city_jurisdiction_ids[city_id]
 	var owner_id: int = jurisdiction_at_point(points[0])
 	var traveled := 0.0
 	var next_sample := 5.0
@@ -258,6 +279,16 @@ func validation_errors() -> PackedStringArray:
 			errors.append("Job skill counts do not match total jobs in %s." % neighborhood.name)
 		if neighborhood.development_state == "Dormant" and (neighborhood.households != 0 or neighborhood.population != 0 or neighborhood.jobs != 0 or neighborhood.average_household_wealth != 0.0):
 			errors.append("Dormant neighborhood %s has occupied development." % neighborhood.name)
+		var plan = neighborhood.development_plan
+		if plan != null:
+			var layout = neighborhood.street_layout
+			if plan.reserved < 0 or plan.spent < 0 or plan.completed_phase < 0 or plan.completed_phase > 3 or plan.constructing_phase < 0 or plan.constructing_phase > 3:
+				errors.append("Invalid development funding or phase in %s." % neighborhood.name)
+			if layout == null or layout.city_id != neighborhood.city_id or layout.edges.size() != layout.classes.size() or layout.edges.size() != layout.phases.size() or layout.edges.size() != layout.lengths.size():
+				errors.append("Invalid street layout in %s." % neighborhood.name)
+			for node_id in neighborhood.access_node_ids:
+				if node_id < 0 or node_id >= road_nodes.size():
+					errors.append("Invalid street access in %s." % neighborhood.name)
 	for candidate_id in range(development_candidates.size()):
 		var candidate: Dictionary = development_candidates[candidate_id]
 		var city_id: int = candidate.get("city_id", -1)

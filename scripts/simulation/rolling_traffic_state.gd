@@ -16,6 +16,8 @@ var noncar_sales: Dictionary = {}
 var profile
 var departed_cars: float = 0.0
 var completed_cars: float = 0.0
+var local_districts: Dictionary = {}
+var local_clock: int = 0
 
 
 func queued_cars() -> float:

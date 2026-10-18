@@ -3,15 +3,10 @@ extends RefCounted
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
+const UrbanRouting = preload("res://scripts/simulation/urban_routing.gd")
 
 
 static func prepare_routes(region, state, previous_state = null) -> void:
-	var link_indices: Dictionary = {}
-	for index in range(state.link_ids.size()):
-		link_indices[state.link_ids[index]] = index
-	state.spoke_indices.resize(region.neighborhood_spoke_link_ids.size())
-	for neighborhood_id in range(region.neighborhood_spoke_link_ids.size()):
-		state.spoke_indices[neighborhood_id] = int(link_indices.get(region.neighborhood_spoke_link_ids[neighborhood_id], -1))
 	if previous_state != null and previous_state.link_ids == state.link_ids and not previous_state.compact_trees_by_mode.is_empty():
 		state.compact_trees_by_mode = previous_state.compact_trees_by_mode
 		return
@@ -38,32 +33,9 @@ static func prepare_routes(region, state, previous_state = null) -> void:
 		"region_nodes": region_nodes,
 		"city_trees": RoadGraph.group_route_trees(region, costs, city_nodes),
 		"region_trees": RoadGraph.group_route_trees(region, costs, region_nodes),
-		"local_routes": _local_routes(region, costs),
 	}
 
 
-static func _local_routes(region, costs: PackedVector2Array) -> Array:
-	var routes: Array = []
-	routes.resize(region.neighborhoods.size())
-	var neighbors: Array = RoadGraph.adjacency(region)
-	var forest: bool = RoadGraph.is_forest(region)
-	for city in region.cities:
-		var source_node: int = region.city_route_node_ids[city["id"]]
-		if neighbors[source_node].is_empty():
-			continue
-		var tree: Dictionary = RoadGraph._shortest_tree(region, costs, neighbors, source_node, true, false, forest)
-		for neighborhood_id in city["neighborhood_ids"]:
-			var cursor: int = region.neighborhood_gateway_node_ids[neighborhood_id]
-			if tree["distances"][cursor] >= RoadGraph.UNREACHABLE_MINUTES:
-				continue
-			var path: Array[Vector2i] = []
-			while cursor != source_node:
-				var link_index: int = tree["previous_link"][cursor]
-				var prior: int = tree["previous_node"][cursor]
-				path.append(Vector2i(link_index, 0 if region.road_links[link_index].from_node_id == cursor else 1))
-				cursor = prior
-			routes[neighborhood_id] = path
-	return routes
 
 
 static func build_hour(region, profile, state, mode: int, hour: int) -> void:
@@ -127,8 +99,8 @@ static func build_hour(region, profile, state, mode: int, hour: int) -> void:
 		_add_internal_region_load(region, grouped, volumes)
 	_record_stage(state, "internal_load", stage_start)
 	stage_start = Time.get_ticks_usec()
-	_add_neighborhood_spokes(region, profile, state, hour, volumes)
-	_record_stage(state, "local_spokes", stage_start)
+	UrbanRouting.assign_local(region, profile, hour, volumes)
+	_record_stage(state, "city_streets", stage_start)
 	stage_start = Time.get_ticks_usec()
 	state.cached_links = volumes
 	if hour < 24:
@@ -165,28 +137,6 @@ static func _add_internal_region_load(region, grouped: Array[PackedFloat32Array]
 		volumes[index] += Vector2(estimated, estimated)
 
 
-static func _add_neighborhood_spokes(region, profile, state, hour: int, volumes: PackedVector2Array) -> void:
-	var work_origin: PackedFloat32Array = profile.compact_origin_daily[FlowProfile.WORK]
-	var work_destination: PackedFloat32Array = profile.compact_destination_daily[FlowProfile.WORK]
-	var shopping_origin: PackedFloat32Array = profile.compact_origin_daily[FlowProfile.COMMERCIAL]
-	var shopping_destination: PackedFloat32Array = profile.compact_destination_daily[FlowProfile.COMMERCIAL]
-	var social_origin: PackedFloat32Array = profile.compact_origin_daily[FlowProfile.SOCIAL]
-	var social_destination: PackedFloat32Array = profile.compact_destination_daily[FlowProfile.SOCIAL]
-	var work_out: float = 1.0 / 24.0 if hour == 24 else profile.compact_curves[FlowProfile.WORK]["out"][hour]
-	var work_back: float = 1.0 / 24.0 if hour == 24 else profile.compact_curves[FlowProfile.WORK]["back"][hour]
-	var shopping_out: float = 1.0 / 24.0 if hour == 24 else profile.compact_curves[FlowProfile.COMMERCIAL]["out"][hour]
-	var shopping_back: float = 1.0 / 24.0 if hour == 24 else profile.compact_curves[FlowProfile.COMMERCIAL]["back"][hour]
-	var social_out: float = 1.0 / 24.0 if hour == 24 else profile.compact_curves[FlowProfile.SOCIAL]["out"][hour]
-	var social_back: float = 1.0 / 24.0 if hour == 24 else profile.compact_curves[FlowProfile.SOCIAL]["back"][hour]
-	for neighborhood in region.neighborhoods:
-		var neighborhood_id: int = neighborhood.id
-		var path = state.compact_trees_by_mode["local_routes"][neighborhood_id]
-		if path == null:
-			continue
-		var outward: float = 0.5 * ((work_origin[neighborhood_id] * work_out + work_destination[neighborhood_id] * work_back) / 1.2 + (shopping_origin[neighborhood_id] * shopping_out + shopping_destination[neighborhood_id] * shopping_back) / 1.5 + (social_origin[neighborhood_id] * social_out + social_destination[neighborhood_id] * social_back) / 1.8)
-		var inward: float = 0.5 * ((work_destination[neighborhood_id] * work_out + work_origin[neighborhood_id] * work_back) / 1.2 + (shopping_destination[neighborhood_id] * shopping_out + shopping_origin[neighborhood_id] * shopping_back) / 1.5 + (social_destination[neighborhood_id] * social_out + social_origin[neighborhood_id] * social_back) / 1.8)
-		for edge in path:
-			volumes[edge.x] += Vector2(outward, inward) if edge.y == 0 else Vector2(inward, outward)
 
 
 static func _hourly_revenue(region, profile, hour: int) -> Dictionary:

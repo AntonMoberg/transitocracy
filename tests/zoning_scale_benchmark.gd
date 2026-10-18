@@ -76,7 +76,19 @@ func _run() -> void:
 	region.starting_city_ids.clear()
 	for city in region.cities:
 		region.starting_city_ids.append(city["id"])
+	print("Placed %d occupied economic neighborhoods in %.1f ms" % [region.neighborhoods.size(), float(Time.get_ticks_usec() - started) / 1000.0])
 	RoadNetworkGenerator.generate(region)
+	var streeted := 0
+	var fine_edges := 0
+	for neighborhood in region.neighborhoods:
+		if neighborhood.street_layout != null:
+			streeted += 1
+			fine_edges += neighborhood.street_layout.edges.size()
+	print("Built %d street layouts with %d fine edges in %.1f ms" % [streeted, fine_edges, float(Time.get_ticks_usec() - started) / 1000.0])
+	if streeted < target:
+		push_error("Scale fixture must contain at least %d fully streeted neighborhoods, not only economic cells." % target)
+		quit(1)
+		return
 	if refresh_candidates:
 		var refresh_started: int = Time.get_ticks_usec()
 		DevelopmentPlanner.refresh_candidates(region)
@@ -139,6 +151,16 @@ func _run() -> void:
 			await process_frame
 			await process_frame
 			print("Zoning zoom 16 warm draw: %.1f ms" % (float(map.last_draw_us) / 1000.0))
+		map.set_map_mode("Roads")
+		map.zoom = 250.0 / map._map_scale()
+		map.pan = -(region.neighborhoods[0].street_layout.bounds.get_center() - map._world_center()) * map._map_scale() * map.zoom
+		map.queue_redraw()
+		await process_frame
+		await process_frame
+		map.queue_redraw()
+		await process_frame
+		await process_frame
+		print("Street zoom warm draw: %.1f ms, %d local streets, %d buildings" % [float(map.last_draw_us) / 1000.0, map.urban_layer.last_street_count, map.urban_layer.last_building_count])
 	started = Time.get_ticks_usec()
 	var next: Dictionary = MultiScaleDayCalculator.advance_day(snapshot, region.current_day_key + 1, flow, state)
 	var day_ms: float = float(Time.get_ticks_usec() - started) / 1000.0
