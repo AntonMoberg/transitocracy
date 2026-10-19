@@ -26,7 +26,7 @@ func _run() -> void:
 	_check(region.validation_errors().is_empty(), "initial urban state must validate")
 	var developed := 0
 	var local_edges := 0
-	var triangular_buildings := 0
+	var grid_blocks := 0
 	for neighborhood in region.neighborhoods:
 		if not neighborhood.initially_developed:
 			continue
@@ -42,19 +42,22 @@ func _run() -> void:
 			street_edges[Vector2i(mini(int(edge.x), int(edge.y)), maxi(int(edge.x), int(edge.y)))] = neighborhood.street_layout.phases[edge_id]
 		_check(neighborhood.street_layout.blocks.size() > 20, "a neighborhood must contain street-defined blocks")
 		for block in neighborhood.street_layout.blocks:
+			if block.get("demolished", false):
+				continue
 			var nodes: PackedInt32Array = block["nodes"]
-			for index in range(nodes.size()):
-				var first: int = nodes[index]
-				var last: int = nodes[(index + 1) % nodes.size()]
-				_check(street_edges.get(Vector2i(mini(first, last), maxi(first, last)), 4) <= block["phase"], "every block boundary, including diagonals, must be a real street available by its construction phase")
+			if not block.has("redevelopment_day"):
+				if nodes.size() == 4:
+					grid_blocks += 1
+				for index in range(nodes.size()):
+					var first: int = nodes[index]
+					var last: int = nodes[(index + 1) % nodes.size()]
+					_check(street_edges.get(Vector2i(mini(first, last), maxi(first, last)), 4) <= block["phase"], "original block boundaries must be real streets available by their construction phase")
 			var footprints: Array = LayoutGenerator.buildings(block, "Residential", 0)
-			if block["polygon"].size() == 3:
-				triangular_buildings += footprints.size()
 			for footprint in footprints:
 				for vertex in footprint:
 					_check(preload("res://scripts/simulation/jurisdiction_data.gd").polygon_contains_point(vertex, block["polygon"]), "buildings must stay inside their blocks")
 	_check(developed == 40 and local_edges > 4000, "ten starting cities must retain four developed neighborhoods with dense local networks")
-	_check(triangular_buildings > 20, "nonrectangular blocks must support real contained building footprints")
+	_check(grid_blocks > 1000, "starting neighborhoods must keep predominantly square or rectangular street blocks")
 	var original_layout = region.neighborhoods[0].street_layout
 	var repeat: Dictionary = Setup.build(1729, 256, 0.1)
 	_check(repeat["region"].neighborhoods[0].street_layout.nodes == original_layout.nodes, "street generation must reproduce the same seed")
@@ -62,10 +65,11 @@ func _run() -> void:
 	_check(Traffic.fork_for_week(setup["traffic_state"]).local_districts.has(0), "worker forks must retain local traffic")
 	var candidate_id := -1
 	for candidate in region.development_candidates:
-		if candidate["neighborhood_id"] < 0 and candidate["frontage_link_id"] >= 0:
-			candidate_id = candidate["id"]
-			break
-	_check(candidate_id >= 0, "arterials must expose unapproved street-layout plans")
+		if candidate["neighborhood_id"] >= 0 or candidate["frontage_link_id"] < 0 or not candidate["layout_input"].get("edge_frontage", false):
+			continue
+		candidate_id = candidate["id"]
+		break
+	_check(candidate_id >= 0, "arterials must expose one-sided neighborhood plans")
 	if candidate_id < 0:
 		quit(1)
 		return
@@ -92,6 +96,15 @@ func _run() -> void:
 	Budget.advance_day(region, day + 2)
 	Accessibility.recalculate(region)
 	_check(plan.completed_phase == 1 and neighborhood.access_node_ids.size() > 1, "completed first phases must provide street access")
+	var new_collector_count := 0
+	var new_arterial_count := 0
+	for link in region.road_links:
+		if link.managed_neighborhood_id == neighborhood.id:
+			if link.road_class == "Collector":
+				new_collector_count += 1
+			elif link.road_class == "Arterial":
+				new_arterial_count += 1
+	_check(new_collector_count > 0 and new_arterial_count == 0, "the first phase must connect via collectors without constructing a new arterial")
 	for offset in range(80):
 		region.current_day_key += 1
 		Dynamics.advance_day(region)

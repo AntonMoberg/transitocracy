@@ -3,11 +3,13 @@ extends RefCounted
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const UrbanRouting = preload("res://scripts/simulation/urban_routing.gd")
+const RoadLand = preload("res://scripts/simulation/road_land.gd")
 
 const ZONE_TYPES = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 const DENSITY_NAMES = ["Low", "Medium", "High"]
 
 var generation_seed: int = 0
+var dev_mode: bool = false
 var starting_city_ids: Array[int] = []
 var neighborhood_development_connected: PackedByteArray = PackedByteArray()
 var is_large_scale: bool = false
@@ -36,8 +38,10 @@ var accessibility: PackedFloat32Array = PackedFloat32Array()
 var road_nodes: Array = []
 var road_links: Array = []
 var road_projects: Array = []
+var road_reservations: Array[Dictionary] = []
 var neighborhood_gateway_node_ids: Array[int] = []
 var city_hub_node_ids: Array[int] = []
+var city_highway_access_node_ids: Array[int] = []
 var city_route_node_ids: Array[int] = []
 var neighborhood_spoke_link_ids: Array[int] = []
 var development_candidates: Array = []
@@ -66,6 +70,8 @@ func city_id_at_point(point: Vector2) -> int:
 
 
 func development_candidate_at_point(point: Vector2) -> int:
+	if RoadLand.contains_reserved(self, point):
+		return -1
 	var grid: Vector2i = StateGeography.cell_grid_at_point(generation_seed, point)
 	for offset_y in range(-1, 2):
 		for offset_x in range(-1, 2):
@@ -141,6 +147,8 @@ func jurisdiction_at_point(point: Vector2) -> int:
 		var city = jurisdictions[city_id]
 		if city.contains_point(point):
 			for neighborhood_id in city.neighborhood_ids:
+				if neighborhoods[neighborhood_id].street_layout == null:
+					continue
 				var district = jurisdictions[neighborhoods[neighborhood_id].jurisdiction_id]
 				if district.contains_point(point):
 					return district.id
@@ -314,7 +322,7 @@ func validation_errors() -> PackedStringArray:
 		for link in road_links:
 			if link.from_node_id < 0 or link.to_node_id < 0 or link.from_node_id >= road_nodes.size() or link.to_node_id >= road_nodes.size() or link.length_km <= 0.0:
 				errors.append("Invalid road link %d." % link.id)
-			elif link.road_class == "Highway" and (not road_nodes[link.from_node_id].is_interchange or not road_nodes[link.to_node_id].is_interchange):
+			elif link.road_class == "Highway" and (not (road_nodes[link.from_node_id].is_interchange or road_nodes[link.from_node_id].kind == "Highway") or not (road_nodes[link.to_node_id].is_interchange or road_nodes[link.to_node_id].kind == "Highway")):
 				errors.append("Highway %d lacks an interchange." % link.id)
 			if not jurisdictions.is_empty() and (link.owner_jurisdiction_id < 0 or link.owner_jurisdiction_id >= jurisdictions.size()):
 				errors.append("Road %d has an invalid owner." % link.id)

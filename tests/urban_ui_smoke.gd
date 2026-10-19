@@ -2,6 +2,8 @@ extends SceneTree
 
 const UiFixture = preload("res://tests/ui_fixture.gd")
 const Local = preload("res://scripts/simulation/local_street_traffic.gd")
+const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const RoadLand = preload("res://scripts/simulation/road_land.gd")
 
 
 func _initialize() -> void:
@@ -19,12 +21,66 @@ func _run() -> void:
 	var layout = main.region.neighborhoods[0].street_layout
 	map.zoom = 300.0 / map._map_scale()
 	map.pan = -(layout.bounds.get_center() - map._world_center()) * map._map_scale() * map.zoom
+	map.urban_layer.building_cache.clear()
+	map.urban_layer.clearance_cache.clear()
 	map.queue_redraw()
 	await process_frame
 	await process_frame
+	var cold_urban_ms: float = float(map.last_draw_stages_us["urban"] - map.last_draw_stages_us["cities"]) / 1000.0
+	map.queue_redraw()
+	await process_frame
+	await process_frame
+	print("Neighbourhood draw: cold urban %.1f ms; warm total %.1f ms, urban %.1f ms" % [cold_urban_ms, float(map.last_draw_us) / 1000.0, float(map.last_draw_stages_us["urban"] - map.last_draw_stages_us["cities"]) / 1000.0])
 	var errors := PackedStringArray()
+	for placeholder in main.region.neighborhoods:
+		if placeholder.street_layout != null:
+			continue
+		if main.region.jurisdiction_at_point(placeholder.position_km) == placeholder.jurisdiction_id or map._hit_test(map._world_to_screen(placeholder.position_km)) == placeholder.id:
+			errors.append("City seed slots without arterial layouts must not appear as selectable neighbourhoods.")
+		break
 	if map.urban_layer.last_street_count == 0 or map.urban_layer.last_building_count == 0:
 		errors.append("Street zoom must draw actual local roads and occupied building footprints.")
+	var buildings_before: int = map.urban_layer.last_building_count
+	var neighborhood = main.region.neighborhoods[0]
+	var covered := false
+	for block_id in range(layout.blocks.size()):
+		if block_id >= neighborhood.block_zoning.size() or neighborhood.block_zoning[block_id] == 0:
+			continue
+		var block: Dictionary = layout.blocks[block_id]
+		if block["phase"] > neighborhood.development_plan.completed_phase:
+			continue
+		var code: int = neighborhood.block_zoning[block_id] - 1
+		var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][code / 3]
+		var footprints: Array = LayoutGenerator.buildings(block, zone, code % 3, neighborhood.character_profile)
+		for building_id in range(footprints.size()):
+			var appearance: float = float(posmod(int(block["seed"]) + building_id * 7919, 1000)) / 1000.0
+			if appearance > neighborhood.built_fraction:
+				continue
+			var footprint: PackedVector2Array = footprints[building_id]
+			if RoadLand.polygon_intersects_masks(footprint, RoadLand.masks_for_bounds(main.region, layout.bounds)):
+				continue
+			var screen_bounds := Rect2(map._world_to_screen(footprint[0]), Vector2.ZERO)
+			for vertex in footprint:
+				screen_bounds = screen_bounds.expand(map._world_to_screen(vertex))
+			if not screen_bounds.intersects(Rect2(Vector2.ZERO, map.size)):
+				continue
+			var bounds := Rect2(footprint[0], Vector2.ZERO)
+			for vertex in footprint:
+				bounds = bounds.expand(vertex)
+			main.region.road_reservations.append({"bounds": bounds, "masks": [footprint], "road_class": "Highway", "link_id": -1, "project_id": -1})
+			covered = true
+			break
+		if covered:
+			break
+	if covered:
+		map.queue_redraw()
+		await process_frame
+		await process_frame
+		if map.urban_layer.last_building_count >= buildings_before:
+			errors.append("Highway land reservations must clear building footprints beneath them.")
+		main.region.road_reservations.pop_back()
+	else:
+		errors.append("The fixture needs a visible building for the highway clearance check.")
 	var local_edge := -1
 	for edge_id in range(layout.edges.size()):
 		if layout.classes[edge_id] == "Local":

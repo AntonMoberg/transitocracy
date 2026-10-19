@@ -25,6 +25,8 @@ const DevelopmentPlanner = preload("res://scripts/simulation/development_planner
 const DevelopmentBudget = preload("res://scripts/simulation/development_budget.gd")
 const DevelopmentControls = preload("res://scripts/ui/development_controls.gd")
 const RoadTrafficSummary = preload("res://scripts/simulation/road_traffic_summary.gd")
+const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
+const ANIMATED_MAP_REDRAW_INTERVAL_MS = 150
 
 
 var region
@@ -90,6 +92,8 @@ var hourly_trip_label: Label
 var flow_detail_label: Label
 var flow_detail_separator: HSeparator
 var play_button: Button
+var dev_mode_button: Button
+var dev_mode_enabled: bool = false
 var speed_selector: OptionButton
 var mode_selector: OptionButton
 var rate_label: Label
@@ -97,6 +101,12 @@ var purpose_selector: OptionButton
 var inspector: RichTextLabel
 var map_mode_selector: OptionButton
 var road_tool_selector: OptionButton
+var road_draw_selector: OptionButton
+var road_snap_toggle: CheckBox
+var crossing_selector: OptionButton
+var crossing_level_selector: OptionButton
+var crossing_controls: HBoxContainer
+var road_impact_label: Label
 var road_build_button: Button
 var toll_forward_input: SpinBox
 var toll_reverse_input: SpinBox
@@ -107,8 +117,11 @@ var road_status_label: Label
 var pending_road_preview: Dictionary = {}
 var road_start_node: int = -1
 var road_waypoints: PackedVector2Array = PackedVector2Array()
+var road_last_guide_click: bool = false
+var road_last_click_position: Vector2 = Vector2.ZERO
 var selected_road_link_id: int = -1
 var selected_candidate_id: int = -1
+var selected_candidate_key: String = ""
 var zoning_controls: HBoxContainer
 var zoning_button: Button
 var zoning_status_label: Label
@@ -119,6 +132,9 @@ var last_advance_us: int = 0
 var last_sync_us: int = 0
 var last_handoff_breakdown: Dictionary = {}
 var pending_inspector_refresh: bool = false
+var last_live_road_redraw_msec: int = -ANIMATED_MAP_REDRAW_INTERVAL_MS
+var last_trip_redraw_msec: int = -ANIMATED_MAP_REDRAW_INTERVAL_MS
+var trip_redraw_pending: bool = false
 
 
 func _ready() -> void:
@@ -228,6 +244,11 @@ func _process(delta: float) -> void:
 		calendar_clock.visual_offset_seconds = 0.0
 	last_advance_us = Time.get_ticks_usec() - advance_started
 	game_rate_seconds += traffic_state.unix_seconds - game_start
+	if traffic_state.unix_seconds != game_start and map_view.map_mode == "Roads" and map_view.road_traffic_mode == RegionMap.ROAD_LIVE:
+		var now_msec: int = Time.get_ticks_msec()
+		if now_msec - last_live_road_redraw_msec >= ANIMATED_MAP_REDRAW_INTERVAL_MS:
+			map_view.queue_redraw()
+			last_live_road_redraw_msec = now_msec
 	real_rate_seconds += delta
 	if real_rate_seconds >= 1.0:
 		measured_rate = game_rate_seconds / real_rate_seconds
@@ -365,6 +386,12 @@ func _build_interface() -> void:
 	play_button.tooltip_text = "Space: play or pause"
 	play_button.pressed.connect(_on_play_pressed)
 	clock_controls.add_child(play_button)
+	dev_mode_button = Button.new()
+	dev_mode_button.text = "Dev Mode: Off"
+	dev_mode_button.toggle_mode = true
+	dev_mode_button.tooltip_text = "Use unlimited funds for road projects and neighborhood development."
+	dev_mode_button.toggled.connect(_on_dev_mode_toggled)
+	clock_controls.add_child(dev_mode_button)
 	mode_selector = OptionButton.new()
 	for label in ["Second", "Minute", "Hour", "Day"]:
 		mode_selector.add_item(label)
@@ -416,6 +443,17 @@ func _build_interface() -> void:
 		road_tool_selector.add_item(tool_name)
 	road_tool_selector.item_selected.connect(_on_road_tool_selected)
 	road_controls.add_child(road_tool_selector)
+	road_draw_selector = OptionButton.new()
+	for mode_name in [RoadRouteBuilder.STRAIGHT, RoadRouteBuilder.CURVED, RoadRouteBuilder.MULTIPOINT]:
+		road_draw_selector.add_item(mode_name)
+	road_draw_selector.item_selected.connect(_on_road_draw_selected)
+	road_draw_selector.visible = false
+	road_controls.add_child(road_draw_selector)
+	road_snap_toggle = CheckBox.new()
+	road_snap_toggle.text = "Snap 5°"
+	road_snap_toggle.toggled.connect(_on_road_snap_toggled)
+	road_snap_toggle.visible = false
+	road_controls.add_child(road_snap_toggle)
 	road_build_button = Button.new()
 	road_build_button.text = "Build"
 	road_build_button.disabled = true
@@ -430,6 +468,24 @@ func _build_interface() -> void:
 	road_status_label.clip_text = true
 	road_status_label.add_theme_color_override("font_color", Color("a9c8d8"))
 	road_controls.add_child(road_status_label)
+	crossing_controls = HBoxContainer.new()
+	crossing_controls.visible = false
+	layout.add_child(crossing_controls)
+	var crossing_label := Label.new()
+	crossing_label.text = "Highway crossing"
+	crossing_controls.add_child(crossing_label)
+	crossing_selector = OptionButton.new()
+	crossing_selector.item_selected.connect(_on_crossing_selected)
+	crossing_controls.add_child(crossing_selector)
+	crossing_level_selector = OptionButton.new()
+	crossing_level_selector.add_item("Above")
+	crossing_level_selector.add_item("Below")
+	crossing_level_selector.item_selected.connect(_on_crossing_level_selected)
+	crossing_controls.add_child(crossing_level_selector)
+	road_impact_label = Label.new()
+	road_impact_label.clip_text = true
+	road_impact_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	crossing_controls.add_child(road_impact_label)
 	toll_controls = HBoxContainer.new()
 	toll_controls.add_theme_constant_override("separation", 8)
 	layout.add_child(toll_controls)
@@ -488,6 +544,7 @@ func _build_interface() -> void:
 	map_view.road_node_clicked.connect(_on_road_node_clicked)
 	map_view.road_link_clicked.connect(_on_road_link_clicked)
 	map_view.road_empty_clicked.connect(_on_road_empty_clicked)
+	map_view.road_empty_double_clicked.connect(_on_road_empty_double_clicked)
 	map_view.road_cancel_requested.connect(_cancel_road_preview)
 	map_panel.add_child(map_view)
 
@@ -533,6 +590,8 @@ func _build_interface() -> void:
 	development_controls.visible = false
 	development_controls.allocation_requested.connect(_on_development_allocation)
 	development_controls.zoning_requested.connect(_on_development_zoning)
+	development_controls.style_requested.connect(_on_development_style)
+	development_controls.character_requested.connect(_on_development_character)
 	inspector_layout.add_child(development_controls)
 	zoning_controls.visibility_changed.connect(func() -> void: development_controls.visible = zoning_controls.visible)
 	state_tax_controls = HBoxContainer.new()
@@ -602,7 +661,30 @@ func _on_play_pressed() -> void:
 	playing = not playing
 	if playing:
 		inspected_hour = -1
+	elif map_view != null and map_view.map_mode in ["Roads", "Trips"]:
+		map_view.queue_redraw()
+		trip_redraw_pending = false
 	play_button.text = "Pause" if playing else "Play"
+
+
+func _on_dev_mode_toggled(enabled: bool) -> void:
+	dev_mode_enabled = enabled
+	dev_mode_button.text = "Dev Mode: On" if enabled else "Dev Mode: Off"
+	if region == null:
+		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_apply_dev_mode"))
+		return
+	_apply_dev_mode()
+
+
+func _apply_dev_mode() -> void:
+	_discard_pending_day()
+	region.dev_mode = dev_mode_enabled
+	_refresh_region_summary()
+	_update_road_status()
+	_refresh_inspector(false)
+	_queue_next_day(last_dynamics_day_key)
 
 
 func _on_speed_selected(index: int) -> void:
@@ -693,6 +775,7 @@ func _on_jurisdiction_selected(area_id: int) -> void:
 		return
 	map_view.selected_local_street = Vector2i(-1, -1)
 	selected_candidate_id = -1
+	selected_candidate_key = ""
 	zoning_controls.visible = false
 	map_view.set_selected_candidate(-1)
 	selected_jurisdiction_id = area_id
@@ -798,9 +881,10 @@ func _refresh_fiscal_controls() -> void:
 			child_balance += child.treasury
 			stack.append_array(child.child_ids)
 	var totals: Dictionary = region.get_jurisdiction_totals(area.id)
-	fiscal_label.text = "%s  •  $%s available  •  $%s reserved  •  $%s/day net%s" % [area.name, _format_count(roundi(balance)), _format_count(region.reserved_development_funds(area.id)), _format_count(roundi(income + property + sales + fees + grants - upkeep - transfers)), pending_text]
+	var available_text: String = "∞" if region.dev_mode else _format_count(roundi(balance))
+	fiscal_label.text = "%s  •  $%s available  •  $%s reserved  •  $%s/day net%s" % [area.name, available_text, _format_count(region.reserved_development_funds(area.id)), _format_count(roundi(income + property + sales + fees + grants - upkeep - transfers)), pending_text]
 	fiscal_label.tooltip_text = "%s: %s people, %s jobs\nAvailable treasury $%s • Development reserves $%s\nIncome $%s/day  •  Property $%s/day\nSales $%s today  •  Fees $%s today\nState grants $%s/day  •  Transfers $%s/day\nRoad upkeep $%s/day" % [
-		area.name, _format_count(totals["population"]), _format_count(totals["jobs"]), _format_count(roundi(balance)), _format_count(region.reserved_development_funds(area.id)),
+		area.name, _format_count(totals["population"]), _format_count(totals["jobs"]), available_text, _format_count(region.reserved_development_funds(area.id)),
 		_format_count(roundi(income)), _format_count(roundi(property)),
 		_format_count(roundi(sales)), _format_count(roundi(fees)), _format_count(roundi(grants)), _format_count(roundi(transfers)), _format_count(roundi(upkeep))]
 	if area.kind == "Region":
@@ -846,12 +930,18 @@ func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
 	lines.append("Population: %s" % _format_count(totals["population"]))
 	lines.append("Households: %s / %s homes" % [_format_count(totals["households"]), _format_count(totals["housing_capacity"])])
 	lines.append("Jobs: %s / %s capacity" % [_format_count(totals["jobs"]), _format_count(totals["job_capacity"])])
-	if not area.child_ids.is_empty():
-		var child_kind: String = region.jurisdictions[area.child_ids[0]].kind
+	var visible_children: Array[int] = []
+	for child_id in area.child_ids:
+		var child = region.jurisdictions[child_id]
+		if child.kind == "Neighborhood" and (child.neighborhood_ids.is_empty() or region.neighborhoods[child.neighborhood_ids[0]].street_layout == null):
+			continue
+		visible_children.append(child_id)
+	if not visible_children.is_empty():
+		var child_kind: String = region.jurisdictions[visible_children[0]].kind
 		var child_heading: String = {"County": "COUNTIES", "City": "CITIES"}.get(child_kind, child_kind.to_upper() + "S")
 		lines.append("")
 		lines.append("[color=#78c8dc][b]%s · CLICK A NAME TO OPEN[/b][/color]" % child_heading)
-		for child_id in area.child_ids:
+		for child_id in visible_children:
 			var child = region.jurisdictions[child_id]
 			var child_totals: Dictionary = region.get_jurisdiction_totals(child_id)
 			lines.append("[url=jurisdiction:%d][color=#9bd3ef]%s[/color][/url]" % [child_id, child.name])
@@ -906,6 +996,7 @@ func _apply_generated_region(result: Dictionary) -> void:
 	_discard_pending_day()
 	deferred_region_edits.clear()
 	region = result["region"]
+	region.dev_mode = dev_mode_enabled
 	flow_profile = result["flow"]
 	traffic_state = result["traffic_state"]
 	calendar_clock = result["clock"]
@@ -922,9 +1013,11 @@ func _apply_generated_region(result: Dictionary) -> void:
 	next_day_profile = null
 	road_start_node = -1
 	road_waypoints.clear()
+	road_last_guide_click = false
 	pending_road_preview.clear()
 	selected_road_link_id = -1
 	selected_candidate_id = -1
+	selected_candidate_key = ""
 	zoning_controls.visible = false
 	map_view.set_region(region)
 	map_view.selected_local_street = Vector2i(-1, -1)
@@ -962,7 +1055,7 @@ func _refresh_region_summary(prepared_stats: Dictionary = {}) -> void:
 			net += area.daily_net()
 		balance += region.reserved_development_funds()
 	dynamics_label.text = "Today: %+d households / %+d people  •  Total funds $%s  •  Net $%s/day" % [
-		region.last_household_change, region.last_population_change, _format_count(roundi(balance)), _format_count(roundi(net))
+		region.last_household_change, region.last_population_change, "∞" if region.dev_mode else _format_count(roundi(balance)), _format_count(roundi(net))
 	]
 	_refresh_fiscal_controls()
 
@@ -984,6 +1077,7 @@ func _ensure_day_profiles() -> void:
 	var old_data: Dictionary = {"region": region, "flow": flow_profile, "traffic_state": traffic_state, "traffic_profile": traffic_profile}
 	var summary_stats: Dictionary = pending_day_result.get("summary_stats", {})
 	region = pending_day_result["region"]
+	region.dev_mode = dev_mode_enabled
 	flow_profile = pending_day_result["flow"]
 	traffic_state = pending_day_result["traffic_state"]
 	traffic_profile = traffic_state.profile
@@ -1268,7 +1362,14 @@ func _sync_clock_view() -> void:
 	map_view.set_road_traffic_mode(road_display_mode, traffic_state)
 	map_view.set_day_road_fraction(fposmod(calendar_clock.get_display_unix_seconds(), 86400.0) / 86400.0)
 	if map_view.map_mode == "Trips":
-		map_view.set_time(hour, fraction)
+		var trip_time_changed: bool = map_view.selected_hour != hour or not is_equal_approx(map_view.hour_fraction, fraction)
+		map_view.set_time(hour, fraction, false)
+		trip_redraw_pending = trip_redraw_pending or trip_time_changed
+		var now_msec: int = Time.get_ticks_msec()
+		if trip_redraw_pending and (not playing or inspected_hour >= 0 or now_msec - last_trip_redraw_msec >= ANIMATED_MAP_REDRAW_INTERVAL_MS):
+			map_view.queue_redraw()
+			last_trip_redraw_msec = now_msec
+			trip_redraw_pending = false
 	else:
 		map_view.set_time(int(traffic_display_time.x), traffic_display_time.y)
 	map_view.set_recorded_bin(traffic_state.next_bin, traffic_state.first_recorded_bin)
@@ -1325,6 +1426,7 @@ func _update_flow_detail() -> void:
 func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) -> void:
 	map_view.selected_local_street = Vector2i(-1, -1)
 	selected_candidate_id = -1
+	selected_candidate_key = ""
 	zoning_controls.visible = false
 	map_view.set_selected_candidate(-1)
 	selected_road_link_id = -1
@@ -1364,6 +1466,8 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	text_lines.append("")
 	text_lines.append("[color=#78c8dc][b]NEIGHBORHOOD[/b][/color]")
 	text_lines.append("Development: %s" % neighborhood.development_state)
+	if not neighborhood.character_profile.is_empty():
+		text_lines.append("Character: %s" % neighborhood.character_profile)
 	if neighborhood.development_state == "Dormant":
 		text_lines.append("Connect this gateway to an established city to begin growth.")
 	elif neighborhood.development_state == "Disconnected":
@@ -1404,13 +1508,18 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	if region.is_large_scale:
 		# Keep the inspector bounded at state scale. Nearby destinations are the useful ones.
 		for id in region.cities[neighborhood.city_id]["neighborhood_ids"]:
-			travel_order.append(id)
+			if region.neighborhoods[id].street_layout != null:
+				travel_order.append(id)
 		for city in region.cities:
 			if city["id"] != neighborhood.city_id:
-				travel_order.append(city["neighborhood_ids"][0])
+				for id in city["neighborhood_ids"]:
+					if region.neighborhoods[id].street_layout != null:
+						travel_order.append(id)
+						break
 	else:
 		for id in range(region.neighborhoods.size()):
-			travel_order.append(id)
+			if region.neighborhoods[id].street_layout != null:
+				travel_order.append(id)
 	travel_order.sort_custom(func(a: int, b: int) -> bool: return region.travel_time_between(neighborhood_id, a) < region.travel_time_between(neighborhood_id, b))
 	for id in travel_order.slice(0, 24 if region.is_large_scale else travel_order.size()):
 		var minutes: float = region.travel_time_between(neighborhood_id, id)
@@ -1466,6 +1575,7 @@ func _on_candidate_selected(candidate_id: int) -> void:
 	var candidate: Dictionary = region.development_candidates[candidate_id]
 	_on_jurisdiction_selected(region.city_jurisdiction_ids[candidate["city_id"]])
 	selected_candidate_id = candidate_id
+	selected_candidate_key = candidate["key"]
 	map_view.set_selected_candidate(candidate_id)
 	map_view.set_selected(-1)
 	_show_candidate_inspector()
@@ -1494,6 +1604,7 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 	lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(city_id), hectares])
 	lines.append("Distance to city center: %.1f km" % distance)
 	lines.append("Zoning: %s" % ("Approved" if approved else "Awaiting approval"))
+	lines.append("Character: %s%s" % [candidate["character_profile"], " (Auto)" if neighborhood_id < 0 and candidate.get("character_override", "Auto") == "Auto" else ""])
 	if neighborhood_id >= 0:
 		var neighborhood = region.neighborhoods[neighborhood_id]
 		lines.append("Development: %s" % neighborhood.development_state)
@@ -1515,7 +1626,7 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 		for zone in RegionData.ZONE_TYPES:
 			lines.append("%s: %d%% / %s" % [zone, defaults["shares"][zone], RegionData.DENSITY_NAMES[defaults["density"][zone]]])
 	lines.append("")
-	lines.append("Approval reserves city funds. Infrastructure opens in phases before residents arrive. Cancellation returns unspent funds; paid construction finishes and existing buildings remain.")
+	lines.append("Dev Mode funds construction automatically. Paid construction finishes and existing buildings remain." if region.dev_mode else "Approval reserves city funds. Infrastructure opens in phases before residents arrive. Cancellation returns unspent funds; paid construction finishes and existing buildings remain.")
 	var previous_scroll: float = inspector.get_v_scroll_bar().value
 	inspector.text = "\n".join(lines)
 	if reset_scroll:
@@ -1531,6 +1642,33 @@ func _on_zoning_pressed() -> void:
 	var neighborhood_id: int = candidate["neighborhood_id"]
 	var approved: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
 	_apply_candidate_approval(selected_candidate_id, not approved, roundi(development_controls.allocation_input.value), development_controls.shares(), development_controls.densities())
+
+
+func _on_development_style(candidate_id: int, style: String) -> void:
+	if region == null or candidate_id != selected_candidate_id:
+		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_development_style").bind(candidate_id, style))
+		return
+	if not DevelopmentPlanner.set_candidate_style(region, candidate_id, style):
+		zoning_status_label.text = "This street style does not fit the neighbourhood boundary."
+		development_controls.show_plan(region, region.development_candidates[candidate_id], false)
+		return
+	development_controls.show_plan(region, region.development_candidates[candidate_id], false)
+	_show_candidate_inspector(false)
+	map_view.queue_redraw()
+
+
+func _on_development_character(candidate_id: int, profile: String) -> void:
+	if region == null or candidate_id != selected_candidate_id:
+		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_development_character").bind(candidate_id, profile))
+		return
+	if DevelopmentPlanner.set_candidate_character(region, candidate_id, profile):
+		development_controls.show_plan(region, region.development_candidates[candidate_id], false)
+		_show_candidate_inspector(false)
+		map_view.queue_redraw()
 
 
 func _apply_candidate_approval(candidate_id: int, approved: bool, allocation: int, shares: Dictionary, density: Dictionary) -> void:
@@ -1599,6 +1737,7 @@ func _on_map_mode_selected(index: int) -> void:
 		_refresh_toll_controls()
 	if index != 2:
 		selected_candidate_id = -1
+		selected_candidate_key = ""
 		zoning_controls.visible = false
 		map_view.set_selected_candidate(-1)
 	_refresh_inspector(false)
@@ -1610,9 +1749,32 @@ func _on_map_jurisdiction_selected(area_id: int) -> void:
 
 func _on_road_tool_selected(index: int) -> void:
 	map_view.set_road_tool(road_tool_selector.get_item_text(index))
+	road_draw_selector.visible = road_tool_selector.get_item_text(index) in ["Arterial", "Highway"]
+	road_snap_toggle.visible = road_draw_selector.visible
 	road_build_button.text = "Demolish" if road_tool_selector.get_item_text(index) == "Demolish" else "Build"
 	_cancel_road_preview()
 	_update_road_status()
+
+
+func _on_road_draw_selected(_index: int) -> void:
+	_cancel_road_preview()
+	map_view.set_road_input_mode(_road_draw_mode(), road_snap_toggle.button_pressed)
+
+
+func _on_road_snap_toggled(enabled: bool) -> void:
+	map_view.set_road_input_mode(_road_draw_mode(), enabled)
+
+
+func _road_draw_mode() -> String:
+	return road_draw_selector.get_item_text(road_draw_selector.selected)
+
+
+func _road_required_guides() -> int:
+	return 1 if _road_draw_mode() in [RoadRouteBuilder.CURVED, RoadRouteBuilder.MULTIPOINT] else 0
+
+
+func _road_class() -> String:
+	return RoadLinkData.HIGHWAY if road_tool_selector.get_item_text(road_tool_selector.selected) == "Highway" else RoadLinkData.ARTERIAL
 
 
 func _on_road_node_clicked(node_id: int) -> void:
@@ -1623,11 +1785,16 @@ func _on_road_node_clicked(node_id: int) -> void:
 			if road_start_node < 0 or not pending_road_preview.is_empty():
 				road_start_node = node_id
 				road_waypoints.clear()
+				road_last_guide_click = false
 				pending_road_preview.clear()
 				map_view.set_road_preview(road_start_node, road_waypoints, {})
 			else:
-				pending_road_preview = RoadPlanner.link_preview(region, road_start_node, node_id, RoadLinkData.HIGHWAY if tool_name == "Highway" else RoadLinkData.ARTERIAL, road_waypoints, _current_day_key())
+				if road_waypoints.size() < _road_required_guides() or (_road_draw_mode() == RoadRouteBuilder.MULTIPOINT and road_waypoints.size() % 2 == 0):
+					road_status_label.text = "Place a curve guide before choosing the end." if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT else "Add a curve guide before choosing the end."
+					return
+				pending_road_preview = RoadPlanner.link_preview(region, road_start_node, node_id, _road_class(), road_waypoints, _current_day_key(), _road_draw_mode())
 				map_view.set_road_preview(road_start_node, road_waypoints, pending_road_preview)
+			_refresh_crossing_controls()
 		"Interchange":
 			pending_road_preview = RoadPlanner.interchange_preview(region, node_id, -1, Vector2.ZERO, _current_day_key())
 			map_view.set_road_preview(-1, PackedVector2Array(), pending_road_preview)
@@ -1685,9 +1852,92 @@ func _on_road_empty_clicked(world_position: Vector2) -> void:
 		if result["ok"]:
 			_rebuild_after_road_change()
 	elif (tool_name == "Arterial" or tool_name == "Highway") and road_start_node >= 0:
-		road_waypoints.append(world_position)
+		if _road_draw_mode() == RoadRouteBuilder.STRAIGHT or (_road_draw_mode() == RoadRouteBuilder.CURVED and road_waypoints.size() >= 1):
+			road_status_label.text = "Double click empty land to finish the arterial, or choose an existing node."
+			return
+		var point: Vector2 = RoadPlanner.snap_position(region, road_start_node, road_waypoints, world_position, _road_class(), _road_draw_mode()) if road_snap_toggle.button_pressed else world_position
+		var placing_guide: bool = _road_draw_mode() == RoadRouteBuilder.MULTIPOINT and road_waypoints.size() % 2 == 0
+		if placing_guide:
+			var curve_start: Vector2 = road_waypoints[-1] if not road_waypoints.is_empty() else region.road_nodes[road_start_node].position_km
+			if point.distance_to(curve_start) < 0.02:
+				road_status_label.text = "Move the curve guide away from its start."
+				return
+		if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT and road_waypoints.size() % 2 == 1:
+			if RoadPlanner.player_route(region, road_start_node, point, _road_class(), road_waypoints, RoadRouteBuilder.MULTIPOINT).is_empty():
+				road_status_label.text = "This curve cannot be placed here. Adjust its guide or end."
+				return
+		road_waypoints.append(point)
+		road_last_guide_click = placing_guide
+		road_last_click_position = world_position
 		map_view.set_road_preview(road_start_node, road_waypoints, {})
 		_update_road_status()
+
+
+func _on_road_empty_double_clicked(world_position: Vector2) -> void:
+	if road_start_node < 0 or _road_class() != RoadLinkData.ARTERIAL:
+		return
+	var guides: PackedVector2Array = road_waypoints.duplicate()
+	var endpoint: Vector2 = world_position
+	if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT:
+		if road_last_guide_click and guides.size() % 2 == 1 and road_last_click_position.distance_to(world_position) < 0.02:
+			guides.remove_at(guides.size() - 1)
+		if guides.size() % 2 == 0 and not guides.is_empty():
+			endpoint = guides[-1]
+			guides.remove_at(guides.size() - 1)
+		if guides.is_empty() or guides.size() % 2 == 0:
+			road_status_label.text = "Place a curve guide and end before finishing."
+			return
+	elif guides.size() < _road_required_guides():
+		road_status_label.text = "Add %d curve guide%s first." % [_road_required_guides(), "s" if _road_required_guides() != 1 else ""]
+		return
+	if endpoint == world_position and road_snap_toggle.button_pressed:
+		endpoint = RoadPlanner.snap_position(region, road_start_node, guides, world_position, _road_class(), _road_draw_mode())
+	pending_road_preview = RoadPlanner.link_preview(region, road_start_node, -1, RoadLinkData.ARTERIAL, guides, _current_day_key(), _road_draw_mode(), endpoint)
+	map_view.set_road_preview(road_start_node, road_waypoints, pending_road_preview)
+	_refresh_crossing_controls()
+	_update_road_status()
+
+
+func _on_crossing_selected(index: int) -> void:
+	if index < 0 or index >= pending_road_preview.get("crossings", []).size():
+		return
+	crossing_level_selector.select(0 if pending_road_preview["crossings"][index]["above"] else 1)
+
+
+func _on_crossing_level_selected(index: int) -> void:
+	if pending_road_preview.is_empty() or crossing_selector.selected < 0:
+		return
+	var choices: Dictionary = {}
+	for crossing in pending_road_preview["crossings"]:
+		choices[crossing["key"]] = crossing["above"]
+	var selected_crossing: Dictionary = pending_road_preview["crossings"][crossing_selector.selected]
+	choices[selected_crossing["key"]] = index == 0
+	pending_road_preview = RoadPlanner.link_preview(region, pending_road_preview["from"], pending_road_preview["to"], pending_road_preview["road_class"], pending_road_preview["waypoints"], _current_day_key(), pending_road_preview["draw_mode"], pending_road_preview["end_position"], choices)
+	map_view.set_road_preview(road_start_node, road_waypoints, pending_road_preview)
+	_refresh_crossing_controls()
+	_update_road_status()
+
+
+func _refresh_crossing_controls() -> void:
+	var crossings: Array = pending_road_preview.get("crossings", [])
+	var selected_index: int = maxi(0, crossing_selector.selected)
+	crossing_controls.visible = pending_road_preview.get("kind", "") == "New road" and pending_road_preview.get("ok", false)
+	crossing_controls.get_child(0).visible = not crossings.is_empty()
+	crossing_selector.visible = not crossings.is_empty()
+	crossing_level_selector.visible = not crossings.is_empty()
+	crossing_selector.clear()
+	for index in range(crossings.size()):
+		crossing_selector.add_item("Crossing %d" % (index + 1))
+	if not crossings.is_empty():
+		selected_index = mini(selected_index, crossings.size() - 1)
+		crossing_selector.select(selected_index)
+		_on_crossing_selected(selected_index)
+	var impact: Dictionary = pending_road_preview.get("land_impact", {})
+	road_impact_label.text = "Land %.1f ha  •  Construction $%s  •  Structures $%s  •  Acquisition $%s  •  Demolition/site $%s  •  Local streets $%s" % [
+		float(impact.get("land_ha", 0.0)), _format_count(int(pending_road_preview.get("construction_cost", 0))),
+		_format_count(int(pending_road_preview.get("structure_cost", 0))), _format_count(int(impact.get("land_cost", 0))),
+		_format_count(int(impact.get("home_cost", 0)) + int(impact.get("job_cost", 0)) + int(impact.get("site_cost", 0))),
+		_format_count(int(impact.get("street_cost", 0)))]
 
 
 func _on_road_build_pressed() -> void:
@@ -1711,18 +1961,18 @@ func _on_road_build_pressed() -> void:
 		road_status_label.text = result["reason"]
 		return
 	var project = result["project"]
-	_discard_pending_day()
-	_queue_next_day(last_dynamics_day_key)
 	_cancel_road_preview()
-	map_view.queue_redraw()
-	_refresh_region_summary()
+	_rebuild_after_road_change()
 	road_status_label.text = "%s funded. Opens in %d days." % [project.kind, project.days_remaining(_current_day_key())]
 
 
 func _cancel_road_preview() -> void:
 	road_start_node = -1
 	road_waypoints.clear()
+	road_last_guide_click = false
 	pending_road_preview.clear()
+	if crossing_controls != null:
+		crossing_controls.visible = false
 	if map_view != null:
 		map_view.set_road_preview(-1, PackedVector2Array(), {})
 	_update_road_status()
@@ -1732,7 +1982,7 @@ func _update_road_status() -> void:
 	if road_status_label == null or region == null:
 		return
 	var owner_id: int = int(pending_road_preview.get("owner_id", 0))
-	road_build_button.disabled = pending_road_preview.is_empty() or not pending_road_preview.get("ok", false) or region.jurisdictions[owner_id].treasury < float(pending_road_preview.get("cost", 0))
+	road_build_button.disabled = pending_road_preview.is_empty() or not pending_road_preview.get("ok", false) or (not region.dev_mode and region.jurisdictions[owner_id].treasury < float(pending_road_preview.get("cost", 0)))
 	if not pending_road_preview.is_empty():
 		if not pending_road_preview.get("ok", false):
 			road_status_label.text = pending_road_preview["reason"]
@@ -1743,10 +1993,19 @@ func _update_road_status() -> void:
 			return
 		pending_road_preview["open_day_key"] = _current_day_key() + int(pending_road_preview["days"])
 		var opening: Dictionary = Time.get_datetime_dict_from_unix_time(int(pending_road_preview["open_day_key"]) * 86400)
-		road_status_label.text = "$%s  •  %s pays  •  Opens %d/%d/%d  •  %d days%s" % [
-			_format_count(pending_road_preview["cost"]), region.jurisdictions[owner_id].name, opening["year"], opening["month"], opening["day"], pending_road_preview["days"], "  •  Insufficient funds" if road_build_button.disabled else ""]
+		var funding_text: String = "Dev Mode funds" if region.dev_mode else "%s pays" % region.jurisdictions[owner_id].name
+		road_status_label.text = "$%s  •  %s  •  Opens %d/%d/%d  •  %d days%s" % [
+			_format_count(pending_road_preview["cost"]), funding_text, opening["year"], opening["month"], opening["day"], pending_road_preview["days"], "  •  Insufficient funds" if road_build_button.disabled else ""]
 	elif road_start_node >= 0:
-		road_status_label.text = "Click another node to finish; click empty map for a waypoint. Esc cancels."
+		if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT:
+			if _road_class() == RoadLinkData.HIGHWAY:
+				road_status_label.text = "Click a curve guide, then its end. Repeat to continue; choose an interchange to finish. Esc cancels." if road_waypoints.size() % 2 == 0 else "Click the curve end to lock it, or choose an interchange to finish. Esc cancels."
+			else:
+				road_status_label.text = "Click a curve guide, then its end. Repeat to continue; double click an end to finish. Esc cancels." if road_waypoints.size() % 2 == 0 else "Click the curve end to lock it, or double click there to finish. Esc cancels."
+		elif _road_draw_mode() == RoadRouteBuilder.CURVED:
+			road_status_label.text = "Click a curve guide, then choose an interchange to finish. Esc cancels." if _road_class() == RoadLinkData.HIGHWAY else "Click a curve guide, then choose a node or double click empty land to finish. Esc cancels."
+		else:
+			road_status_label.text = "Choose an interchange to finish. Esc cancels." if _road_class() == RoadLinkData.HIGHWAY else "Choose a road node, or double click empty land to finish. Esc cancels."
 	elif road_tool_selector.get_item_text(road_tool_selector.selected) == "Demolish":
 		road_status_label.text = "Click an open road to preview demolition."
 	else:
@@ -1768,6 +2027,7 @@ func _rebuild_after_road_change() -> void:
 			return
 		push_warning("Could not start road rebuild worker; calculating on the main thread.")
 	var previous_state = traffic_state
+	DevelopmentPlanner.refresh_candidates(region)
 	region.city_od_candidates.clear()
 	AccessibilityCalculator.recalculate(region)
 	flow_profile = TripFlowCalculator.build(region)
@@ -1798,6 +2058,7 @@ func _poll_road_rebuild() -> void:
 		return
 	var old_data: Dictionary = {"region": region, "flow": flow_profile, "traffic_state": traffic_state, "traffic_profile": traffic_profile}
 	region = result["region"]
+	region.dev_mode = dev_mode_enabled
 	flow_profile = result["flow"]
 	traffic_state = result["traffic_state"]
 	traffic_profile = traffic_state.profile
@@ -1817,6 +2078,12 @@ func _poll_road_rebuild() -> void:
 
 
 func _refresh_inspector(reset_scroll: bool = true) -> void:
+	if not selected_candidate_key.is_empty():
+		if selected_candidate_id < 0 or selected_candidate_id >= region.development_candidates.size() or region.development_candidates[selected_candidate_id]["key"] != selected_candidate_key:
+			selected_candidate_id = int(region.development_candidate_keys.get(selected_candidate_key, -1))
+			map_view.set_selected_candidate(selected_candidate_id)
+			if selected_candidate_id < 0:
+				selected_candidate_key = ""
 	if selected_candidate_id >= 0 and map_view.map_mode == "Zoning":
 		_show_candidate_inspector(reset_scroll)
 	elif map_view.selected_local_street.x >= 0 and map_view.map_mode == "Roads":

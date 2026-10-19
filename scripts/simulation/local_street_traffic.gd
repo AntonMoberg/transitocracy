@@ -19,7 +19,7 @@ static func prepare(region, state, previous_state = null, unix_seconds: int = -1
 		var portals := PackedInt32Array()
 		for local_id in plan.core_node_ids:
 			portals.append(local_id)
-		var signature: int = hash([plan.completed_phase, portals, plan.installed_multiplier, neighborhood.zone_shares, neighborhood.zone_density])
+		var signature: int = hash([layout.get_instance_id(), plan.completed_phase, portals, plan.installed_multiplier, neighborhood.zone_shares, neighborhood.zone_density])
 		var count: int = layout.edges.size()
 		var queues := PackedVector2Array()
 		if not old.is_empty() and old["queues"].size() == count:
@@ -39,7 +39,7 @@ static func prepare(region, state, previous_state = null, unix_seconds: int = -1
 		enabled.resize(count)
 		served.resize(count)
 		for edge_id in range(count):
-			enabled[edge_id] = 1 if layout.phases[edge_id] <= plan.completed_phase else 0
+			enabled[edge_id] = 1 if layout.phases[edge_id] <= plan.completed_phase and not layout.closed_edges.has(edge_id) else 0
 			costs.append(layout.lengths[edge_id] * 60.0 / RoadGraph.free_speed_kmh(layout.classes[edge_id]))
 		var adjacency: Array = Paths.adjacency(layout.nodes.size(), layout.edges, enabled)
 		var tree_result: Dictionary = Paths.tree(adjacency, costs, portals)
@@ -148,7 +148,7 @@ static func _build_weights(neighborhood, record: Dictionary) -> void:
 	var total_jobs := 0.0
 	for block_id in range(layout.blocks.size()):
 		var block: Dictionary = layout.blocks[block_id]
-		if block["phase"] > neighborhood.development_plan.completed_phase or block["park"]:
+		if block["phase"] > neighborhood.development_plan.completed_phase or block["park"] or block.get("demolished", false):
 			continue
 		var node_id: int = block["nodes"][0]
 		if record["tree"]["distances"][node_id] >= 1000000.0:

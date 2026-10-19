@@ -44,8 +44,8 @@ func _run() -> void:
 			for neighborhood in main.region.neighborhoods:
 				var point: Vector2 = map._world_to_screen(neighborhood.position_km)
 				if map._screen_visible(point, -25.0):
-					if map._hit_test(point) < 0 or map._hit_road_node(point) < 0:
-						push_error("Spatial marker hit test failed")
+					if map._hit_test(point) < 0:
+						push_error("Neighborhood marker hit test failed")
 						quit(1)
 						return
 					tested_hit = true

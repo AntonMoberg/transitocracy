@@ -33,7 +33,7 @@ func _run() -> void:
 				for link in region.road_links:
 					if link.road_class == "Arterial" and (link.from_node_id == hub_id or link.to_node_id == hub_id):
 						feeder_count += 1
-				_check(feeder_count >= 1 and feeder_count <= 4, "every starting highway hub must connect to its urban arterial grid")
+				_check(feeder_count >= 1 and feeder_count <= 4 and region.city_highway_access_node_ids[city_id] != hub_id, "every starting center must reach a separate highway exit")
 			_check(int(region.get_region_totals()["population"]) <= 100000, "launch population must stay below 100,000")
 			var developed := 0
 			for neighborhood in region.neighborhoods:
@@ -49,9 +49,12 @@ func _run() -> void:
 			_check(developed == 40, "four neighborhoods per anchor city must be developed")
 			_check(region.development_candidates.size() > 40, "initial arterials must expose road-frontage candidates")
 			var checked_polygon_edge := false
+			var rectangular_open_plans := 0
 			for candidate in region.development_candidates:
 				_check(StateGeography.polygon_area(candidate["polygon"]) <= 4.001, "candidate area must remain near 2 by 2 km")
 				_check(JurisdictionData.polygon_contains_point(candidate["center_km"], candidate["polygon"]), "candidate center must remain inside its irregular cell")
+				if not candidate["key"].contains("face:") and _rectangular(candidate["polygon"]):
+					rectangular_open_plans += 1
 				if checked_polygon_edge:
 					continue
 				for vertex in candidate["polygon"]:
@@ -61,6 +64,7 @@ func _run() -> void:
 						checked_polygon_edge = true
 						break
 			_check(checked_polygon_edge, "road-frontage polygon edges should be selectable")
+			_check(rectangular_open_plans == 0, "open arterial corridors should create irregular neighbourhood boundaries")
 			_check_administrative_coverage(region)
 	_check_approval()
 	_check_new_road_candidates()
@@ -193,3 +197,14 @@ func _check(condition: bool, description: String) -> void:
 	if not condition:
 		failures += 1
 		push_error(description)
+
+
+func _rectangular(polygon: PackedVector2Array) -> bool:
+	if polygon.size() != 4:
+		return false
+	for index in range(4):
+		var incoming: Vector2 = (polygon[index] - polygon[posmod(index - 1, 4)]).normalized()
+		var outgoing: Vector2 = (polygon[(index + 1) % 4] - polygon[index]).normalized()
+		if absf(incoming.dot(outgoing)) > 0.005:
+			return false
+	return true

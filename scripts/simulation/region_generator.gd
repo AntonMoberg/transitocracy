@@ -245,6 +245,9 @@ static func _populate_capacity_and_occupancy(neighborhood, rng: RandomNumberGene
 			job_capacity += capacity
 	neighborhood.housing_capacity = housing_capacity
 	neighborhood.job_capacity = job_capacity
+	neighborhood.base_housing_capacity = housing_capacity
+	neighborhood.base_job_capacity = job_capacity
+	neighborhood.baseline_developable_area_ha = neighborhood.developable_area_ha
 	neighborhood.households = roundi(housing_capacity * rng.randf_range(0.68, 0.88))
 	neighborhood.population = roundi(neighborhood.households * rng.randf_range(2.0, 2.5))
 	var job_occupancy := rng.randf_range(0.64, 0.86)

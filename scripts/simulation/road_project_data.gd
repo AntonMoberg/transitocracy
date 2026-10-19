@@ -19,6 +19,8 @@ var cost: int = 0
 var start_day_key: int = 0
 var open_day_key: int = 0
 var owner_jurisdiction_id: int = 0
+var crossings: Array[Dictionary] = []
+var redevelopment_impact: Array[Dictionary] = []
 
 
 func days_remaining(day_key: int) -> int:

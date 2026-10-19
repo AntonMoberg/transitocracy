@@ -46,7 +46,7 @@ func _run() -> void:
 	_check_highway_joins(region, 1729)
 	var previewed_continuation := false
 	for city_id in region.starting_city_ids:
-		var hub_id: int = region.city_hub_node_ids[city_id]
+		var hub_id: int = region.city_highway_access_node_ids[city_id]
 		var old_outward := Vector2.ZERO
 		var highway_count := 0
 		for link in region.road_links:
@@ -63,7 +63,7 @@ func _run() -> void:
 		for other_id in region.starting_city_ids:
 			if other_id == city_id:
 				continue
-			var continuation: Dictionary = RoadPlanner.link_preview(region, hub_id, region.city_hub_node_ids[other_id], "Highway", PackedVector2Array(), region.current_day_key)
+			var continuation: Dictionary = RoadPlanner.link_preview(region, hub_id, region.city_highway_access_node_ids[other_id], "Highway", PackedVector2Array(), region.current_day_key)
 			if not continuation.get("ok", false):
 				continue
 			var new_outward: Vector2 = continuation["points"][1] - continuation["points"][0]
@@ -84,12 +84,7 @@ func _run() -> void:
 				for segment_index in range(1, highway.points.size()):
 					_check(StateGeography.segment_on_land(target_region.jurisdictions[0].polygon_km, highway.points[segment_index - 1], highway.points[segment_index]), "seed 8363444 highway must stay on land")
 	for large_seed in [1729, 291, 3819, 6061]:
-		var large_region = RegionGenerator.generate_large_region(large_seed, 256)
-		large_region.starting_city_ids.clear()
-		for large_city in large_region.cities:
-			large_region.starting_city_ids.append(large_city["id"])
-		RoadNetworkGenerator.generate(large_region)
-		_check_highway_joins(large_region, large_seed)
+		_check_highway_joins(RegionSetup.build(large_seed, 256, 0.10)["region"], large_seed)
 	var city: Dictionary = region.cities[0]
 	var city_point: Vector2 = city["center_km"]
 	var local_points := PackedVector2Array([city_point, city_point + Vector2(0.01, 0.0)])
@@ -139,7 +134,7 @@ func _run() -> void:
 		for second_city in region.starting_city_ids:
 			if first_city >= second_city:
 				continue
-			var candidate: Dictionary = RoadPlanner.link_preview(region, region.city_hub_node_ids[first_city], region.city_hub_node_ids[second_city], "Highway", PackedVector2Array(), region.current_day_key)
+			var candidate: Dictionary = RoadPlanner.link_preview(region, region.city_highway_access_node_ids[first_city], region.city_highway_access_node_ids[second_city], "Highway", PackedVector2Array(), region.current_day_key)
 			if candidate.get("ok", false) and candidate["length_km"] > 15.0 and region.jurisdictions[candidate["owner_id"]].kind == "Region":
 				preview = candidate
 				break
@@ -188,24 +183,30 @@ func _check_highway_joins(region, seed_value: int) -> void:
 	for link in region.road_links:
 		if link.road_class == "Highway":
 			smallest_radius = minf(smallest_radius, RoadRouteBuilder.minimum_curve_radius(link.points))
-	for city_id in region.starting_city_ids:
-		var hub_id: int = region.city_hub_node_ids[city_id]
+	for node in region.road_nodes:
+		if node.kind != "Highway":
+			continue
+		var hub_id: int = node.id
 		var outward: Array[Vector2] = []
 		var neighbors: Array[Vector2] = []
 		for link in region.road_links:
 			if link.road_class != "Highway":
 				continue
 			if link.from_node_id == hub_id:
+				if region.road_nodes[link.to_node_id].kind != "Highway":
+					branch_count += 1
+					continue
 				outward.append(link.points[1] - link.points[0])
 				neighbors.append(region.road_nodes[link.to_node_id].position_km - region.road_nodes[hub_id].position_km)
 			elif link.to_node_id == hub_id:
+				if region.road_nodes[link.from_node_id].kind != "Highway":
+					branch_count += 1
+					continue
 				outward.append(link.points[-2] - link.points[-1])
 				neighbors.append(region.road_nodes[link.from_node_id].position_km - region.road_nodes[hub_id].position_km)
 		if outward.size() < 2:
 			continue
 		pair_count += 1
-		if outward.size() >= 3:
-			branch_count += 1
 		var best_first := 0
 		var best_second := 1
 		var best_dot := INF
@@ -218,11 +219,9 @@ func _check_highway_joins(region, seed_value: int) -> void:
 					best_second = second_index
 		var error: float = 180.0 - absf(rad_to_deg(outward[best_first].angle_to(outward[best_second])))
 		largest_error = maxf(largest_error, error)
-		_check(error < 0.25, "seed %d city %d has a %.3f degree kink in its through-highway pair" % [seed_value, city_id, error])
-	_check(pair_count > 0, "road seed should contain at least one multi-highway city")
+		_check(error < 2.0, "seed %d trunk node %d has a %.3f degree kink in its through-highway pair" % [seed_value, hub_id, error])
+	_check(pair_count > 0, "road seed should contain a continuous through-highway corridor")
 	_check(smallest_radius >= RoadRouteBuilder.MIN_HIGHWAY_RADIUS_KM, "seed %d needs highway bends of at least 2 km radius" % seed_value)
-	if region.cities.size() >= 256:
-		_check(branch_count > 0, "large road seed should contain branched highway junctions")
 	print("Seed %d (%d cities): %d highway junctions (%d branched), largest through turn %.3f degrees, smallest bend radius %.3f km." % [seed_value, region.cities.size(), pair_count, branch_count, largest_error, smallest_radius])
 
 

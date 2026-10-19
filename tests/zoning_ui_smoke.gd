@@ -1,5 +1,7 @@
 extends SceneTree
 
+const RoadLand = preload("res://scripts/simulation/road_land.gd")
+
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -20,7 +22,7 @@ func _run() -> void:
 	main._on_map_mode_selected(2)
 	var candidate_id := -1
 	for candidate in main.region.development_candidates:
-		if int(candidate["neighborhood_id"]) < 0 and int(candidate["frontage_link_id"]) >= 0:
+		if int(candidate["neighborhood_id"]) < 0 and int(candidate["frontage_link_id"]) >= 0 and not RoadLand.contains_reserved(main.region, candidate["center_km"]):
 			candidate_id = candidate["id"]
 			break
 	if candidate_id < 0:
@@ -53,6 +55,25 @@ func _run() -> void:
 		quit(1)
 		return
 	var controls = main.development_controls
+	var initial_polygon: PackedVector2Array = candidate["polygon"].duplicate()
+	controls.style_input.select(1)
+	controls.style_input.item_selected.emit(1)
+	deadline = Time.get_ticks_msec() + 10000
+	while main.region.development_candidates[candidate_id]["layout"].interior_style != "Organic" and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if main.region.development_candidates[candidate_id]["layout"].interior_style != "Organic" or main.region.development_candidates[candidate_id]["polygon"] != initial_polygon:
+		push_error("Organic approval choice must change the street preview without moving the neighbourhood boundary.")
+		quit(1)
+		return
+	controls.character_input.select(4)
+	controls.character_input.item_selected.emit(4)
+	deadline = Time.get_ticks_msec() + 10000
+	while main.region.development_candidates[candidate_id].get("character_override", "Auto") != "Large Plot" and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if main.region.development_candidates[candidate_id]["character_profile"] != "Large Plot":
+		push_error("Neighbourhood character selection must update the zoning preview.")
+		quit(1)
+		return
 	for zone in controls.zone_inputs:
 		controls.zone_inputs[zone].value = 100 if zone == "Residential" else 0
 		controls.density_inputs[zone].select(2)
@@ -78,6 +99,14 @@ func _run() -> void:
 		return
 	var neighborhood_id: int = main.region.development_candidates[candidate_id]["neighborhood_id"]
 	var plan = main.region.neighborhoods[neighborhood_id].development_plan
+	if main.region.neighborhoods[neighborhood_id].street_layout.interior_style != "Organic":
+		push_error("Approval must retain the chosen interior street style.")
+		quit(1)
+		return
+	if main.region.neighborhoods[neighborhood_id].character_profile != "Large Plot":
+		push_error("Approval and worker rebuild must retain the chosen character.")
+		quit(1)
+		return
 	if plan.reserved != 123456 or plan.pending_zoning.get("shares", {}).get("Residential", 0) != 100:
 		push_error("Approval must retain the custom allocation and draft zoning for the next day.")
 		quit(1)

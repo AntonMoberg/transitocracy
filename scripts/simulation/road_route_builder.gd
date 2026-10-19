@@ -4,6 +4,102 @@ const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 const MIN_HIGHWAY_RADIUS_KM = 2.0
 const HIGHWAY_TANGENT_STRAIGHT_KM = 0.1
+const AUTO = "Auto"
+const STRAIGHT = "Straight"
+const CURVED = "Curved"
+const MULTIPOINT = "Multi-point Curved"
+
+
+static func build_player(region, first: Vector2, last: Vector2, road_class: String, anchors: PackedVector2Array, mode: String, start_tangent: Vector2 = Vector2.ZERO, end_tangent: Vector2 = Vector2.ZERO) -> PackedVector2Array:
+	if mode not in [STRAIGHT, CURVED, MULTIPOINT]:
+		return PackedVector2Array()
+	if mode == STRAIGHT and not anchors.is_empty():
+		return PackedVector2Array()
+	if mode == CURVED and anchors.size() != 1:
+		return PackedVector2Array()
+	if mode == MULTIPOINT and (anchors.is_empty() or anchors.size() % 2 == 0):
+		return PackedVector2Array()
+	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
+	if mode == STRAIGHT:
+		return PackedVector2Array([first, last]) if first.distance_to(last) >= 0.1 and StateGeography.segment_on_land(land, first, last) else PackedVector2Array()
+	if mode == MULTIPOINT:
+		var route := PackedVector2Array([first])
+		var curve_start: Vector2 = first
+		var incoming_tangent: Vector2 = start_tangent
+		for index in range(0, anchors.size(), 2):
+			var curve_end: Vector2 = anchors[index + 1] if index + 1 < anchors.size() else last
+			var curve_end_tangent: Vector2 = end_tangent if index + 1 == anchors.size() else Vector2.ZERO
+			var segment: PackedVector2Array = build_player(region, curve_start, curve_end, road_class, PackedVector2Array([anchors[index]]), CURVED, incoming_tangent, curve_end_tangent)
+			if segment.is_empty():
+				return PackedVector2Array()
+			for point_index in range(1, segment.size()):
+				route.append(segment[point_index])
+			incoming_tangent = (curve_end - anchors[index]).normalized()
+			curve_start = curve_end
+		return route
+	if first.distance_to(last) < 0.1:
+		return PackedVector2Array()
+	var start: Vector2 = first
+	var finish: Vector2 = last
+	var result := PackedVector2Array([first])
+	var lead: float = minf(HIGHWAY_TANGENT_STRAIGHT_KM, first.distance_to(last) * 0.1)
+	if start_tangent != Vector2.ZERO:
+		start += start_tangent.normalized() * lead
+		if not StateGeography.segment_on_land(land, first, start):
+			return PackedVector2Array()
+		result.append(start)
+	if end_tangent != Vector2.ZERO:
+		finish -= end_tangent.normalized() * lead
+	var joins := PackedVector2Array([start, finish])
+	var tangents := PackedVector2Array()
+	var handles := PackedFloat32Array()
+	for index in range(joins.size()):
+		var direction := Vector2.ZERO
+		if index == 0:
+			direction = start_tangent if start_tangent != Vector2.ZERO else anchors[0] - joins[0]
+		elif index == joins.size() - 1:
+			direction = end_tangent if end_tangent != Vector2.ZERO else joins[index] - anchors[-1]
+		else:
+			direction = anchors[index] - anchors[index - 1]
+		if direction.length_squared() < 0.000001:
+			direction = joins[mini(index + 1, joins.size() - 1)] - joins[maxi(0, index - 1)]
+		tangents.append(direction.normalized())
+		var before: float = joins[index - 1].distance_to(joins[index]) if index > 0 else INF
+		var after: float = joins[index].distance_to(joins[index + 1]) if index < joins.size() - 1 else INF
+		handles.append(minf(before, after) * 0.35)
+	for index in range(joins.size() - 1):
+		var segment_start: Vector2 = joins[index]
+		var segment_end: Vector2 = joins[index + 1]
+		var control_a: Vector2 = segment_start + tangents[index] * handles[index]
+		var control_b: Vector2 = segment_end - tangents[index + 1] * handles[index + 1]
+		if not _sample_player_curve(land, result, segment_start, control_a, control_b, segment_end, 0):
+			return PackedVector2Array()
+	if end_tangent != Vector2.ZERO:
+		if not StateGeography.segment_on_land(land, result[-1], last):
+			return PackedVector2Array()
+		result.append(last)
+	return result
+
+
+static func _sample_player_curve(land: PackedVector2Array, result: PackedVector2Array, first: Vector2, control_a: Vector2, control_b: Vector2, last: Vector2, depth: int) -> bool:
+	var chord_error: float = maxf(control_a.distance_to(Geometry2D.get_closest_point_to_segment(control_a, first, last)), control_b.distance_to(Geometry2D.get_closest_point_to_segment(control_b, first, last)))
+	var entry: Vector2 = control_a - first
+	var exit: Vector2 = last - control_b
+	var turn: float = absf(entry.angle_to(exit)) if entry.length_squared() > 0.00000001 and exit.length_squared() > 0.00000001 else 0.0
+	if depth >= 14 or (chord_error <= 0.00005 and turn <= deg_to_rad(2.0)):
+		if result[-1].distance_to(last) < 0.0000001:
+			return true
+		if not StateGeography.segment_on_land(land, result[-1], last):
+			return false
+		result.append(last)
+		return true
+	var first_a: Vector2 = (first + control_a) * 0.5
+	var middle: Vector2 = (control_a + control_b) * 0.5
+	var last_b: Vector2 = (control_b + last) * 0.5
+	var first_middle: Vector2 = (first_a + middle) * 0.5
+	var last_middle: Vector2 = (middle + last_b) * 0.5
+	var midpoint: Vector2 = (first_middle + last_middle) * 0.5
+	return _sample_player_curve(land, result, first, first_a, first_middle, midpoint, depth + 1) and _sample_player_curve(land, result, midpoint, last_middle, last_b, last, depth + 1)
 
 
 static func build(region, from_id: int, to_id: int, road_class: String, waypoints: PackedVector2Array = PackedVector2Array(), from_tangent: Vector2 = Vector2.ZERO, to_tangent: Vector2 = Vector2.ZERO, land_certified: bool = false) -> PackedVector2Array:

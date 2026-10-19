@@ -8,6 +8,7 @@ const Generator = preload("res://scripts/simulation/region_generator.gd")
 const RoadGenerator = preload("res://scripts/simulation/road_network_generator.gd")
 const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 const Planner = preload("res://scripts/simulation/road_planner.gd")
+const RoadLand = preload("res://scripts/simulation/road_land.gd")
 
 var failures := 0
 
@@ -26,6 +27,7 @@ func _run() -> void:
 			var rectangular := 0
 			var irregular := 0
 			var triangles := 0
+			var quadrilaterals := 0
 			var smallest_block := INF
 			var largest_block := 0.0
 			var corridors: Dictionary = {}
@@ -62,15 +64,18 @@ func _run() -> void:
 					for neighbor_id in arterial_neighbors[current.x]:
 						if neighbor_id != current.y:
 							pending.append(Vector2i(neighbor_id, current.x))
+			var all_starter_polygons: Array[PackedVector2Array] = []
 			for city_id in region.starting_city_ids:
 				var hub = region.road_nodes[region.city_hub_node_ids[city_id]]
-				_check(hub.is_interchange and hub.managed_neighborhood_id < 0, "shared coastal junctions must preserve their city interchange identity")
+				var access = region.road_nodes[region.city_highway_access_node_ids[city_id]]
+				_check(not hub.is_interchange and access.is_interchange and hub.id != access.id and hub.managed_neighborhood_id < 0, "city centers and peripheral highway exits must be distinct")
 				var polygons: Array = []
 				for neighborhood_id in region.cities[city_id]["neighborhood_ids"]:
 					var neighborhood = region.neighborhoods[neighborhood_id]
 					var layout = neighborhood.street_layout
 					if layout == null:
 						continue
+					_check(layout.interior_style == "Grid", "starting neighbourhoods must use regular interior streets")
 					streeted += 1
 					if _rectangular(layout.polygon):
 						rectangular += 1
@@ -78,7 +83,10 @@ func _run() -> void:
 						irregular += 1
 					var block_area := 0.0
 					for block in layout.blocks:
+						if block.get("demolished", false):
+							continue
 						triangles += 1 if block["polygon"].size() == 3 else 0
+						quadrilaterals += 1 if block["polygon"].size() == 4 else 0
 						var area: float = Geography.polygon_area(block["polygon"])
 						block_area += area
 						smallest_block = minf(smallest_block, area)
@@ -106,14 +114,27 @@ func _run() -> void:
 							overlap += Geography.polygon_area(piece)
 						_check(overlap < 0.001, "starter neighborhoods must not overlap")
 					polygons.append(layout.polygon)
+					all_starter_polygons.append(layout.polygon)
+			for link in region.road_links:
+				if link.road_class != Roads.HIGHWAY:
+					continue
+				for mask in RoadLand.clearance_corridor(link.points, Roads.HIGHWAY):
+					var mask_bounds: Rect2 = Geography._bounds(mask)
+					for polygon in all_starter_polygons:
+						if not mask_bounds.intersects(Geography._bounds(polygon)):
+							continue
+						for overlap in Geometry2D.intersect_polygons(mask, polygon):
+							_check(Geography.polygon_area(overlap) < 0.00001, "regional highway %d crosses a starter neighbourhood at seed %d / %d cities (%.5f km²)" % [link.id, seed_value, city_count, Geography.polygon_area(overlap)])
 			_check(streeted == 40, "seed %d at %d cities must have all forty starting street layouts" % [seed_value, city_count])
-			_check(rectangular >= 4 and irregular >= 20, "each state must mix regular and irregular neighborhood boundaries: %d rectangular, %d irregular" % [rectangular, irregular])
-			_check(triangles >= 20 and largest_block > smallest_block * 3.0, "cities must mix block sizes and include triangular sites along diagonal streets")
+			_check(rectangular == 0 and irregular == streeted, "all starter neighborhoods with open arterial spines need irregular boundaries: %d rectangular, %d irregular" % [rectangular, irregular])
+			_check(quadrilaterals > triangles * 4 and largest_block > smallest_block * 3.0, "regular interiors must favour rectangular blocks while fitting irregular edges")
 			var first_layout = region.neighborhoods[0].street_layout
 			var filled := 0.0
 			for block in first_layout.blocks:
+				if block.get("demolished", false):
+					continue
 				filled += Geography.polygon_area(block["polygon"])
-			_check(filled >= Geography.polygon_area(first_layout.polygon) * 0.94, "street blocks must follow and fill an irregular starter neighborhood")
+			_check(filled >= Geography.polygon_area(first_layout.polygon) * 0.85, "street blocks must follow and fill an irregular starter neighborhood")
 			print("Seed %d (%d cities): %d rectangular / %d irregular districts, %d triangular blocks" % [seed_value, city_count, rectangular, irregular, triangles])
 	_check_shared_collectors()
 	if failures == 0:

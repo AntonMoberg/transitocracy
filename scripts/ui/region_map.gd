@@ -6,12 +6,16 @@ signal local_street_selected(neighborhood_id: int, edge_id: int)
 signal road_node_clicked(node_id: int)
 signal road_link_clicked(link_id: int, world_position: Vector2)
 signal road_empty_clicked(world_position: Vector2)
+signal road_empty_double_clicked(world_position: Vector2)
 signal road_cancel_requested
 signal jurisdiction_selected(jurisdiction_id: int)
 
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const UrbanMapLayer = preload("res://scripts/ui/urban_map_layer.gd")
+const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
+const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
 const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
@@ -42,10 +46,13 @@ var traffic_profile
 var map_mode: String = "Roads"
 var detail_level: String = "Neighborhood"
 var road_tool: String = "Inspect"
+var road_draw_mode: String = RoadRouteBuilder.STRAIGHT
+var road_snap_enabled: bool = false
 var selected_road_link_id: int = -1
 var selected_local_street := Vector2i(-1, -1)
 var preview_start_node: int = -1
 var preview_waypoints: PackedVector2Array = PackedVector2Array()
+var preview_frozen_route: PackedVector2Array = PackedVector2Array()
 var road_preview: Dictionary = {}
 var hover_world_position: Vector2 = Vector2.ZERO
 var selected_hour: int = 8
@@ -76,6 +83,7 @@ var zoom: float = 1.0
 var pan: Vector2 = Vector2.ZERO
 var pointer_down: bool = false
 var pointer_dragged: bool = false
+var pointer_double_clicked: bool = false
 var pointer_start: Vector2 = Vector2.ZERO
 var last_draw_us: int = 0
 var last_draw_stages_us: Dictionary = {}
@@ -94,6 +102,7 @@ var spatial_strategic_links: Array[int] = []
 var spatial_local_road_km: float = 0.0
 var road_arrow_mesh: ArrayMesh
 var neighborhood_batches: Array[MultiMesh] = []
+var district_fill_meshes: Dictionary = {}
 var jurisdiction_layout_key: String = ""
 var jurisdiction_label_rects: Dictionary = {}
 var last_drawn_neighborhood_borders: int = 0
@@ -126,6 +135,7 @@ func _ready() -> void:
 
 func set_region(new_region) -> void:
 	region = new_region
+	district_fill_meshes.clear()
 	spatial_region = null
 	road_history_previous_hour = -1
 	road_history_current_hour = -1
@@ -138,6 +148,10 @@ func set_region(new_region) -> void:
 	selected_id = -1
 	selected_candidate_id = -1
 	selected_road_link_id = -1
+	preview_start_node = -1
+	preview_waypoints.clear()
+	preview_frozen_route.clear()
+	road_preview.clear()
 	hovered_id = -1
 	zoom = 1.0
 	pan = Vector2.ZERO
@@ -185,10 +199,17 @@ func set_road_tool(tool_name: String) -> void:
 	queue_redraw()
 
 
+func set_road_input_mode(mode: String, snap_enabled: bool) -> void:
+	road_draw_mode = mode
+	road_snap_enabled = snap_enabled
+	queue_redraw()
+
+
 func set_road_preview(start_node: int, waypoints: PackedVector2Array, preview: Dictionary) -> void:
 	preview_start_node = start_node
 	preview_waypoints = waypoints
 	road_preview = preview
+	preview_frozen_route = RoadPlanner.frozen_multi_curve(region, start_node, waypoints, road_tool) if region != null and start_node >= 0 and road_draw_mode == RoadRouteBuilder.MULTIPOINT else PackedVector2Array()
 	queue_redraw()
 
 
@@ -201,14 +222,15 @@ func set_hour(hour: int) -> void:
 	set_time(hour, 0.0)
 
 
-func set_time(hour: int, fraction: float) -> void:
+func set_time(hour: int, fraction: float, request_redraw: bool = true) -> void:
 	var next_hour: int = clampi(hour, 0, 23)
 	var next_fraction: float = clampf(fraction, 0.0, 1.0)
 	if selected_hour == next_hour and is_equal_approx(hour_fraction, next_fraction):
 		return
 	selected_hour = next_hour
 	hour_fraction = next_fraction
-	queue_redraw()
+	if request_redraw and (map_mode == "Trips" or map_mode == "Roads" and road_traffic_mode == ROAD_HISTORY):
+		queue_redraw()
 
 
 func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
@@ -216,7 +238,8 @@ func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
 		return
 	recorded_bin = bin_index
 	first_recorded_bin = first_bin
-	queue_redraw()
+	if map_mode == "Roads" and road_traffic_mode == ROAD_HISTORY:
+		queue_redraw()
 
 
 func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: float) -> void:
@@ -226,7 +249,8 @@ func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: fl
 	road_history_previous_hour = previous_hour
 	road_history_current_hour = current_hour
 	road_history_fraction = next_fraction
-	queue_redraw()
+	if map_mode == "Roads" and road_traffic_mode == ROAD_HOUR:
+		queue_redraw()
 
 
 func set_road_traffic_mode(mode: int, state) -> void:
@@ -264,7 +288,8 @@ func set_day_road_fraction(fraction: float) -> void:
 	if is_equal_approx(day_road_fraction, next_fraction):
 		return
 	day_road_fraction = next_fraction
-	queue_redraw()
+	if map_mode == "Roads" and road_traffic_mode == ROAD_DAY:
+		queue_redraw()
 
 
 func set_purpose(purpose: String) -> void:
@@ -530,8 +555,11 @@ func _draw() -> void:
 	_draw_cities()
 	last_draw_stages_us["cities"] = Time.get_ticks_usec() - draw_started
 	urban_layer.draw(self)
+	last_draw_stages_us["urban"] = Time.get_ticks_usec() - draw_started
+	_draw_road_corridors()
 	_draw_roads()
 	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
+	_draw_grade_crossings()
 	if map_mode == "Zoning":
 		_draw_zoning_candidates()
 	if map_mode == "Trips":
@@ -898,8 +926,31 @@ func _road_cull_margin() -> float:
 
 
 func _draw_dashed_polyline(screen_points: PackedVector2Array, color: Color, width: float) -> void:
+	var dash_length: float = maxf(10.0, width * 1.5)
+	var period: float = dash_length + maxf(6.0, width * 0.6)
+	var traveled := 0.0
+	var viewport := Rect2(Vector2.ZERO, size).grow(width)
 	for index in range(1, screen_points.size()):
-		_draw_flow_stroke(screen_points[index - 1], screen_points[index], color, width, true)
+		var first: Vector2 = screen_points[index - 1]
+		var last: Vector2 = screen_points[index]
+		var length: float = first.distance_to(last)
+		if length < 0.0001:
+			continue
+		var direction: Vector2 = (last - first) / length
+		var cursor := 0.0
+		while cursor < length - 0.0001:
+			var phase: float = fposmod(traveled + cursor, period)
+			var drawing: bool = phase < dash_length
+			var run: float = minf(length - cursor, (dash_length - phase) if drawing else (period - phase))
+			if run < 0.0001:
+				run = minf(length - cursor, 0.0001)
+			if drawing:
+				var start_point: Vector2 = first + direction * cursor
+				var end_point: Vector2 = first + direction * (cursor + run)
+				if viewport.intersects(Rect2(start_point, Vector2.ZERO).expand(end_point)):
+					draw_line(start_point, end_point, color, width, true)
+			cursor += run
+		traveled += length
 
 
 func _draw_dashed_road(screen_points: PackedVector2Array, lanes: int, road_class: String, color: Color) -> void:
@@ -1169,17 +1220,93 @@ func _draw_road_preview() -> void:
 	if preview_start_node >= 0:
 		var points: PackedVector2Array = road_preview["points"] if road_preview.get("ok", false) else PackedVector2Array([region.road_nodes[preview_start_node].position_km])
 		if not road_preview.get("ok", false):
-			for point in preview_waypoints:
-				points.append(point)
-			points.append(hover_world_position)
+			var multi_curve: bool = road_draw_mode == RoadRouteBuilder.MULTIPOINT
+			var awaiting_guide: bool = multi_curve and preview_waypoints.size() % 2 == 0
+			if multi_curve and not preview_frozen_route.is_empty():
+				points = preview_frozen_route
+			var snap_guide: Dictionary = RoadPlanner.snap_guidance(region, preview_start_node, preview_waypoints, hover_world_position, road_tool, road_draw_mode) if road_snap_enabled else {}
+			var ghost: Vector2 = snap_guide.get("position", hover_world_position)
+			var guide_origin: Vector2 = preview_waypoints[-1] if not preview_waypoints.is_empty() else region.road_nodes[preview_start_node].position_km
+			var ray: Vector2 = ghost - guide_origin
+			if ray.length() > 0.001:
+				draw_dashed_line(_world_to_screen(guide_origin), _world_to_screen(ghost), Color("a9d4ee", 0.6), 1.0, 6.0, true)
+				if road_snap_enabled:
+					if snap_guide["has_reference"] and (preview_waypoints.is_empty() or multi_curve):
+						var reference: Vector2 = snap_guide["reference"]
+						draw_line(_world_to_screen(guide_origin - reference * 0.12), _world_to_screen(guide_origin), Color("85d4ff"), 3.0, true)
+					draw_string(get_theme_default_font(), _world_to_screen(ghost) + Vector2(10, -8), snap_guide["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d1eaff"))
+			if (multi_curve and not awaiting_guide) or (road_draw_mode == RoadRouteBuilder.CURVED and not preview_waypoints.is_empty()):
+				var curved: PackedVector2Array = RoadPlanner.multi_curve_preview(region, preview_start_node, preview_waypoints, ghost, road_tool, preview_frozen_route) if multi_curve else RoadPlanner.player_route(region, preview_start_node, ghost, road_tool, preview_waypoints, road_draw_mode)
+				if not curved.is_empty():
+					points = curved
+				elif not multi_curve:
+					points.append_array(preview_waypoints)
+					points.append(ghost)
+			elif not multi_curve:
+				points.append(ghost)
 		var preview_lanes: int = int(road_preview.get("lanes", 2 if road_tool == "Highway" else 1))
 		_draw_dashed_road(_screen_polyline(points), preview_lanes, road_tool, Color("f4dd91"))
+		if road_draw_mode == RoadRouteBuilder.MULTIPOINT and not road_preview.get("ok", false):
+			for index in range(preview_waypoints.size()):
+				draw_circle(_world_to_screen(preview_waypoints[index]), 4.0, Color("85d4ff") if index % 2 == 0 else Color("f4dd91"))
+		for crossing in road_preview.get("crossings", []):
+			var screen_point: Vector2 = _world_to_screen(crossing["point"])
+			draw_circle(screen_point, 8.0, Color("20354b"))
+			draw_string(get_theme_default_font(), screen_point + Vector2(12, 4), "Above" if crossing["above"] else "Below", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("fff0b0"))
 	elif road_preview.get("ok", false) and road_preview.get("kind", "") == "Highway exit":
 		draw_arc(_world_to_screen(road_preview["position_km"]), 10.0, 0.0, TAU, 24, Color("f4dd91"), 2.0, true)
 	elif road_preview.get("ok", false) and road_preview.get("kind", "") == "Demolish":
 		for link in region.road_links:
 			if link.id == road_preview["target_link_id"]:
 				_draw_dashed_road(_screen_polyline(link.points), link.lanes_per_direction, link.road_class, Color("f06464"))
+
+
+func _draw_road_corridors() -> void:
+	if _pixels_per_meter() < 0.025:
+		return
+	for reservation in region.road_reservations:
+		var bounds: Rect2 = reservation["bounds"]
+		if not _screen_visible(_world_to_screen(bounds.get_center()), maxf(bounds.size.x, bounds.size.y) * _map_scale() * zoom + 20.0):
+			continue
+		for mask in reservation["masks"]:
+			if mask.size() >= 3:
+				draw_colored_polygon(_screen_polyline(mask), Color("24343b", 0.98))
+
+
+func _draw_grade_crossings() -> void:
+	if zoom < 2.0:
+		return
+	for link in region.road_links:
+		for crossing in link.crossings:
+			var over_link = link if crossing["above"] else _link_near_crossing(int(crossing["link_id"]), crossing["point"], link.id)
+			if over_link == null:
+				continue
+			var point: Vector2 = crossing["point"]
+			var direction := Vector2.RIGHT
+			var best := INF
+			for segment in range(1, over_link.points.size()):
+				var nearest: Vector2 = Geometry2D.get_closest_point_to_segment(point, over_link.points[segment - 1], over_link.points[segment])
+				if nearest.distance_squared_to(point) < best:
+					best = nearest.distance_squared_to(point)
+					direction = (over_link.points[segment] - over_link.points[segment - 1]).normalized()
+			var center: Vector2 = _world_to_screen(point)
+			if not _screen_visible(center, 30.0):
+				continue
+			var half_span: float = maxf(9.0, 0.055 * _map_scale() * zoom)
+			var offset: Vector2 = direction * half_span
+			var width: float = maxf(6.0, _road_outer_half_width(over_link.lanes_per_direction, over_link.road_class) * 2.0)
+			draw_line(center - offset, center + offset, Color("101e29"), width + 4.0, true)
+			draw_line(center - offset, center + offset, Color("b8cad3"), width, true)
+
+
+func _link_near_crossing(preferred_id: int, point: Vector2, excluded_id: int):
+	for link in region.road_links:
+		if link.id == preferred_id and RoadPlanner._point_near_polyline(link.points, point):
+			return link
+	for link in region.road_links:
+		if link.id != excluded_id and RoadPlanner._point_near_polyline(link.points, point):
+			return link
+	return null
 
 
 func _draw_road_legend() -> void:
@@ -1297,13 +1424,35 @@ func _draw_neighborhood_boundaries() -> void:
 			continue
 		for neighborhood_id in city.neighborhood_ids:
 			var neighborhood = region.neighborhoods[neighborhood_id]
+			if neighborhood.street_layout == null:
+				continue
 			var district = region.jurisdictions[neighborhood.jurisdiction_id]
 			if not _jurisdiction_screen_rect(district).intersects(Rect2(Vector2.ZERO, size)):
 				continue
 			var inhabited: bool = neighborhood.population > 0 or neighborhood.jobs > 0
 			var color: Color = CITY_COLORS[neighborhood.city_id % CITY_COLORS.size()]
 			color.a = 0.18 if inhabited else 0.035 + float(neighborhood_id % 3) * 0.015
-			draw_colored_polygon(_screen_polyline(district.polygon_km), color)
+			var layout_id: int = neighborhood.street_layout.get_instance_id()
+			if not district_fill_meshes.has(layout_id):
+				if district_fill_meshes.size() > 1024:
+					for old_id in district_fill_meshes.keys().slice(0, 128):
+						district_fill_meshes.erase(old_id)
+				var vertices := PackedVector2Array()
+				for vertex_id in LayoutGenerator.triangulate(district.polygon_km):
+					vertices.append(district.polygon_km[vertex_id] - district.bounds_km.position)
+				var mesh: ArrayMesh
+				if not vertices.is_empty():
+					var arrays: Array = []
+					arrays.resize(Mesh.ARRAY_MAX)
+					arrays[Mesh.ARRAY_VERTEX] = vertices
+					mesh = ArrayMesh.new()
+					mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+				district_fill_meshes[layout_id] = mesh
+			var cached_mesh: ArrayMesh = district_fill_meshes[layout_id]
+			if cached_mesh != null:
+				var scale: float = _map_scale() * zoom
+				var transform := Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), _world_to_screen(district.bounds_km.position))
+				draw_mesh(cached_mesh, null, transform, color)
 			_draw_polygon_border(district, Color("c1d0b3", 0.65 if inhabited else 0.34), 1.0)
 			last_drawn_neighborhood_borders += 1
 
@@ -1534,6 +1683,8 @@ func _draw_neighborhoods() -> void:
 			return
 		for neighborhood_index in neighborhood_indices:
 			var neighborhood = region.neighborhoods[neighborhood_index]
+			if neighborhood.street_layout == null:
+				continue
 			var point: Vector2 = _world_to_screen(neighborhood.position_km)
 			if _screen_visible(point, 3.0) and (not region.is_large_scale or zoom >= 2.0):
 				draw_circle(point, 2.5, Color("718899", 0.45))
@@ -1548,6 +1699,8 @@ func _draw_neighborhoods() -> void:
 	var visible_count := 0
 	for neighborhood_index in neighborhood_indices:
 		var neighborhood = region.neighborhoods[neighborhood_index]
+		if neighborhood.street_layout == null:
+			continue
 		if _screen_visible(_world_to_screen(neighborhood.position_km), 15.0):
 			visible_count += 1
 	var detail_limit: float = 256.0 if zoom < 3.0 else 512.0
@@ -1558,6 +1711,8 @@ func _draw_neighborhoods() -> void:
 		_ensure_neighborhood_batches(mini(visible_count + 2, 1024))
 	for neighborhood_index in neighborhood_indices:
 		var neighborhood = region.neighborhoods[neighborhood_index]
+		if neighborhood.street_layout == null:
+			continue
 		var screen_position: Vector2 = _world_to_screen(neighborhood.position_km)
 		if neighborhood.street_layout != null and _pixels_per_meter() >= 0.04:
 			continue
@@ -2032,6 +2187,7 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 		elif mouse_button.button_index == MOUSE_BUTTON_LEFT:
 			if mouse_button.pressed:
+				pointer_double_clicked = mouse_button.double_click
 				hover_world_position = _screen_to_world(mouse_button.position)
 				pointer_down = true
 				pointer_dragged = false
@@ -2074,7 +2230,10 @@ func _gui_input(event: InputEvent) -> void:
 							if road_area_id >= 0:
 								jurisdiction_selected.emit(road_area_id)
 							else:
-								road_empty_clicked.emit(_screen_to_world(mouse_button.position))
+								if pointer_double_clicked and road_tool in ["Arterial", "Highway"]:
+									road_empty_double_clicked.emit(_screen_to_world(mouse_button.position))
+								else:
+									road_empty_clicked.emit(_screen_to_world(mouse_button.position))
 					else:
 						var neighborhood_id: int = _hit_test(mouse_button.position)
 						if neighborhood_id >= 0:
@@ -2086,6 +2245,7 @@ func _gui_input(event: InputEvent) -> void:
 							if trip_area_id >= 0:
 								jurisdiction_selected.emit(trip_area_id)
 				pointer_down = false
+				pointer_double_clicked = false
 			accept_event()
 		elif mouse_button.button_index == MOUSE_BUTTON_RIGHT and mouse_button.pressed and map_mode == "Roads":
 			road_cancel_requested.emit()
@@ -2177,6 +2337,8 @@ func _hit_test(screen_position: Vector2) -> int:
 	var neighborhood_indices: Array[int] = _spatial_near_indices(spatial_neighborhoods, screen_position, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.neighborhoods.size())
 	for neighborhood_index in neighborhood_indices:
 		var neighborhood = region.neighborhoods[neighborhood_index]
+		if neighborhood.street_layout == null:
+			continue
 		var distance: float = screen_position.distance_to(_world_to_screen(neighborhood.position_km))
 		if distance <= _node_radius(neighborhood.population) + 7.0 and distance < closest_distance:
 			closest_id = neighborhood.id

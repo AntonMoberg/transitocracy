@@ -20,6 +20,7 @@ var toll_reverse: float = 0.0
 var corridor_id: int = -1
 var corridor_start_km: float = 0.0
 var managed_neighborhood_id: int = -1
+var crossings: Array[Dictionary] = []
 
 
 static func construction_cost(road_class: String) -> float:

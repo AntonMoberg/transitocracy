@@ -30,6 +30,7 @@ static func _copy_large_region(source):
 	# a neighborhood, so worker snapshots need their own copies of those lists.
 	var copy = RegionData.new()
 	copy.generation_seed = source.generation_seed
+	copy.dev_mode = source.dev_mode
 	copy.starting_city_ids = source.starting_city_ids.duplicate()
 	copy.neighborhood_development_connected = source.neighborhood_development_connected.duplicate()
 	copy.is_large_scale = true
@@ -52,11 +53,13 @@ static func _copy_large_region(source):
 	copy.road_geometry_revision = source.road_geometry_revision
 	copy.neighborhood_gateway_node_ids = source.neighborhood_gateway_node_ids.duplicate()
 	copy.city_hub_node_ids = source.city_hub_node_ids.duplicate()
+	copy.city_highway_access_node_ids = source.city_highway_access_node_ids.duplicate()
 	copy.city_route_node_ids = source.city_route_node_ids.duplicate()
 	copy.neighborhood_spoke_link_ids = source.neighborhood_spoke_link_ids.duplicate()
 	copy.development_candidates = source.development_candidates.duplicate(true)
 	copy.development_candidate_keys = source.development_candidate_keys.duplicate(true)
 	copy.development_candidate_cells = source.development_candidate_cells.duplicate(true)
+	copy.road_reservations = source.road_reservations.duplicate(true)
 	copy.urban_route_revision = source.urban_route_revision
 	for city_id in source.urban_route_cache:
 		var graph: Dictionary = source.urban_route_cache[city_id].duplicate()
@@ -75,6 +78,9 @@ static func _copy_large_region(source):
 		n.cell_grid = original.cell_grid
 		n.land_area_ha = original.land_area_ha
 		n.developable_area_ha = original.developable_area_ha
+		n.baseline_developable_area_ha = original.baseline_developable_area_ha
+		n.base_housing_capacity = original.base_housing_capacity
+		n.base_job_capacity = original.base_job_capacity
 		n.zone_shares = original.zone_shares.duplicate()
 		n.zone_density = original.zone_density.duplicate()
 		n.housing_capacity = original.housing_capacity
@@ -109,6 +115,7 @@ static func _copy_large_region(source):
 		n.access_minutes = original.access_minutes
 		n.built_fraction = original.built_fraction
 		n.block_zoning = original.block_zoning.duplicate()
+		n.character_profile = original.character_profile
 		copy.neighborhoods.append(n)
 	for original in source.jurisdictions:
 		var j = JurisdictionData.new()
@@ -165,8 +172,11 @@ static func _copy_large_region(source):
 		link.corridor_id = original.corridor_id
 		link.corridor_start_km = original.corridor_start_km
 		link.managed_neighborhood_id = original.managed_neighborhood_id
+		link.crossings = original.crossings.duplicate(true)
 		copy.road_links.append(link)
-	copy.road_projects = source.road_projects.duplicate()
+	copy.road_projects = []
+	for original in source.road_projects:
+		copy.road_projects.append(_copy_value(original))
 	return copy
 
 

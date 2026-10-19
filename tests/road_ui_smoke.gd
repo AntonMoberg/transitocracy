@@ -1,6 +1,7 @@
 extends SceneTree
 
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const UiFixture = preload("res://tests/ui_fixture.gd")
 
 var failures := 0
@@ -34,6 +35,13 @@ func _run_checks() -> void:
 		label_rects.append(label_rect)
 	_check(main.road_tool_selector.get_item_text(6) == "Demolish", "road tools must include demolition")
 	_check(not main.road_tool_selector.disabled and main.map_view.detail_level == "Neighborhood", "full map must enable detailed road tools")
+	main.road_tool_selector.select(1)
+	main._on_road_tool_selected(1)
+	main.road_draw_selector.select(2)
+	main._on_road_draw_selected(2)
+	main.road_snap_toggle.button_pressed = true
+	main._on_road_snap_toggled(true)
+	_check(main.road_draw_selector.visible and main.map_view.road_draw_mode == "Multi-point Curved" and main.map_view.road_snap_enabled, "road mode and snap controls must reach the map")
 	var forward_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 0, 0, "Highway")
 	var reverse_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 1, 0, "Highway")
 	_check(forward_side.y > 0.0 and reverse_side.y < 0.0, "road directions must keep right-hand lanes")
@@ -47,6 +55,48 @@ func _run_checks() -> void:
 		if not preview.is_empty():
 			break
 	_check(not preview.is_empty(), "an affordable arterial project must be available")
+	var multi_case: Dictionary = {}
+	for candidate_link in main.region.road_links:
+		if candidate_link.road_class != "Arterial" or candidate_link.points.size() < 2:
+			continue
+		for end_index in range(2):
+			var start_id: int = candidate_link.from_node_id if end_index == 0 else candidate_link.to_node_id
+			var start: Vector2 = main.region.road_nodes[start_id].position_km
+			var outward: Vector2 = (candidate_link.points[0] - candidate_link.points[1]).normalized() if end_index == 0 else (candidate_link.points[-1] - candidate_link.points[-2]).normalized()
+			for side in [-1.0, 1.0]:
+				var offset: Vector2 = outward.orthogonal() * 0.06 * side
+				var guide_one: Vector2 = start + outward * 0.25 + offset
+				var end_one: Vector2 = start + outward * 0.5
+				var guide_two: Vector2 = start + outward * 0.75 + offset
+				var end_two: Vector2 = start + outward
+				var anchors := PackedVector2Array([guide_one, end_one, guide_two])
+				if RoadPlanner.player_route(main.region, start_id, end_two, "Arterial", anchors, RoadRouteBuilder.MULTIPOINT).is_empty():
+					continue
+				var multi_preview: Dictionary = RoadPlanner.link_preview(main.region, start_id, -1, "Arterial", anchors, main._current_day_key(), RoadRouteBuilder.MULTIPOINT, end_two)
+				if multi_preview.get("ok", false):
+					multi_case = {"start_id": start_id, "guide_one": guide_one, "end_one": end_one, "guide_two": guide_two, "end_two": end_two, "preview": multi_preview}
+					break
+			if not multi_case.is_empty():
+				break
+		if not multi_case.is_empty():
+			break
+	_check(not multi_case.is_empty(), "a valid two-curve arterial should be available for the road tool")
+	if not multi_case.is_empty():
+		main.road_snap_toggle.button_pressed = false
+		main._on_road_snap_toggled(false)
+		main._on_road_node_clicked(multi_case["start_id"])
+		main._on_road_empty_clicked(multi_case["guide_one"])
+		_check(main.road_waypoints.size() == 1, "the first multi-curve click should place a guide")
+		main._on_road_empty_clicked(multi_case["end_one"])
+		var frozen_first: PackedVector2Array = main.map_view.preview_frozen_route.duplicate()
+		_check(main.road_waypoints.size() == 2 and frozen_first.size() > 2, "the second click should lock the first curve")
+		main._on_road_empty_clicked(multi_case["guide_two"])
+		_check(main.road_waypoints.size() == 3 and main.map_view.preview_frozen_route == frozen_first, "the next guide should leave the first curve fixed")
+		main._on_road_empty_clicked(multi_case["end_two"])
+		_check(main.road_waypoints.size() == 4 and main.map_view.preview_frozen_route.size() > frozen_first.size(), "the fourth click should lock a second curve")
+		main._on_road_empty_double_clicked(multi_case["end_two"])
+		_check(main.pending_road_preview.get("ok", false) and main.pending_road_preview.get("points", PackedVector2Array()) == multi_case["preview"]["points"], "double clicking a locked end should finish the two-curve route")
+		main._cancel_road_preview()
 	var initial_links: int = main.region.road_links.size()
 	if not preview.is_empty():
 		main.pending_road_preview = preview.duplicate(true)

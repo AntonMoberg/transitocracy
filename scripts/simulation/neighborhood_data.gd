@@ -10,6 +10,9 @@ var position_km: Vector2 = Vector2.ZERO
 var cell_grid: Vector2i = Vector2i.ZERO
 var land_area_ha: float = 0.0
 var developable_area_ha: float = 0.0
+var baseline_developable_area_ha: float = 0.0
+var base_housing_capacity: int = 0
+var base_job_capacity: int = 0
 
 # Percent of developable land and density level (0=low, 1=medium, 2=high).
 var zone_shares: Dictionary = {}
@@ -49,3 +52,4 @@ var access_node_ids: Array[int] = []
 var access_minutes: float = 0.0
 var built_fraction: float = 0.0
 var block_zoning: PackedInt32Array = PackedInt32Array()
+var character_profile: String = ""

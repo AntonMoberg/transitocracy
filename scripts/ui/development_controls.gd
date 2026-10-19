@@ -2,6 +2,8 @@ extends VBoxContainer
 
 signal allocation_requested(neighborhood_id: int, amount: int)
 signal zoning_requested(neighborhood_id: int, shares: Dictionary, density: Dictionary)
+signal style_requested(candidate_id: int, style: String)
+signal character_requested(candidate_id: int, profile: String)
 
 const Budget = preload("res://scripts/simulation/development_budget.gd")
 const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
@@ -10,7 +12,10 @@ const Plan = preload("res://scripts/simulation/development_plan.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
 const ZoneTypes = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 var neighborhood_id: int = -1
+var candidate_id: int = -1
 var neighborhood = null
+var style_input: OptionButton
+var character_input: OptionButton
 var allocation_input: SpinBox
 var preview_label: Label
 var zone_inputs: Dictionary = {}
@@ -22,6 +27,7 @@ var apply_button: Button
 var suppress_preview: bool = false
 var custom_allocation: bool = false
 var allocation_buttons: Array[Button] = []
+var dev_mode: bool = false
 
 
 func _ready() -> void:
@@ -69,6 +75,30 @@ func _ready() -> void:
 	var heading := Label.new()
 	heading.text = "Land-use shares and density"
 	zoning_grid.add_child(heading)
+	var style_row := HBoxContainer.new()
+	var style_label := Label.new()
+	style_label.text = "Interior streets"
+	style_row.add_child(style_label)
+	style_input = OptionButton.new()
+	style_input.add_item("Grid")
+	style_input.add_item("Organic")
+	style_input.item_selected.connect(func(index: int) -> void:
+		if not suppress_preview and candidate_id >= 0:
+			style_requested.emit(candidate_id, style_input.get_item_text(index)))
+	style_row.add_child(style_input)
+	zoning_grid.add_child(style_row)
+	var character_row := HBoxContainer.new()
+	var character_label := Label.new()
+	character_label.text = "Neighbourhood character"
+	character_row.add_child(character_label)
+	character_input = OptionButton.new()
+	for profile in ["Auto", "Fine Grain", "Courtyard", "Garden", "Large Plot"]:
+		character_input.add_item(profile)
+	character_input.item_selected.connect(func(index: int) -> void:
+		if not suppress_preview and candidate_id >= 0:
+			character_requested.emit(candidate_id, character_input.get_item_text(index)))
+	character_row.add_child(character_input)
+	zoning_grid.add_child(character_row)
 	zoning_grid.add_child(allocation_row)
 	var grid := GridContainer.new()
 	grid.columns = 3
@@ -112,7 +142,19 @@ func _ready() -> void:
 
 
 func show_plan(region, candidate: Dictionary, reset: bool = true) -> void:
+	dev_mode = region.dev_mode
+	candidate_id = candidate["id"]
 	neighborhood_id = candidate["neighborhood_id"]
+	suppress_preview = true
+	style_input.select(1 if candidate["layout"].interior_style == "Organic" else 0)
+	style_input.disabled = neighborhood_id >= 0
+	var character_choice: String = region.neighborhoods[neighborhood_id].character_profile if neighborhood_id >= 0 else candidate.get("character_override", "Auto")
+	for index in range(character_input.item_count):
+		if character_input.get_item_text(index) == character_choice:
+			character_input.select(index)
+			break
+	character_input.disabled = neighborhood_id >= 0
+	suppress_preview = false
 	neighborhood = region.neighborhoods[neighborhood_id] if neighborhood_id >= 0 else null
 	var defaults: Dictionary
 	if neighborhood != null:
@@ -138,11 +180,11 @@ func show_plan(region, candidate: Dictionary, reset: bool = true) -> void:
 		for zone in ZoneTypes:
 			zone_inputs[zone].value = defaults["shares"][zone]
 			density_inputs[zone].select(defaults["density"][zone])
-		allocation_input.value = maxi(0, Budget.remaining_cost(neighborhood) - neighborhood.development_plan.reserved)
+		allocation_input.value = 0 if dev_mode else maxi(0, Budget.remaining_cost(neighborhood) - neighborhood.development_plan.reserved)
 		suppress_preview = false
 	_preview()
-	for button in allocation_buttons:
-		button.disabled = neighborhood_id < 0 or not neighborhood.development_plan.active
+	for index in range(allocation_buttons.size()):
+		allocation_buttons[index].disabled = neighborhood_id < 0 or not neighborhood.development_plan.active or (dev_mode and index == 0)
 	visible = true
 
 
@@ -174,7 +216,10 @@ func _preview() -> void:
 		var estimate: Dictionary = Budget.zoning_estimate(neighborhood, shares(), densities())
 		if not custom_allocation:
 			suppress_preview = true
-			allocation_input.value = estimate["top_up"]
+			allocation_input.value = 0 if dev_mode else estimate["top_up"]
 			suppress_preview = false
 		editor_status_label.text = "Target: %d homes • %d jobs\nRemaining $%d • Top-up $%d\nNext work $%d\nReserved $%d • Spent $%d" % [estimate["housing"], estimate["jobs"], estimate["remaining"], estimate["top_up"], estimate["next_cost"], neighborhood.development_plan.reserved, neighborhood.development_plan.spent]
 		preview_label.text = "Target: %d homes • %d jobs\nRemaining $%d • Reserved $%d" % [estimate["housing"], estimate["jobs"], estimate["remaining"], neighborhood.development_plan.reserved]
+		if dev_mode:
+			editor_status_label.text += "\nDev Mode funds construction automatically."
+			preview_label.text += "\nDev Mode funds construction automatically."

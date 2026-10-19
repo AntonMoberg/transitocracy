@@ -34,7 +34,9 @@ static func allocate(region, neighborhood_id: int, amount: int) -> Dictionary:
 	if plan == null or not plan.active:
 		return {"ok": false, "reason": "Approve this plan before allocating funds."}
 	var city = region.jurisdictions[region.city_jurisdiction_ids[neighborhood.city_id]]
-	if amount < -plan.reserved or amount > city.treasury:
+	if region.dev_mode and amount > 0:
+		return {"ok": false, "reason": "Dev Mode funds construction automatically; no top-up is needed."}
+	if amount < -plan.reserved or (amount > 0 and amount > city.treasury):
 		return {"ok": false, "reason": "The transfer exceeds available funds."}
 	plan.reserved += amount
 	city.treasury -= amount
@@ -140,10 +142,11 @@ static func advance_day(region, day_key: int) -> bool:
 			continue
 		var upgrade: int = upgrade_cost(neighborhood)
 		if upgrade > 0:
-			if plan.reserved < upgrade:
+			if not region.dev_mode and plan.reserved < upgrade:
 				plan.status = "Awaiting upgrade funds"
 				continue
-			plan.reserved -= upgrade
+			if not region.dev_mode:
+				plan.reserved -= upgrade
 			plan.spent += upgrade
 			plan.upgrade_target = plan.capacity_multiplier
 			plan.upgrade_open_day = day_key + 2
@@ -183,10 +186,11 @@ static func advance_day(region, day_key: int) -> bool:
 			continue
 		var next_phase: int = plan.completed_phase + 1
 		var cost: int = phase_cost(neighborhood, next_phase)
-		if plan.reserved < cost:
+		if not region.dev_mode and plan.reserved < cost:
 			plan.status = "Awaiting funds"
 			continue
-		plan.reserved -= cost
+		if not region.dev_mode:
+			plan.reserved -= cost
 		plan.spent += cost
 		plan.constructing_phase = next_phase
 		plan.constructing_multiplier = plan.capacity_multiplier
