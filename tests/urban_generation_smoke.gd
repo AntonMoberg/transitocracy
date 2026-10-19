@@ -28,8 +28,7 @@ func _run() -> void:
 			var irregular := 0
 			var triangles := 0
 			var quadrilaterals := 0
-			var smallest_block := INF
-			var largest_block := 0.0
+			var elongated_blocks := 0
 			var corridors: Dictionary = {}
 			var arterial_neighbors: Dictionary = {}
 			for link in region.road_links:
@@ -69,6 +68,7 @@ func _run() -> void:
 				var hub = region.road_nodes[region.city_hub_node_ids[city_id]]
 				var access = region.road_nodes[region.city_highway_access_node_ids[city_id]]
 				_check(not hub.is_interchange and access.is_interchange and hub.id != access.id and hub.managed_neighborhood_id < 0, "city centers and peripheral highway exits must be distinct")
+				_check(hub.position_km.distance_to(access.position_km) <= 45.0, "starting cities need a nearby highway exit instead of a long cross-state arterial")
 				var polygons: Array = []
 				for neighborhood_id in region.cities[city_id]["neighborhood_ids"]:
 					var neighborhood = region.neighborhoods[neighborhood_id]
@@ -87,10 +87,13 @@ func _run() -> void:
 							continue
 						triangles += 1 if block["polygon"].size() == 3 else 0
 						quadrilaterals += 1 if block["polygon"].size() == 4 else 0
+						if block["polygon"].size() == 4 and not block.get("fringe", false):
+							var first_side: float = block["polygon"][0].distance_to(block["polygon"][1])
+							var second_side: float = block["polygon"][1].distance_to(block["polygon"][2])
+							if maxf(first_side, second_side) / maxf(0.001, minf(first_side, second_side)) > 1.4:
+								elongated_blocks += 1
 						var area: float = Geography.polygon_area(block["polygon"])
 						block_area += area
-						smallest_block = minf(smallest_block, area)
-						largest_block = maxf(largest_block, area)
 						_check(not LayoutGenerator.triangulate(block["polygon"]).is_empty(), "varied street blocks must remain simple polygons")
 					_check(block_area <= Geography.polygon_area(layout.polygon) * 1.002, "block subdivisions must not overlap or exceed their neighborhood")
 					_check(not layout.arterial_nodes.is_empty() and neighborhood.access_node_ids.size() >= 2 and region.neighborhood_development_connected[neighborhood_id] != 0, "every occupied district needs arterial frontage and multiple connected streets: seed %d, %d cities, district %d" % [seed_value, city_count, neighborhood_id])
@@ -127,14 +130,14 @@ func _run() -> void:
 							_check(Geography.polygon_area(overlap) < 0.00001, "regional highway %d crosses a starter neighbourhood at seed %d / %d cities (%.5f km²)" % [link.id, seed_value, city_count, Geography.polygon_area(overlap)])
 			_check(streeted == 40, "seed %d at %d cities must have all forty starting street layouts" % [seed_value, city_count])
 			_check(rectangular == 0 and irregular == streeted, "all starter neighborhoods with open arterial spines need irregular boundaries: %d rectangular, %d irregular" % [rectangular, irregular])
-			_check(quadrilaterals > triangles * 4 and largest_block > smallest_block * 3.0, "regular interiors must favour rectangular blocks while fitting irregular edges")
+			_check(quadrilaterals > triangles * 4 and elongated_blocks > quadrilaterals * 0.55, "regular interiors must favour rectangular blocks: %d / %d elongated" % [elongated_blocks, quadrilaterals])
 			var first_layout = region.neighborhoods[0].street_layout
 			var filled := 0.0
 			for block in first_layout.blocks:
 				if block.get("demolished", false):
 					continue
 				filled += Geography.polygon_area(block["polygon"])
-			_check(filled >= Geography.polygon_area(first_layout.polygon) * 0.85, "street blocks must follow and fill an irregular starter neighborhood")
+			_check(filled >= Geography.polygon_area(first_layout.polygon) * 0.90, "street blocks must follow and fill an irregular starter neighborhood")
 			print("Seed %d (%d cities): %d rectangular / %d irregular districts, %d triangular blocks" % [seed_value, city_count, rectangular, irregular, triangles])
 	_check_shared_collectors()
 	if failures == 0:

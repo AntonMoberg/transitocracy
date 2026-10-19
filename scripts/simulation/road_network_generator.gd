@@ -56,104 +56,6 @@ static func generate(region) -> void:
 static func _build_starting_highways(region) -> void:
 	if region.starting_city_ids.is_empty():
 		return
-	var centers: Array[Vector2] = []
-	var mean := Vector2.ZERO
-	for city_id in region.starting_city_ids:
-		var center: Vector2 = region.cities[city_id]["center_km"]
-		centers.append(center)
-		mean += center
-	mean /= float(centers.size())
-	var axis := Vector2.RIGHT
-	var largest_span := -1.0
-	for first in range(centers.size()):
-		for last in range(first + 1, centers.size()):
-			var span: float = centers[first].distance_squared_to(centers[last])
-			if span > largest_span:
-				largest_span = span
-				axis = (centers[last] - centers[first]).normalized()
-	if axis.x < 0.0 or (absf(axis.x) < 0.001 and axis.y < 0.0):
-		axis = -axis
-	var normal := axis.orthogonal()
-	var ordered: Array[int] = region.starting_city_ids.duplicate()
-	ordered.sort_custom(func(first: int, last: int) -> bool:
-		return (region.cities[first]["center_km"] - mean).dot(axis) < (region.cities[last]["center_km"] - mean).dot(axis))
-	var options: Array = []
-	var intrinsic_costs: Array = []
-	for city_index in range(ordered.size()):
-		var city_id: int = ordered[city_index]
-		var center: Vector2 = region.cities[city_id]["center_km"]
-		var before_center: Vector2 = region.cities[ordered[maxi(0, city_index - 1)]]["center_km"]
-		var after_center: Vector2 = region.cities[ordered[mini(ordered.size() - 1, city_index + 1)]]["center_km"]
-		var local_axis: Vector2 = (after_center - before_center).normalized()
-		var local_normal: Vector2 = local_axis.orthogonal() if local_axis != Vector2.ZERO else normal
-		var sites: Array[Vector2] = []
-		var site_costs: Array[float] = []
-		for offset in [-24.0, -16.0, -10.0, -6.0, 6.0, 10.0, 16.0, 24.0]:
-			# Each city chooses a nearby side of the regional road independently.
-			# This avoids long spurs and lets the corridor go around intervening cores.
-			var projection: Vector2 = center + local_normal * float(offset)
-			var site: Vector2 = _land_spine_site(region, projection, local_normal, center)
-			if not _outside_starter_districts(region, site, 1.5) or sites.has(site):
-				continue
-			sites.append(site)
-			site_costs.append(site.distance_to(projection) * 0.3 + site.distance_to(center) * 0.15)
-		if sites.is_empty():
-			sites.append(_land_spine_site(region, center + local_normal * 32.0, local_normal, center))
-			site_costs.append(100.0)
-		options.append(sites)
-		intrinsic_costs.append(site_costs)
-	var costs: Array = []
-	var parents: Array = []
-	for city_index in range(ordered.size()):
-		var row: Array[float] = []
-		var back := PackedInt32Array()
-		for site_index in range(options[city_index].size()):
-			var cost: float = intrinsic_costs[city_index][site_index]
-			var parent := -1
-			if city_index > 0:
-				var best_edge := INF
-				for previous_index in range(options[city_index - 1].size()):
-					var first: Vector2 = options[city_index - 1][previous_index]
-					var last: Vector2 = options[city_index][site_index]
-					var edge_cost: float = costs[city_index - 1][previous_index] + first.distance_to(last)
-					if first.distance_to(last) < 0.2 or not StateGeography.segment_on_land(region.jurisdictions[0].polygon_km, first, last):
-						edge_cost += 100.0
-					if _segment_crosses_starter(region, first, last):
-						edge_cost += 5000.0
-					if edge_cost < best_edge:
-						best_edge = edge_cost
-						parent = previous_index
-				cost += best_edge
-			row.append(cost)
-			back.append(parent)
-		costs.append(row)
-		parents.append(back)
-	var last_index := 0
-	for index in range(1, costs[-1].size()):
-		if costs[-1][index] < costs[-1][last_index]:
-			last_index = index
-	var best_sites: Array[Vector2] = []
-	best_sites.resize(ordered.size())
-	for city_index in range(ordered.size() - 1, -1, -1):
-		best_sites[city_index] = options[city_index][last_index]
-		last_index = parents[city_index][last_index]
-	var spine_ids: Array[int] = []
-	for site in best_sites:
-		var node = RoadNodeData.new()
-		node.id = region.road_nodes.size()
-		node.position_km = site
-		node.kind = "Highway"
-		node.city_id = region.city_id_at_point(site)
-		region.road_nodes.append(node)
-		spine_ids.append(node.id)
-	for index in range(1, spine_ids.size()):
-		var before: Vector2 = best_sites[maxi(0, index - 2)]
-		var first: Vector2 = best_sites[index - 1]
-		var last: Vector2 = best_sites[index]
-		var after: Vector2 = best_sites[mini(best_sites.size() - 1, index + 1)]
-		var from_tangent: Vector2 = (last - before).normalized()
-		var to_tangent: Vector2 = (after - first).normalized()
-		_add_link(region, spine_ids[index - 1], spine_ids[index], RoadLinkData.HIGHWAY, 2, from_tangent, to_tangent)
 	var arterial_nodes: Dictionary = {}
 	for link in region.road_links:
 		if link.road_class != RoadLinkData.ARTERIAL:
@@ -163,49 +65,241 @@ static func _build_starting_highways(region) -> void:
 			if not arterial_nodes.has(city_id):
 				arterial_nodes[city_id] = {}
 			arterial_nodes[city_id][node_id] = true
-	for index in range(ordered.size()):
-		var city_id: int = ordered[index]
+	var state_bounds: Rect2 = region.jurisdictions[0].bounds_km
+	var first_x: float = maxf(state_bounds.position.x + 10.0, _starting_x_limit(region, true))
+	var last_x: float = minf(state_bounds.end.x - 10.0, _starting_x_limit(region, false))
+	var ordered: Array[int] = region.starting_city_ids.duplicate()
+	ordered.sort_custom(func(a: int, b: int) -> bool: return region.cities[a]["center_km"].y < region.cities[b]["center_km"].y)
+	# Balance the cities between two trunks. A largest-gap split can strand
+	# nearly all cities on one highway and require very long arterial feeders.
+	var split_index: int = clampi(roundi(float(ordered.size()) * 0.5), 2, ordered.size() - 2)
+	var bands: Array = [ordered.slice(0, split_index), ordered.slice(split_index)]
+	var trunk_nodes: Array = []
+	var access_options: Dictionary = {}
+	for band_index in range(bands.size()):
+		var band: Array = bands[band_index]
+		var target_y: float = region.cities[band[band.size() / 2]]["center_km"].y
+		var stations: Array = []
+		for station in range(ceili((last_x - first_x) / 35.0) + 1):
+			stations.append({"x": lerpf(first_x, last_x, float(station) / float(maxi(1, ceili((last_x - first_x) / 35.0)))), "city": -1, "cross": -1})
+		# Both trunks offer city-longitude exits where useful. Avoid inserting
+		# nearly coincident stations for cities assigned to the other trunk.
+		for city_id in region.starting_city_ids:
+			if not band.has(city_id):
+				var adjacent_access := false
+				for band_city_id in band:
+					if absf(region.cities[city_id]["center_km"].x - region.cities[band_city_id]["center_km"].x) < 18.0:
+						adjacent_access = true
+						break
+				if adjacent_access:
+					continue
+			stations.append({"x": region.cities[city_id]["center_km"].x, "city": city_id if band.has(city_id) else -1, "access_city": city_id})
+		stations.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["x"] < b["x"])
+		var sparse_stations: Array = []
+		for entry in stations:
+			if int(entry.get("access_city", -1)) < 0:
+				var near_access := false
+				for other in stations:
+					if int(other.get("access_city", -1)) >= 0 and absf(float(other["x"]) - float(entry["x"])) < 18.0:
+						near_access = true
+						break
+				if near_access:
+					continue
+			sparse_stations.append(entry)
+		stations = sparse_stations
+		var sites: Array[Vector2] = _corridor_sites(region, stations, target_y, band)
+		var ids: Array[int] = []
+		for station_index in range(stations.size()):
+			var entry: Dictionary = stations[station_index]
+			var site: Vector2 = sites[station_index]
+			var node = RoadNodeData.new()
+			node.id = region.road_nodes.size()
+			node.position_km = site
+			node.kind = "Highway"
+			node.city_id = region.city_id_at_point(site)
+			region.road_nodes.append(node)
+			ids.append(node.id)
+			if int(entry.get("access_city", -1)) >= 0:
+				var access_city: int = entry["access_city"]
+				if not access_options.has(access_city):
+					access_options[access_city] = []
+				access_options[access_city].append(node.id)
+		for index in range(1, ids.size()):
+			var trunk_corridor_id: int = region.next_road_link_id if index == 1 else region.road_links[-1].corridor_id
+			var first: Vector2 = sites[index - 1]
+			var last: Vector2 = sites[index]
+			if first.distance_to(last) < 0.2:
+				continue
+			var before: Vector2 = sites[maxi(0, index - 2)]
+			var after: Vector2 = sites[mini(sites.size() - 1, index + 1)]
+			_add_link(region, ids[index - 1], ids[index], RoadLinkData.HIGHWAY, 2, (last - before).normalized(), (after - first).normalized())
+			region.road_links[-1].corridor_id = trunk_corridor_id
+		trunk_nodes.append(ids)
+	_connect_highway_bands(region, trunk_nodes[0], trunk_nodes[1], first_x, last_x)
+	for city_id in region.starting_city_ids:
 		var center: Vector2 = region.cities[city_id]["center_km"]
-		var spine_point: Vector2 = best_sites[index]
-		var service_point: Vector2 = spine_point
-		var connector_node: int = _arterial_connector_node(region, city_id, service_point, arterial_nodes.get(city_id, {}))
-		if center.distance_to(spine_point) > 12.0 or connector_node < 0:
-			var choice: Dictionary = _service_exit_choice(region, city_id, spine_point, arterial_nodes.get(city_id, {}))
-			service_point = choice["point"]
-			connector_node = choice["arterial_node"]
-		var access_id: int = spine_ids[index]
-		if service_point.distance_to(spine_point) > 0.05:
-			var exit_node = RoadNodeData.new()
-			exit_node.id = region.road_nodes.size()
-			exit_node.position_km = service_point
-			exit_node.city_id = region.city_id_at_point(service_point)
-			exit_node.is_interchange = true
-			exit_node.interchange_owner_jurisdiction_id = _highway_owner_at(region, service_point)
-			region.road_nodes.append(exit_node)
-			access_id = exit_node.id
-			region.road_nodes[spine_ids[index]].is_interchange = true
-			region.road_nodes[spine_ids[index]].interchange_owner_jurisdiction_id = _highway_owner_at(region, spine_point)
-			_add_link(region, spine_ids[index], access_id, RoadLinkData.HIGHWAY, 2)
-		else:
-			region.road_nodes[access_id].is_interchange = true
-			region.road_nodes[access_id].interchange_owner_jurisdiction_id = _highway_owner_at(region, service_point)
+		var access_id := -1
+		var shortest := INF
+		for option_id in access_options.get(city_id, []):
+			var site: Vector2 = region.road_nodes[option_id].position_km
+			var distance: float = center.distance_to(site)
+			if distance < shortest:
+				shortest = distance
+				access_id = option_id
 		region.city_highway_access_node_ids[city_id] = access_id
+		region.road_nodes[access_id].is_interchange = true
+		region.road_nodes[access_id].interchange_owner_jurisdiction_id = _highway_owner_at(region, region.road_nodes[access_id].position_km)
+		var connector_node: int = _arterial_connector_node(region, city_id, region.road_nodes[access_id].position_km, arterial_nodes.get(city_id, {}))
 		if connector_node < 0:
 			connector_node = region.city_hub_node_ids[city_id]
-		if connector_node != access_id:
-			_add_link(region, connector_node, access_id, RoadLinkData.ARTERIAL, 1)
+		_add_link(region, connector_node, access_id, RoadLinkData.ARTERIAL, 1)
+
+
+static func _connect_highway_bands(region, north_nodes: Array, south_nodes: Array, first_x: float, last_x: float) -> void:
+	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
+	var span: float = last_x - first_x
+	var candidates: Array[Dictionary] = []
+	for north_id in north_nodes:
+		var north: Vector2 = region.road_nodes[north_id].position_km
+		for south_id in south_nodes:
+			var south: Vector2 = region.road_nodes[south_id].position_km
+			var run: float = south.x - north.x
+			if run < span * 0.06 or run > span * 0.32:
+				continue
+			var rise: float = south.y - north.y
+			if rise < 30.0 or rise < run * 1.3:
+				continue
+			var cross_direction: Vector2 = (south - north).normalized()
+			if absf(cross_direction.cross(_trunk_tangent(region, north_nodes, north_id))) < 0.57 or absf(cross_direction.cross(_trunk_tangent(region, south_nodes, south_id))) < 0.57:
+				continue
+			if not StateGeography.segment_on_land(land, north, south) or _segment_crosses_starter(region, north, south):
+				continue
+			var middle_x: float = (north.x + south.x) * 0.5
+			var score: float = absf(run - rise * 1.1) + absf(middle_x - (first_x + last_x) * 0.5) * 0.3 + north.distance_to(south) * 0.03
+			candidates.append({"north": north_id, "south": south_id, "score": score})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["score"] < b["score"])
+	for candidate in candidates:
+		var first_id: int = candidate["north"]
+		var last_id: int = candidate["south"]
+		var direction: Vector2 = (region.road_nodes[last_id].position_km - region.road_nodes[first_id].position_km).normalized()
+		_add_link(region, first_id, last_id, RoadLinkData.HIGHWAY, 2, direction, direction, true)
+		var link = region.road_links[-1]
+		var clear := true
+		for segment in range(1, link.points.size()):
+			if _segment_crosses_starter(region, link.points[segment - 1], link.points[segment]):
+				clear = false
+				break
+		if not clear:
+			region.road_links.pop_back()
+			region.next_road_link_id -= 1
+			continue
+		for node_id in [first_id, last_id]:
+			region.road_nodes[node_id].is_interchange = true
+			region.road_nodes[node_id].interchange_owner_jurisdiction_id = _highway_owner_at(region, region.road_nodes[node_id].position_km)
+		return
+	assert(false, "The two starter highways need one clear diagonal connection.")
+
+
+static func _trunk_tangent(region, node_ids: Array, node_id: int) -> Vector2:
+	var index: int = node_ids.find(node_id)
+	var before: Vector2 = region.road_nodes[node_ids[maxi(0, index - 1)]].position_km
+	var after: Vector2 = region.road_nodes[node_ids[mini(node_ids.size() - 1, index + 1)]].position_km
+	return (after - before).normalized()
+
+
+static func _starting_x_limit(region, first: bool) -> float:
+	var limit: float = INF if first else -INF
+	for city_id in region.starting_city_ids:
+		var x: float = region.cities[city_id]["center_km"].x
+		limit = minf(limit, x) if first else maxf(limit, x)
+	return limit
+
+
+static func _corridor_sites(region, stations: Array, target_y: float, band: Array) -> Array[Vector2]:
+	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
+	# At each eastward station, keep several inland alternatives. The cheapest
+	# connected sequence favors gentle bends and passes near its assigned cities.
+	var candidates: Array = []
+	var costs: Array = []
+	var parents: Array = []
+	var previous_x := -INF
+	for station_index in range(stations.size()):
+		var entry: Dictionary = stations[station_index]
+		var x: float = maxf(float(entry["x"]), previous_x + 5.0)
+		entry["x"] = x
+		previous_x = x
+		var city_id: int = entry["city"]
+		var city_y: float = region.cities[city_id]["center_km"].y if city_id >= 0 else target_y
+		var local_y := target_y
+		var influence := 0.0
+		for nearby_id in band:
+			var nearby: Vector2 = region.cities[nearby_id]["center_km"]
+			var weight: float = maxf(0.0, 1.0 - absf(x - nearby.x) / 115.0)
+			local_y += (nearby.y - target_y) * weight
+			influence += weight
+		if influence > 1.0:
+			local_y = target_y + (local_y - target_y) / influence
+		var ys: Array[float] = [target_y]
+		for offset in [8.0, 16.0, 24.0, 36.0, 48.0, 64.0, 80.0, 104.0, 136.0, 176.0, 224.0, 280.0]:
+			ys.append(target_y - offset)
+			ys.append(target_y + offset)
+		if city_id >= 0:
+			for offset in [-32.0, -20.0, -12.0, -6.0, 6.0, 12.0, 20.0, 32.0]:
+				ys.append(city_y + offset)
+		var row: Array[Vector2] = []
+		for y in ys:
+			var point := Vector2(x, y)
+			if Geometry2D.is_point_in_polygon(point, land) and RoadRouteBuilder.clearance_to_coast(land, point) >= 2.0 and _outside_starter_districts(region, point, 1.5):
+				row.append(point)
+		if row.is_empty():
+			row.append(_land_spine_site(region, Vector2(x, target_y), Vector2.DOWN, Vector2(x, target_y)))
+		candidates.append(row)
+		var row_costs: Array[float] = []
+		var row_parents := PackedInt32Array()
+		for point in row:
+			var intrinsic: float = absf(point.y - target_y) * 0.04 + absf(point.y - local_y) * 1.2 + (absf(point.y - city_y) * 1.5 if city_id >= 0 else 0.0)
+			var best_cost := intrinsic
+			var best_parent := -1
+			if station_index > 0:
+				best_cost = INF
+				for previous_index in range(candidates[station_index - 1].size()):
+					var before: Vector2 = candidates[station_index - 1][previous_index]
+					if not StateGeography.segment_on_land(land, before, point) or _segment_crosses_starter(region, before, point):
+						continue
+					var change: float = absf(point.y - before.y)
+					var cost: float = costs[station_index - 1][previous_index] + intrinsic + change * 0.25 + change * change / maxf(20.0, point.x - before.x) * 0.4
+					if cost < best_cost:
+						best_cost = cost
+						best_parent = previous_index
+			row_costs.append(best_cost)
+			row_parents.append(best_parent)
+		costs.append(row_costs)
+		parents.append(row_parents)
+	var choice := -1
+	var lowest := INF
+	for index in range(costs[-1].size()):
+		if costs[-1][index] < lowest:
+			lowest = costs[-1][index]
+			choice = index
+	assert(choice >= 0, "A highway corridor must have a continuous land route.")
+	var result: Array[Vector2] = []
+	result.resize(stations.size())
+	for station_index in range(stations.size() - 1, -1, -1):
+		result[station_index] = candidates[station_index][choice]
+		choice = parents[station_index][choice]
+	return result
 
 
 static func _land_spine_site(region, target: Vector2, normal: Vector2, fallback: Vector2) -> Vector2:
 	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
-	if Geometry2D.is_point_in_polygon(target, land) and _outside_starter_districts(region, target, 1.5):
+	if Geometry2D.is_point_in_polygon(target, land) and RoadRouteBuilder.clearance_to_coast(land, target) >= 2.0 and _outside_starter_districts(region, target, 1.5):
 		return target
 	var best := Vector2.INF
 	var best_score := INF
 	for radius in [6.0, 10.0, 16.0, 24.0, 32.0, 48.0]:
 		for turn in range(0, 360, 15):
 			var trial: Vector2 = fallback + normal.rotated(deg_to_rad(float(turn))) * float(radius)
-			if not Geometry2D.is_point_in_polygon(trial, land) or not _outside_starter_districts(region, trial, 1.5):
+			if not Geometry2D.is_point_in_polygon(trial, land) or RoadRouteBuilder.clearance_to_coast(land, trial) < 2.0 or not _outside_starter_districts(region, trial, 1.5):
 				continue
 			var score: float = trial.distance_to(target) + trial.distance_to(fallback) * 0.05
 			if score < best_score:
@@ -240,48 +334,26 @@ static func _segment_crosses_starter(region, first: Vector2, last: Vector2) -> b
 	return false
 
 
-static func _service_exit_choice(region, city_id: int, spine_point: Vector2, arterial_nodes: Dictionary) -> Dictionary:
-	var center: Vector2 = region.cities[city_id]["center_km"]
-	var direction: Vector2 = (spine_point - center).normalized()
-	if direction == Vector2.ZERO:
-		direction = Vector2.RIGHT
-	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
-	var best_point: Vector2 = center
-	var best_node := -1
-	var best_score := INF
-	for radius in [3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0]:
-		for turn in [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0]:
-			var point: Vector2 = center + direction.rotated(deg_to_rad(float(turn))) * float(radius)
-			if not Geometry2D.is_point_in_polygon(point, land) or not _outside_starter_districts(region, point, 0.4):
-				continue
-			var arterial_node: int = _arterial_connector_node(region, city_id, point, arterial_nodes)
-			if arterial_node < 0:
-				continue
-			var score: float = point.distance_to(spine_point) * 0.15 + point.distance_to(region.road_nodes[arterial_node].position_km) + absf(float(turn)) * 0.015
-			if score < best_score:
-				best_score = score
-				best_point = point
-				best_node = arterial_node
-	if best_node >= 0:
-		return {"point": best_point, "arterial_node": best_node}
-	return {"point": spine_point, "arterial_node": region.city_hub_node_ids[city_id]}
-
-
 static func _arterial_connector_node(region, city_id: int, point: Vector2, candidates: Dictionary) -> int:
 	var best_id := -1
-	var best_distance := INF
+	var best_score := INF
 	for key in candidates:
 		var node_id: int = int(key)
+		if node_id == region.city_hub_node_ids[city_id]:
+			continue
 		var from_point: Vector2 = region.road_nodes[node_id].position_km
 		var distance: float = from_point.distance_to(point)
-		if distance >= best_distance or distance < 0.001 or distance > 16.0:
+		var score: float = distance + absf(from_point.x - point.x) * 1.5
+		if distance < 0.001 or distance > 250.0:
 			continue
 		if not StateGeography.segment_on_land(region.jurisdictions[0].polygon_km, from_point, point):
-			continue
+			score += 200.0
 		if _connector_crosses_starter(region, from_point, point):
+			score += 1000.0
+		if score >= best_score:
 			continue
 		best_id = node_id
-		best_distance = distance
+		best_score = score
 	return best_id
 
 

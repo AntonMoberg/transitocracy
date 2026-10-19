@@ -125,38 +125,47 @@ static func refresh_candidates(region) -> void:
 				var through_key: String = "%d:%d:%d:through" % [through_city_id, corridor_id, slot]
 				if posmod(hash("%d:%s" % [region.generation_seed, through_key]), 100) < THROUGH_CANDIDATE_PERCENT and not proposed_keys.has(through_key):
 					proposed_keys[through_key] = true
-					proposals.append({"kind": "through", "key": through_key, "city_id": through_city_id, "route": local_route, "frontage_id": frontage_id, "priority": _near_existing_score(center, established.get(through_city_id, [])) + 0.5})
+					var through_route: PackedVector2Array = LayoutGenerator.frontage(route, maxf(0.0, station - 1.0), minf(length, station + 1.0))
+					proposals.append({"kind": "through", "key": through_key, "city_id": through_city_id, "route": through_route, "frontage_id": frontage_id, "priority": _near_existing_score(center, established.get(through_city_id, [])) + 0.5})
 			for side in [1, -1]:
 				var directed: PackedVector2Array = local_route.duplicate()
 				if side < 0:
 					directed.reverse()
 				var corridor_outline: PackedVector2Array = LayoutGenerator.frontage_outline(directed)
-				for offset in [0.12, 0.48]:
-					var sample: Vector2 = center + normal * float(side) * offset
-					var city_id: int = region.city_id_at_point(sample)
-					if city_id < 0:
-						continue
-					var grid: Vector2i = Geography.cell_grid_at_point(region.generation_seed, sample)
-					var key: String = "%d:%d:%d:%d:%d" % [city_id, corridor_id, grid.x, grid.y, side]
-					if region.development_candidate_keys.has(key) or proposed_keys.has(key):
-						continue
-					var cell: PackedVector2Array = Geography.cell_polygon(region, city_id, grid)
-					# Overlap before clipping lets neighboring proposals meet without narrow unclaimed strips.
-					var expanded: Array[PackedVector2Array] = Geometry2D.offset_polygon(cell, CELL_OVERLAP_KM, Geometry2D.JOIN_MITER)
-					if expanded.size() == 1:
-						var city_polygon: PackedVector2Array = region.jurisdictions[region.city_jurisdiction_ids[city_id]].polygon_km
-						cell = _largest_intersection(expanded[0], city_polygon)
-					var pieces: Array[PackedVector2Array] = Geometry2D.intersect_polygons(cell, corridor_outline)
-					if pieces.size() != 1:
-						continue
-					var outline: PackedVector2Array = pieces[0]
-					var available: PackedVector2Array = _largest_available_piece(outline, established.get(city_id, []))
-					if available.size() < 3 or Geography.polygon_area(available) < 0.4:
-						if Geography.polygon_area(available) >= 0.02:
-							small_remainders.append({"city_id": city_id, "outline": outline, "key": key, "route": directed, "frontage_id": frontage_id})
-						continue
-					proposed_keys[key] = true
-					proposals.append({"kind": "edge", "key": key, "city_id": city_id, "route": directed, "frontage_id": frontage_id, "outline": outline, "priority": _adjacency_score(available, established.get(city_id, []))})
+				# A cell can touch the road strip without containing its center.
+				# Sample across the full frontage depth and either side of the slot.
+				for sample_shift in [-0.35, 0.35]:
+					var sample_station: float = clampf(station + sample_shift, 0.0, length)
+					var sample_center: Vector2 = LayoutGenerator._along(route, sample_station)
+					var sample_before: Vector2 = LayoutGenerator._along(route, maxf(0.0, sample_station - 0.02))
+					var sample_after: Vector2 = LayoutGenerator._along(route, minf(length, sample_station + 0.02))
+					var sample_normal: Vector2 = (sample_after - sample_before).normalized().orthogonal()
+					for offset in [0.2, 0.75, 1.3]:
+						var sample: Vector2 = sample_center + sample_normal * float(side) * offset
+						var city_id: int = region.city_id_at_point(sample)
+						if city_id < 0:
+							continue
+						var grid: Vector2i = Geography.cell_grid_at_point(region.generation_seed, sample)
+						var key: String = "%d:%d:%d:%d:%d" % [city_id, corridor_id, grid.x, grid.y, side]
+						if region.development_candidate_keys.has(key) or proposed_keys.has(key):
+							continue
+						var cell: PackedVector2Array = Geography.cell_polygon(region, city_id, grid)
+						# Overlap before clipping lets neighboring proposals meet without narrow unclaimed strips.
+						var expanded: Array[PackedVector2Array] = Geometry2D.offset_polygon(cell, CELL_OVERLAP_KM, Geometry2D.JOIN_MITER)
+						if expanded.size() == 1:
+							var city_polygon: PackedVector2Array = region.jurisdictions[region.city_jurisdiction_ids[city_id]].polygon_km
+							cell = _largest_intersection(expanded[0], city_polygon)
+						var pieces: Array[PackedVector2Array] = Geometry2D.intersect_polygons(cell, corridor_outline)
+						if pieces.size() != 1:
+							continue
+						var outline: PackedVector2Array = pieces[0]
+						var available: PackedVector2Array = _largest_available_piece(outline, established.get(city_id, []))
+						if available.size() < 3 or Geography.polygon_area(available) < 0.4:
+							if Geography.polygon_area(available) >= 0.02:
+								small_remainders.append({"city_id": city_id, "outline": outline, "key": key, "route": directed, "frontage_id": frontage_id})
+							continue
+						proposed_keys[key] = true
+						proposals.append({"kind": "edge", "key": key, "city_id": city_id, "route": directed, "frontage_id": frontage_id, "outline": outline, "priority": _adjacency_score(available, established.get(city_id, []))})
 	proposals.sort_custom(func(first: Dictionary, second: Dictionary) -> bool:
 		if not is_equal_approx(float(first["priority"]), float(second["priority"])):
 			return float(first["priority"]) > float(second["priority"])
@@ -177,9 +186,9 @@ static func refresh_candidates(region) -> void:
 				if Geography.polygon_area(available) >= 0.02:
 					small_remainders.append({"city_id": city_id, "outline": proposal["outline"], "key": key, "route": proposal["route"], "frontage_id": proposal["frontage_id"]})
 				continue
-			available = _shape_open_corner(available, proposal["route"], claimed.get(city_id, []))
-			layout = LayoutGenerator.generate(region, city_id, proposal["route"], key, [], true, [], PackedByteArray([1, 0, 0, 0]), "Grid", available)
-			input = {"route": proposal["route"], "edge_frontage": true, "boundaries": [], "arterial_sides": PackedByteArray([1, 0, 0, 0])}
+			var grid_guide: Dictionary = _neighbor_grid_guide(region, available, city_id)
+			layout = LayoutGenerator.generate(region, city_id, proposal["route"], key, [], true, [], PackedByteArray([1, 0, 0, 0]), "Grid", available, grid_guide)
+			input = {"route": proposal["route"], "edge_frontage": true, "boundaries": [], "arterial_sides": PackedByteArray([1, 0, 0, 0]), "grid_guide": grid_guide}
 		if layout.polygon.size() < 3:
 			continue
 		_register_candidate(region, layout, -1, int(proposal["frontage_id"]), input)
@@ -206,7 +215,7 @@ static func _resolve_small_remainders(region, remainders: Array[Dictionary], cla
 			continue
 		var bounds: Rect2 = Geography._bounds(piece)
 		var best_id := -1
-		var best_score := 0.5
+		var best_score := 0.05
 		var best_outline := PackedVector2Array()
 		for candidate_id in claim_slots:
 			var candidate: Dictionary = region.development_candidates[candidate_id]
@@ -216,7 +225,7 @@ static func _resolve_small_remainders(region, remainders: Array[Dictionary], cla
 			if score <= best_score or _shared_boundary_on_arterial(region, piece, candidate["polygon"]):
 				continue
 			var joined: Array[PackedVector2Array] = Geometry2D.merge_polygons(candidate["polygon"], piece)
-			if joined.size() != 1 or Geography.polygon_area(joined[0]) > 4.0 or absf(Geography.polygon_area(joined[0]) - Geography.polygon_area(candidate["polygon"]) - area) > 0.005:
+			if joined.size() != 1 or Geography.polygon_area(joined[0]) > 5.0 or absf(Geography.polygon_area(joined[0]) - Geography.polygon_area(candidate["polygon"]) - area) > 0.005:
 				continue
 			best_id = candidate_id
 			best_score = score
@@ -224,7 +233,7 @@ static func _resolve_small_remainders(region, remainders: Array[Dictionary], cla
 		if best_id >= 0:
 			var target: Dictionary = region.development_candidates[best_id]
 			var input: Dictionary = target["layout_input"]
-			var layout = LayoutGenerator.generate(region, city_id, input["route"], target["key"], [], true, [], input["arterial_sides"], target["layout"].interior_style, best_outline)
+			var layout = LayoutGenerator.generate(region, city_id, input["route"], target["key"], [], true, [], input["arterial_sides"], target["layout"].interior_style, best_outline, input.get("grid_guide", {}))
 			if layout.polygon.size() >= 3 and not layout.core_paths.is_empty() and absf(Geography.polygon_area(layout.polygon) - Geography.polygon_area(best_outline)) <= 0.005:
 				target["polygon"] = layout.polygon
 				target["layout"] = layout
@@ -237,10 +246,13 @@ static func _resolve_small_remainders(region, remainders: Array[Dictionary], cla
 		if area < 0.18 or region.development_candidate_keys.has(item["key"]):
 			continue
 		var small_input := {"route": item["route"], "edge_frontage": true, "boundaries": [], "arterial_sides": PackedByteArray([1, 0, 0, 0])}
-		var small_layout = LayoutGenerator.generate(region, city_id, item["route"], item["key"], [], true, [], small_input["arterial_sides"], "Grid", piece)
+		small_input["grid_guide"] = _neighbor_grid_guide(region, piece, city_id)
+		var small_layout = LayoutGenerator.generate(region, city_id, item["route"], item["key"], [], true, [], small_input["arterial_sides"], "Grid", piece, small_input["grid_guide"])
 		if small_layout.polygon.size() < 3 or small_layout.arterial_nodes.is_empty() or small_layout.core_paths.is_empty() or small_layout.blocks.is_empty():
 			continue
 		_register_candidate(region, small_layout, -1, item["frontage_id"], small_input)
+		if not claimed.has(city_id):
+			claimed[city_id] = []
 		var city_claims: Array = claimed[city_id]
 		city_claims.append(small_layout.polygon)
 		claim_slots[region.development_candidates.size() - 1] = city_claims.size() - 1
@@ -301,51 +313,6 @@ static func _largest_available_piece(polygon: PackedVector2Array, exclusions: Ar
 	return best
 
 
-static func _shape_open_corner(polygon: PackedVector2Array, frontage: PackedVector2Array, neighbors: Array) -> PackedVector2Array:
-	# An isolated four-sided Voronoi cell can exactly match a straight road's
-	# frontage strip. Give its outer, unshared corner a short angled edge.
-	var simple: PackedVector2Array = LayoutGenerator._clean_polygon(polygon)
-	if simple.size() != 4:
-		return polygon
-	for index in range(4):
-		var incoming: Vector2 = (simple[index] - simple[posmod(index - 1, 4)]).normalized()
-		var outgoing: Vector2 = (simple[(index + 1) % 4] - simple[index]).normalized()
-		if absf(incoming.dot(outgoing)) > 0.005:
-			return polygon
-	var corner := -1
-	var best_distance := 0.08
-	for index in range(4):
-		var point: Vector2 = simple[index]
-		var distance: float = point.distance_to(RoadPlanner.closest_point(frontage, point))
-		if distance <= best_distance:
-			continue
-		var shared := false
-		for neighbor in neighbors:
-			for edge in range(neighbor.size()):
-				if point.distance_to(Geometry2D.get_closest_point_to_segment(point, neighbor[edge], neighbor[(edge + 1) % neighbor.size()])) < 0.12:
-					shared = true
-					break
-			if shared:
-				break
-		if not shared:
-			corner = index
-			best_distance = distance
-	if corner < 0:
-		return polygon
-	var previous: Vector2 = simple[posmod(corner - 1, 4)]
-	var vertex: Vector2 = simple[corner]
-	var next: Vector2 = simple[(corner + 1) % 4]
-	var inset: float = minf(0.11, minf(vertex.distance_to(previous), vertex.distance_to(next)) * 0.14)
-	var shaped := PackedVector2Array()
-	for index in range(4):
-		if index == corner:
-			shaped.append(vertex.move_toward(previous, inset))
-			shaped.append(vertex.move_toward(next, inset))
-		else:
-			shaped.append(simple[index])
-	return shaped
-
-
 static func _largest_intersection(first: PackedVector2Array, second: PackedVector2Array) -> PackedVector2Array:
 	var best := PackedVector2Array()
 	var largest := 0.0
@@ -382,6 +349,27 @@ static func _adjacency_score(polygon: PackedVector2Array, established: Array) ->
 	return shared * 10.0 - nearest if nearest < INF else -1000.0
 
 
+static func _neighbor_grid_guide(region, polygon: PackedVector2Array, city_id: int) -> Dictionary:
+	var best_score := 0.25
+	var best: Dictionary = {}
+	if city_id < 0 or city_id >= region.cities.size():
+		return best
+	var bounds: Rect2 = Geography._bounds(polygon)
+	for neighborhood_id in region.cities[city_id]["neighborhood_ids"]:
+		var neighborhood = region.neighborhoods[neighborhood_id]
+		if neighborhood.street_layout == null or not neighborhood.development_approved:
+			continue
+		var layout = neighborhood.street_layout
+		if layout.interior_style != "Grid" or layout.grid_axis == Vector2.ZERO or not bounds.grow(0.02).intersects(layout.bounds):
+			continue
+		var score: float = _adjacency_score(polygon, [layout.polygon])
+		if score <= best_score or _shared_boundary_on_arterial(region, polygon, layout.polygon):
+			continue
+		best_score = score
+		best = {"axis": layout.grid_axis, "origin": layout.grid_origin, "column_spacing": layout.grid_column_spacing_km, "row_spacing": layout.grid_row_spacing_km}
+	return best
+
+
 static func _register_candidate(region, layout, neighborhood_id: int, frontage_id: int, layout_input: Dictionary = {}) -> void:
 	var area = Jurisdiction.new()
 	area.polygon_km = layout.polygon
@@ -415,7 +403,7 @@ static func set_candidate_style(region, candidate_id: int, style: String) -> boo
 	if candidate["layout"].interior_style == style:
 		return true
 	var input: Dictionary = candidate["layout_input"]
-	var layout = LayoutGenerator.generate(region, int(candidate["city_id"]), input["route"], candidate["key"], [], bool(input["edge_frontage"]), input["boundaries"], input["arterial_sides"], style, candidate["polygon"])
+	var layout = LayoutGenerator.generate(region, int(candidate["city_id"]), input["route"], candidate["key"], [], bool(input["edge_frontage"]), input["boundaries"], input["arterial_sides"], style, candidate["polygon"], input.get("grid_guide", {}))
 	if layout.polygon.size() < 3 or layout.arterial_nodes.is_empty() or layout.core_paths.is_empty():
 		return false
 	candidate["layout"] = layout

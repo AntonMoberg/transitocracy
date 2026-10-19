@@ -46,12 +46,15 @@ func _run() -> void:
 				continue
 			var nodes: PackedInt32Array = block["nodes"]
 			if not block.has("redevelopment_day"):
+				if block.get("fringe", false):
+					_check(nodes.size() == 1 and nodes[0] >= 0 and nodes[0] < neighborhood.street_layout.nodes.size(), "clipped edge blocks need a valid local street access node")
 				if nodes.size() == 4:
 					grid_blocks += 1
-				for index in range(nodes.size()):
-					var first: int = nodes[index]
-					var last: int = nodes[(index + 1) % nodes.size()]
-					_check(street_edges.get(Vector2i(mini(first, last), maxi(first, last)), 4) <= block["phase"], "original block boundaries must be real streets available by their construction phase")
+				if not block.get("fringe", false):
+					for index in range(nodes.size()):
+						var first: int = nodes[index]
+						var last: int = nodes[(index + 1) % nodes.size()]
+						_check(street_edges.get(Vector2i(mini(first, last), maxi(first, last)), 4) <= block["phase"], "original block boundaries must be real streets available by their construction phase")
 			var footprints: Array = LayoutGenerator.buildings(block, "Residential", 0)
 			for footprint in footprints:
 				for vertex in footprint:

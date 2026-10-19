@@ -32,7 +32,7 @@ func _initialize() -> void:
 		for link in region.road_links:
 			if link.road_class == "Arterial" and (link.from_node_id == access_id or link.to_node_id == access_id):
 				access_arterials += 1
-		_check(arterial_count >= 1 and arterial_count <= 4 and access_id != hub_id and region.road_nodes[access_id].is_interchange and access_arterials >= 1, "each city center needs arterial access to a separate highway exit")
+		_check(arterial_count >= 1 and arterial_count <= 4 and access_id != hub_id and region.road_nodes[access_id].is_interchange and access_arterials >= 1, "city %d center needs arterial access to a separate highway exit (%d hub, %d access)" % [city_id, arterial_count, access_arterials])
 	var interchange: Dictionary = RoadPlanner.interchange_preview(region, region.neighborhood_gateway_node_ids[0], -1, Vector2.ZERO, day_key)
 	_check(interchange["ok"] and region.jurisdictions[interchange["owner_id"]].kind == "City" and region.jurisdictions[interchange["owner_id"]].treasury >= interchange["cost"], "a starting city must be able to fund a junction interchange")
 	var state_roads := 0

@@ -88,10 +88,32 @@ func _run() -> void:
 					break
 			if not covered:
 				uncovered += 1
-	if uncovered > 4:
+	if uncovered > 0:
 		_fail("Candidate outlines left %d gaps in %d samples beside the curved road and existing district." % [uncovered, sampled])
 		return
-	print("Expansion candidates prioritize existing districts, preserve curved road edges, and occasionally contain an arterial (%d through, %d edge)." % [through, edge])
+	var least_block_coverage := 1.0
+	var boundary_local_streets := 0
+	for candidate in curved.development_candidates:
+		if int(candidate["neighborhood_id"]) >= 0 or not candidate["layout_input"]["edge_frontage"]:
+			continue
+		var blocks_area := 0.0
+		for block in candidate["layout"].blocks:
+			blocks_area += Geography.polygon_area(block["polygon"])
+		least_block_coverage = minf(least_block_coverage, blocks_area / Geography.polygon_area(candidate["polygon"]))
+		var street_layout = candidate["layout"]
+		for edge_id in range(street_layout.edges.size()):
+			if street_layout.classes[edge_id] != LinkData.LOCAL:
+				continue
+			var street_pair: Vector2 = street_layout.edges[edge_id]
+			var endpoint: Vector2 = street_layout.nodes[int(street_pair.y)]
+			for outline_edge in range(street_layout.polygon.size()):
+				if endpoint.distance_to(Geometry2D.get_closest_point_to_segment(endpoint, street_layout.polygon[outline_edge], street_layout.polygon[(outline_edge + 1) % street_layout.polygon.size()])) < 0.001:
+					boundary_local_streets += 1
+					break
+	if boundary_local_streets == 0 or least_block_coverage < 0.98:
+		_fail("Irregular expansion districts need local streets and blocks reaching their outer edges.")
+		return
+	print("Expansion candidates prioritize existing districts, preserve curved road edges, and occasionally contain an arterial (%d through, %d edge, %d uncovered samples, %.2f block coverage, %d boundary locals)." % [through, edge, uncovered, least_block_coverage, boundary_local_streets])
 	quit(0)
 
 
@@ -112,6 +134,7 @@ func _region(points: PackedVector2Array, width: float):
 	Geography.update_bounds(city)
 	region.jurisdictions.append(city)
 	region.city_jurisdiction_ids.append(1)
+	region.cities.append({"id": 0, "jurisdiction_id": 1, "neighborhood_ids": [], "density": 1, "center_km": Vector2(width * 0.5, 3.5)})
 	region.starting_city_ids.append(0)
 	region.city_hub_node_ids.append(0)
 	for point in [points[0], points[-1]]:

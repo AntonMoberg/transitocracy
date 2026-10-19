@@ -12,6 +12,7 @@ const RegionMap = preload("res://scripts/ui/region_map.gd")
 const FlowTimeline = preload("res://scripts/ui/flow_timeline.gd")
 const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_generator.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
@@ -2160,7 +2161,7 @@ func _show_road_inspector(link_id: int) -> void:
 	var queue: Vector2 = road_metrics["queue"]
 	var time: Vector2 = road_metrics["time"]
 	var sample_label: String = road_metrics["label"]
-	var capacity: float = (1800.0 if link.road_class == RoadLinkData.HIGHWAY else 900.0) * link.lanes_per_direction
+	var capacity: float = RoadGraph.capacity_per_lane(link.road_class) * link.lanes_per_direction
 	var project_text := ""
 	for project in region.road_projects:
 		if project.target_link_id == link_id:
@@ -2172,8 +2173,8 @@ func _show_road_inspector(link_id: int) -> void:
 		_format_count(roundi(volume.x)), 100.0 * volume.x / capacity, _format_count(roundi(volume.y)), 100.0 * volume.y / capacity,
 		_format_count(roundi(served.x)), _format_count(roundi(served.y)),
 		_format_count(roundi(queue.x)), _format_count(roundi(queue.y)),
-		time.x, time.y, link.length_km * 60.0 / (90.0 if link.road_class == RoadLinkData.HIGHWAY else 50.0),
-		_format_count(roundi(link.length_km * link.lanes_per_direction * (600.0 if link.road_class == RoadLinkData.HIGHWAY else 200.0))), project_text]
+		time.x, time.y, link.length_km * 60.0 / RoadGraph.free_speed_kmh(link.road_class),
+		_format_count(roundi(link.length_km * link.lanes_per_direction * RoadLinkData.upkeep(link.road_class))), project_text]
 
 
 func _format_count(value: int) -> String:

@@ -31,6 +31,7 @@ func _run() -> void:
 	Geography.update_bounds(city)
 	region.jurisdictions.append(city)
 	region.city_jurisdiction_ids.append(1)
+	region.cities.append({"id": 0, "jurisdiction_id": 1, "neighborhood_ids": [], "density": 1, "center_km": Vector2(3.5, 3.5)})
 	region.starting_city_ids.append(0)
 	region.city_hub_node_ids.append(0)
 	for point in [Vector2(1, 3), Vector2(5.8, 3)]:

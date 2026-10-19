@@ -11,7 +11,7 @@ const DEPTH_KM = 0.72
 const COLLECTOR_SPACING_KM = 0.38
 
 
-static func generate(region, city_id: int, route: PackedVector2Array, key: String, exclusions: Array = [], edge_frontage: bool = false, boundary_routes: Array = [], arterial_sides: PackedByteArray = PackedByteArray(), interior_style: String = "Grid", fixed_outline: PackedVector2Array = PackedVector2Array()):
+static func generate(region, city_id: int, route: PackedVector2Array, key: String, exclusions: Array = [], edge_frontage: bool = false, boundary_routes: Array = [], arterial_sides: PackedByteArray = PackedByteArray(), interior_style: String = "Grid", fixed_outline: PackedVector2Array = PackedVector2Array(), grid_guide: Dictionary = {}):
 	var layout = Layout.new()
 	layout.key = key
 	layout.city_id = city_id
@@ -23,8 +23,48 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 	rng.seed = hash("%s:%s" % [region.generation_seed, key])
 	var organic: bool = interior_style == "Organic"
 	var length: float = _route_length(route)
-	var columns: int = maxi(4, roundi(length / SPACING_KM))
-	var rows := 12
+	var frontage_start_km := 0.0
+	var frontage_end_km: float = length
+	var pattern_key: String = "starter-city:%d" % city_id if key.begins_with("starter:") else key
+	var pattern := RandomNumberGenerator.new()
+	pattern.seed = hash("%d:block-pattern:%s" % [region.generation_seed, pattern_key])
+	var long_spacing: float = [0.16, 0.18, 0.20, 0.22][pattern.randi_range(0, 3)]
+	var short_spacing: float = [0.08, 0.09, 0.10][pattern.randi_range(0, 2)]
+	var long_along: bool = pattern.randf() < 0.8
+	var column_spacing: float = long_spacing if long_along else short_spacing
+	var row_spacing: float = short_spacing if long_along else long_spacing
+	var axis: Vector2 = (route[-1] - route[0]).normalized()
+	if axis == Vector2.ZERO:
+		axis = Vector2.RIGHT
+	if edge_frontage and boundary_routes.is_empty() and not fixed_outline.is_empty() and _route_is_straight(route):
+		var before := 0.0
+		var after := 0.0
+		for vertex in fixed_outline:
+			var projection: float = (vertex - route[0]).dot(axis)
+			before = maxf(before, -projection + 0.02)
+			after = maxf(after, projection - length + 0.02)
+		if before > 0.05 or after > 0.05:
+			var extended := PackedVector2Array()
+			if before > 0.05:
+				extended.append(route[0] - axis * before)
+			extended.append_array(route)
+			if after > 0.05:
+				extended.append(route[-1] + axis * after)
+			route = extended
+			frontage_start_km = before if before > 0.05 else 0.0
+			frontage_end_km = frontage_start_km + length
+			length = _route_length(route)
+	if not grid_guide.is_empty() and interior_style == "Grid":
+		var guide_axis: Vector2 = grid_guide.get("axis", Vector2.ZERO)
+		var alignment: float = absf(axis.dot(guide_axis))
+		if alignment >= 0.94:
+			column_spacing = float(grid_guide.get("column_spacing", column_spacing))
+			row_spacing = float(grid_guide.get("row_spacing", row_spacing))
+		elif alignment <= 0.34:
+			column_spacing = float(grid_guide.get("row_spacing", column_spacing))
+			row_spacing = float(grid_guide.get("column_spacing", row_spacing))
+	var columns: int = maxi(4, roundi(length / column_spacing))
+	var rows: int = maxi(6, roundi(DEPTH_KM * 2.0 / row_spacing))
 	var frontage_depth_km: float = DEPTH_KM * 2.0
 	if edge_frontage and boundary_routes.is_empty() and arterial_sides == PackedByteArray([1, 0, 0, 0]) and not fixed_outline.is_empty():
 		# A small fused fringe can extend past the usual frontage depth.
@@ -34,14 +74,23 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 			for segment in range(1, route.size()):
 				nearest = minf(nearest, vertex.distance_to(Geometry2D.get_closest_point_to_segment(vertex, route[segment - 1], route[segment])))
 			frontage_depth_km = maxf(frontage_depth_km, nearest)
-		rows = maxi(rows, ceili(frontage_depth_km / SPACING_KM))
+		rows = maxi(rows, ceili(frontage_depth_km / row_spacing))
+	if not edge_frontage and rows % 2 != 0:
+		rows += 1
 	var half_row: int = 0 if edge_frontage else rows / 2
 	var maximum_distance: int = rows if edge_frontage else rows / 2
 	var available_sides: PackedByteArray = PackedByteArray([1, 1, 1, 1]) if arterial_sides.is_empty() else arterial_sides
 	var column_fractions: PackedFloat32Array = _fractions(columns, rng, false)
 	var row_fractions: PackedFloat32Array = _fractions(rows, rng, false)
-	if edge_frontage and boundary_routes.is_empty() and available_sides == PackedByteArray([1, 0, 0, 0]) and not organic:
-		column_fractions = _mixed_block_fractions(columns, rng)
+	var aligned_to_guide := false
+	if edge_frontage and boundary_routes.is_empty() and not grid_guide.is_empty() and not organic and _route_is_straight(route):
+		aligned_to_guide = true
+		var guide_origin: Vector2 = grid_guide.get("origin", route[0])
+		column_fractions = _aligned_fractions(route[0].dot(axis), guide_origin.dot(axis), length, column_spacing)
+		row_fractions = _aligned_fractions(route[0].dot(axis.orthogonal()), guide_origin.dot(axis.orthogonal()), frontage_depth_km, row_spacing)
+		columns = column_fractions.size() - 1
+		rows = row_fractions.size() - 1
+		maximum_distance = rows
 	if not edge_frontage:
 		row_fractions = _fractions(rows / 2, rng, false)
 		for index in range(row_fractions.size()):
@@ -50,13 +99,17 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 		for index in range(1, upper_rows.size()):
 			row_fractions.append(0.5 + upper_rows[index] * 0.5)
 	if not boundary_routes.is_empty():
-		var boundary_rng := RandomNumberGenerator.new()
-		boundary_rng.seed = hash("%d:boundary-streets:%d" % [region.generation_seed, city_id])
-		column_fractions = _boundary_fractions(_fractions(roundi(FRONTAGE_KM / SPACING_KM), boundary_rng, true))
-		row_fractions = _boundary_fractions(_fractions(rows, boundary_rng, true))
+		columns = maxi(6, roundi(float(roundi(FRONTAGE_KM / column_spacing)) / 3.0) * 3)
+		rows = maxi(6, roundi(float(roundi(DEPTH_KM * 2.0 / row_spacing)) / 2.0) * 2)
+		column_fractions = _fractions(columns, rng, false)
+		row_fractions = _fractions(rows, rng, false)
 		columns = column_fractions.size() - 1
 		rows = row_fractions.size() - 1
 		maximum_distance = rows
+	layout.grid_axis = axis
+	layout.grid_origin = route[0]
+	layout.grid_column_spacing_km = column_spacing if aligned_to_guide else length / float(columns)
+	layout.grid_row_spacing_km = row_spacing if aligned_to_guide else frontage_depth_km / float(rows)
 	var upper_depths := PackedFloat32Array([1, 1, 1, 1])
 	var lower_depths := PackedFloat32Array([1, 1, 1, 1])
 	if not edge_frontage:
@@ -132,10 +185,12 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				continue
 			grid[Vector2i(column, row)] = layout.nodes.size()
 			layout.nodes.append(position)
-			var arterial: bool = row == half_row if not edge_frontage else ((row == 0 and available_sides[0] != 0) or (column == columns and available_sides[1] != 0) or (row == rows and available_sides[2] != 0) or (column == 0 and available_sides[3] != 0))
+			var on_frontage: bool = length * column_fractions[column] >= frontage_start_km - 0.01 and length * column_fractions[column] <= frontage_end_km + 0.01
+			var arterial: bool = row == half_row if not edge_frontage else ((row == 0 and on_frontage and available_sides[0] != 0) or (column == columns and available_sides[1] != 0) or (row == rows and available_sides[2] != 0) or (column == 0 and available_sides[3] != 0))
 			if arterial:
 				layout.arterial_nodes.append(layout.nodes.size() - 1)
 	var open_frontage: bool = edge_frontage and boundary_routes.is_empty() and available_sides == PackedByteArray([1, 0, 0, 0])
+	var collector_row: int = clampi(roundi(0.34 / maxf(0.01, frontage_depth_km / float(rows))), 2, rows - 1)
 	var collector_columns: Dictionary = {}
 	if open_frontage:
 		collector_columns = _frontage_collector_columns(layout, grid, columns, rows, convex, outline)
@@ -161,13 +216,14 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				var road_class: String = Roads.LOCAL
 				if edge_frontage and ((step == Vector2i.RIGHT and row in [0, rows]) or (step == Vector2i.DOWN and column in [0, columns])):
 					var side: int = (0 if row == 0 else 2) if step == Vector2i.RIGHT else (3 if column == 0 else 1)
-					road_class = Roads.ARTERIAL if available_sides[side] != 0 else (Roads.LOCAL if open_frontage else Roads.COLLECTOR)
+					var on_arterial: bool = available_sides[side] != 0 and (side != 0 or (length * column_fractions[column] >= frontage_start_km - 0.01 and length * column_fractions[column + 1] <= frontage_end_km + 0.01))
+					road_class = Roads.ARTERIAL if on_arterial else (Roads.LOCAL if open_frontage else Roads.COLLECTOR)
 				elif not edge_frontage and step == Vector2i.RIGHT and row == half_row:
 					road_class = Roads.ARTERIAL
 				elif open_frontage:
 					if step == Vector2i.DOWN and collector_columns.has(column):
 						road_class = Roads.COLLECTOR
-					elif step == Vector2i.RIGHT and row == 3:
+					elif step == Vector2i.RIGHT and row == collector_row:
 						road_class = Roads.COLLECTOR
 				elif not boundary_routes.is_empty():
 					if (step == Vector2i.RIGHT and absf(row_fractions[row] - 0.5) < 0.0001) or (step == Vector2i.DOWN and collector_columns.has(column)):
@@ -179,7 +235,7 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 					stage = 1
 				_append_edge(layout, first, second, road_class, stage)
 	if open_frontage:
-		_extend_collectors_to_boundary(layout, grid, grid_positions, collector_columns, columns, rows, outline)
+		_extend_streets_to_boundary(layout, grid, grid_positions, collector_columns, columns, rows, outline, collector_row, maximum_distance)
 	var diagonals: Dictionary = {}
 	for row in range(rows):
 		for column in range(columns):
@@ -190,17 +246,51 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				if grid.has(corner):
 					polygon.append(layout.nodes[grid[corner]])
 					corner_ids.append(grid[corner])
-			if polygon.size() != 4 or triangulate(polygon).size() != 6:
-				continue
-			var contained: bool = true
-			if not convex:
+			var stage: int = _phase(maxi(absi(row - half_row), absi(row + 1 - half_row)), maximum_distance)
+			var block_seed: int = rng.randi()
+			var contained: bool = polygon.size() == 4 and triangulate(polygon).size() == 6
+			if contained and not convex:
 				for corner in range(4):
 					if not Geography.segment_on_land(outline, polygon[corner], polygon[(corner + 1) % 4]):
 						contained = false
 			if not contained:
+				var cell := PackedVector2Array()
+				for corner in corners:
+					cell.append(grid_positions[corner])
+				if triangulate(cell).is_empty():
+					continue
+				for piece in Geometry2D.intersect_polygons(cell, outline):
+					if piece.size() < 3 or Geography.polygon_area(piece) < 0.0005 or triangulate(piece).is_empty():
+						continue
+					var center := Vector2.ZERO
+					for point in piece:
+						center += point
+					center /= float(piece.size())
+					var access_id := -1
+					var nearest := 0.35 * 0.35
+					for corner in corners:
+						if not grid.has(corner):
+							continue
+						var candidate_id: int = grid[corner]
+						var distance: float = layout.nodes[candidate_id].distance_squared_to(center)
+						if distance < nearest:
+							access_id = candidate_id
+							nearest = distance
+					if access_id < 0:
+						# A thin panhandle may cut through cells whose four corners
+						# all fall outside the outline. Attach that fringe to a nearby
+						# interior street instead of leaving the land blank.
+						nearest = 0.5 * 0.5
+						for candidate_id in range(layout.nodes.size()):
+							if layout.arterial_nodes.has(candidate_id):
+								continue
+							var distance: float = layout.nodes[candidate_id].distance_squared_to(center)
+							if distance < nearest and Geography.segment_on_land(outline, layout.nodes[candidate_id], center):
+								access_id = candidate_id
+								nearest = distance
+					if access_id >= 0:
+						_append_block_polygon(layout, piece, PackedInt32Array([access_id]), stage, block_seed, false, true)
 				continue
-			var stage: int = _phase(maxi(absi(row - half_row), absi(row + 1 - half_row)), maximum_distance)
-			var block_seed: int = rng.randi()
 			if diagonals.has(Vector2i(column, row)):
 				var diagonal: int = 1 if diagonals[Vector2i(column, row)] else 0
 				var first: int = corner_ids[diagonal]
@@ -216,6 +306,8 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 		for address in [Vector2i.ZERO, Vector2i(columns, 0), Vector2i(columns, rows), Vector2i(0, rows)]:
 			if grid.has(address):
 				boundary_corners.append(grid[address])
+	if open_frontage:
+		_ensure_frontage_collector(layout)
 	_build_core_paths(layout, boundary_corners)
 	var has_frontage_access := not open_frontage
 	if open_frontage:
@@ -231,10 +323,32 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 	return layout
 
 
+static func _ensure_frontage_collector(layout) -> void:
+	var fallback := -1
+	for edge_id in range(layout.edges.size()):
+		var edge: Vector2 = layout.edges[edge_id]
+		if layout.arterial_nodes.has(int(edge.x)) == layout.arterial_nodes.has(int(edge.y)):
+			continue
+		if layout.classes[edge_id] == Roads.COLLECTOR:
+			return
+		if layout.classes[edge_id] == Roads.LOCAL and fallback < 0:
+			fallback = edge_id
+	if fallback < 0:
+		return
+	var old_phase: int = layout.phases[fallback]
+	var length: float = layout.lengths[fallback]
+	layout.phase_costs[old_phase - 1] -= roundi(length * Roads.construction_cost(Roads.LOCAL))
+	layout.phase_upkeep[old_phase - 1] -= length * Roads.upkeep(Roads.LOCAL)
+	layout.classes[fallback] = Roads.COLLECTOR
+	layout.phases[fallback] = 1
+	layout.phase_costs[0] += roundi(length * Roads.construction_cost(Roads.COLLECTOR))
+	layout.phase_upkeep[0] += length * Roads.upkeep(Roads.COLLECTOR)
+
+
 static func _frontage_collector_columns(layout, grid: Dictionary, columns: int, rows: int, convex: bool, outline: PackedVector2Array) -> Dictionary:
 	var choices: Array[Dictionary] = []
 	for column in range(1, columns):
-		if not grid.has(Vector2i(column, 0)):
+		if not grid.has(Vector2i(column, 0)) or not layout.arterial_nodes.has(grid[Vector2i(column, 0)]):
 			continue
 		var depth := 0
 		for row in range(1, rows + 1):
@@ -274,16 +388,15 @@ static func _frontage_collector_columns(layout, grid: Dictionary, columns: int, 
 	return selected
 
 
-static func _extend_collectors_to_boundary(layout, grid: Dictionary, positions: Dictionary, collector_columns: Dictionary, columns: int, rows: int, outline: PackedVector2Array) -> void:
+static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dictionary, collector_columns: Dictionary, columns: int, rows: int, outline: PackedVector2Array, collector_row: int, maximum_distance: int) -> void:
 	for row in range(rows + 1):
 		for column in range(columns + 1):
 			var address := Vector2i(column, row)
-			if not grid.has(address):
+			if row == 0 or not grid.has(address):
 				continue
 			for step in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-				if step.x != 0 and row != 3:
-					continue
-				if step.y != 0 and (not collector_columns.has(column) or row == 0):
+				# Only continue a street that already reaches this interior node.
+				if not grid.has(address - step):
 					continue
 				var next: Vector2i = address + step
 				if grid.has(next) or not positions.has(next):
@@ -295,7 +408,9 @@ static func _extend_collectors_to_boundary(layout, grid: Dictionary, positions: 
 					continue
 				var boundary_id: int = layout.nodes.size()
 				layout.nodes.append(boundary)
-				_append_edge(layout, grid[address], boundary_id, Roads.COLLECTOR, 1)
+				var collector: bool = (step.x != 0 and row == collector_row) or (step.y != 0 and collector_columns.has(column))
+				var stage: int = 1 if collector else _phase(row, maximum_distance)
+				_append_edge(layout, grid[address], boundary_id, Roads.COLLECTOR if collector else Roads.LOCAL, stage)
 
 
 static func _first_boundary_crossing(first: Vector2, last: Vector2, outline: PackedVector2Array) -> Vector2:
@@ -328,21 +443,27 @@ static func _fractions(count: int, rng: RandomNumberGenerator, varied: bool) -> 
 	return result
 
 
-static func _mixed_block_fractions(count: int, rng: RandomNumberGenerator) -> PackedFloat32Array:
-	var phase: int = rng.randi_range(0, 3)
-	var weights := PackedFloat32Array()
-	var total := 0.0
-	for index in range(count):
-		var width := 1.7 if posmod(index + phase, 4) == 0 else 1.0
-		weights.append(width)
-		total += width
+static func _aligned_fractions(start_projection: float, origin_projection: float, length: float, spacing: float) -> PackedFloat32Array:
 	var result := PackedFloat32Array([0.0])
-	var distance := 0.0
-	for width in weights:
-		distance += width
-		result.append(distance / total)
-	result[-1] = 1.0
+	var first_line: int = ceili((start_projection - origin_projection) / spacing)
+	for line in range(first_line, first_line + ceili(length / spacing) + 2):
+		var distance: float = origin_projection + float(line) * spacing - start_projection
+		if distance >= length - maxf(0.04, spacing * 0.3):
+			break
+		if distance <= maxf(0.04, spacing * 0.3):
+			continue
+		result.append(distance / length)
+	result.append(1.0)
 	return result
+
+
+static func _route_is_straight(route: PackedVector2Array) -> bool:
+	if route.size() < 2:
+		return false
+	for index in range(1, route.size() - 1):
+		if route[index].distance_to(Geometry2D.get_closest_point_to_segment(route[index], route[0], route[-1])) > 0.015:
+			return false
+	return true
 
 
 static func _profile(values: PackedFloat32Array, fraction: float) -> float:
@@ -371,20 +492,6 @@ static func frontage_outline(route: PackedVector2Array) -> PackedVector2Array:
 	for index in range(route.size() - 1, -1, -1):
 		outline.append(route[index])
 	return outline
-
-
-static func _boundary_fractions(fractions: PackedFloat32Array) -> PackedFloat32Array:
-	var result := PackedFloat32Array([0.0, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0])
-	for fraction in fractions:
-		var nearby := false
-		for anchor in result:
-			if absf(fraction - anchor) < 0.035:
-				nearby = true
-				break
-		if not nearby:
-			result.append(fraction)
-	result.sort()
-	return result
 
 
 static func _boundary_sample(route: PackedVector2Array, fraction: float) -> Vector2:
@@ -434,7 +541,11 @@ static func _append_block(layout, nodes: PackedInt32Array, phase: int, seed_valu
 	var polygon := PackedVector2Array()
 	for node_id in nodes:
 		polygon.append(layout.nodes[node_id])
-	layout.blocks.append({"polygon": polygon, "nodes": nodes, "phase": phase, "seed": seed_value, "park": park, "area_ha": Geography.polygon_area(polygon) * 100.0})
+	_append_block_polygon(layout, polygon, nodes, phase, seed_value, park, false)
+
+
+static func _append_block_polygon(layout, polygon: PackedVector2Array, nodes: PackedInt32Array, phase: int, seed_value: int, park: bool, fringe: bool) -> void:
+	layout.blocks.append({"polygon": polygon, "nodes": nodes, "phase": phase, "seed": seed_value, "park": park, "fringe": fringe, "area_ha": Geography.polygon_area(polygon) * 100.0})
 
 
 static func _phase(distance: int, maximum_distance: int = 6) -> int:

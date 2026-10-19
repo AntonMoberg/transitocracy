@@ -51,7 +51,7 @@ func _run() -> void:
 			var checked_polygon_edge := false
 			var rectangular_open_plans := 0
 			for candidate in region.development_candidates:
-				_check(StateGeography.polygon_area(candidate["polygon"]) <= 4.001, "candidate area must remain near 2 by 2 km")
+				_check(StateGeography.polygon_area(candidate["polygon"]) <= 4.001, "candidate %s area %.3f km² must remain near 2 by 2 km" % [candidate["key"], StateGeography.polygon_area(candidate["polygon"])])
 				_check(JurisdictionData.polygon_contains_point(candidate["center_km"], candidate["polygon"]), "candidate center must remain inside its irregular cell")
 				if not candidate["key"].contains("face:") and _rectangular(candidate["polygon"]):
 					rectangular_open_plans += 1

@@ -2,6 +2,7 @@ extends SceneTree
 
 const Setup = preload("res://scripts/simulation/region_setup.gd")
 const Planner = preload("res://scripts/simulation/development_planner.gd")
+const Geography = preload("res://scripts/simulation/state_geography.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const StreetNetwork = preload("res://scripts/simulation/street_network.gd")
 const Region = preload("res://scripts/simulation/region_data.gd")
@@ -20,12 +21,16 @@ func _run() -> void:
 	var checked_frontages := 0
 	var square_blocks := 0
 	var rectangular_blocks := 0
+	var fringe_blocks := 0
 	for candidate in region.development_candidates:
 		if int(candidate["neighborhood_id"]) >= 0 or not candidate["layout_input"].get("edge_frontage", false) or not candidate["layout_input"].get("boundaries", []).is_empty():
 			continue
 		var layout = candidate["layout"]
+		var covered_area := 0.0
 		for block in layout.blocks:
 			var polygon: PackedVector2Array = block["polygon"]
+			covered_area += Geography.polygon_area(polygon)
+			fringe_blocks += 1 if block.get("fringe", false) else 0
 			if polygon.size() != 4:
 				continue
 			var width: float = polygon[0].distance_to(polygon[1])
@@ -35,6 +40,10 @@ func _run() -> void:
 				square_blocks += 1
 			elif aspect > 1.45:
 				rectangular_blocks += 1
+		if covered_area < Geography.polygon_area(layout.polygon) * 0.95:
+			push_error("Candidate %s leaves too much boundary land without blocks" % candidate["key"])
+			quit(1)
+			return
 		var origins := PackedVector2Array()
 		for edge_id in range(layout.edges.size()):
 			if layout.classes[edge_id] != Roads.COLLECTOR:
@@ -57,8 +66,8 @@ func _run() -> void:
 		push_error("Expected several one-sided candidate layouts")
 		quit(1)
 		return
-	if square_blocks < 10 or rectangular_blocks < 10:
-		push_error("One-sided plans should mix square and rectangular blocks: %d square, %d rectangular" % [square_blocks, rectangular_blocks])
+	if rectangular_blocks <= square_blocks * 2 or fringe_blocks == 0:
+		push_error("One-sided plans should be mostly rectangular: %d square, %d rectangular" % [square_blocks, rectangular_blocks])
 		quit(1)
 		return
 	var best := {}
@@ -110,6 +119,12 @@ func _run() -> void:
 		push_error("Could not approve an adjacent second plan")
 		quit(1)
 		return
+	if not Planner._shared_boundary_on_arterial(region, next_candidate["polygon"], first_neighborhood.street_layout.polygon):
+		var guide: Dictionary = next_candidate["layout_input"].get("grid_guide", {})
+		if guide.is_empty() or absf(next_candidate["layout"].grid_axis.dot(first_neighborhood.street_layout.grid_axis)) < 0.94:
+			push_error("An adjacent plan without an arterial boundary should continue its neighbor's grid")
+			quit(1)
+			return
 	var second_neighborhood = region.neighborhoods[next_candidate["neighborhood_id"]]
 	for phase in [1, 2, 3]:
 		StreetNetwork.open_phase(region, second_neighborhood, phase)

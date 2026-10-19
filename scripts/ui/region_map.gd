@@ -14,6 +14,7 @@ const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const UrbanMapLayer = preload("res://scripts/ui/urban_map_layer.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
 const WORLD_CENTER = Vector2(120.0, 80.0)
@@ -698,6 +699,10 @@ func _draw_roads() -> void:
 	var lane_colors := PackedColorArray()
 	var arrow_vertices := PackedVector2Array()
 	var arrow_colors := PackedColorArray()
+	var local_casing_lines := PackedVector2Array()
+	var local_lines := PackedVector2Array()
+	var local_colors := PackedColorArray()
+	var selected_local_points := PackedVector2Array()
 	var selected_points := PackedVector2Array()
 	var selected_lanes: int = 0
 	for link_index in road_indices:
@@ -716,6 +721,20 @@ func _draw_roads() -> void:
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
+		if link.road_class == "Local":
+			if not batch_roads:
+				_draw_active_road(screen_points, link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+			else:
+				if selected_road_link_id == link.id and map_mode == "Roads":
+					selected_local_points = screen_points
+				for segment in range(1, screen_points.size()):
+					local_lines.append(screen_points[segment - 1])
+					local_lines.append(screen_points[segment])
+					local_colors.append(forward_color.lerp(reverse_color, 0.5))
+					if map_mode == "Roads":
+						local_casing_lines.append(screen_points[segment - 1])
+						local_casing_lines.append(screen_points[segment])
+			continue
 		if not batch_roads:
 			_draw_active_road(screen_points, link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 			continue
@@ -739,6 +758,13 @@ func _draw_roads() -> void:
 		if map_mode == "Roads":
 			_append_road_arrow_triangles(screen_points, link.lanes_per_direction, arrow_vertices, arrow_colors)
 	if batch_roads:
+		var local_width: float = maxf(1.8, 6.0 * _pixels_per_meter())
+		if not selected_local_points.is_empty():
+			draw_polyline(selected_local_points, Color("f7f0bf"), local_width + 4.0, true)
+		if not local_casing_lines.is_empty():
+			draw_multiline(local_casing_lines, Color("17252c"), local_width + 1.5, true)
+		if not local_lines.is_empty():
+			draw_multiline_colors(local_lines, local_colors, local_width, true)
 		if not selected_points.is_empty():
 			draw_polyline(selected_points, Color("f7f0bf"), _road_outer_half_width(selected_lanes, "Highway") * 2.0 + 3.0, true)
 		for lane_count in casing_lines:
@@ -796,6 +822,14 @@ func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int,
 
 func _draw_active_road(screen_points: PackedVector2Array, lanes: int, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:
 	if screen_points.size() < 2:
+		return
+	if road_class == "Local":
+		var width: float = maxf(1.8, 6.0 * _pixels_per_meter())
+		if selected and map_mode == "Roads":
+			draw_polyline(screen_points, Color("f7f0bf"), width + 4.0, true)
+		if map_mode == "Roads":
+			draw_polyline(screen_points, Color("17252c"), width + 1.5, true)
+		draw_polyline(screen_points, forward_color.lerp(reverse_color, 0.5), width, true)
 		return
 	if map_mode == "Roads":
 		var casing_width: float = _road_outer_half_width(lanes, road_class) * 2.0
@@ -954,6 +988,9 @@ func _draw_dashed_polyline(screen_points: PackedVector2Array, color: Color, widt
 
 
 func _draw_dashed_road(screen_points: PackedVector2Array, lanes: int, road_class: String, color: Color) -> void:
+	if road_class == "Local":
+		_draw_dashed_polyline(screen_points, color, maxf(1.8, 6.0 * _pixels_per_meter()))
+		return
 	for direction in range(2):
 		for lane_index in range(lanes):
 			_draw_dashed_polyline(_offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index, road_class)), color, _road_lane_width(road_class))
@@ -969,7 +1006,7 @@ func _road_load_ratio(link_index: int, link) -> Vector3:
 	var sample: Vector4 = _road_sample(link_index, link)
 	if not is_finite(sample.x):
 		return Vector3.ZERO
-	var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
+	var capacity: float = RoadGraph.capacity_per_lane(link.road_class) * link.lanes_per_direction
 	return Vector3(maxf(sample.x / capacity, sample.z / (capacity * 0.5)), maxf(sample.y / capacity, sample.w / (capacity * 0.5)), 1.0)
 
 
@@ -1007,7 +1044,7 @@ func _has_live_road_sample(link_index: int, link) -> bool:
 
 
 func _live_road_time(link_index: int, link, queue: Vector2) -> Vector2:
-	var capacity: float = (1800.0 if link.road_class == "Highway" else 900.0) * link.lanes_per_direction
+	var capacity: float = RoadGraph.capacity_per_lane(link.road_class) * link.lanes_per_direction
 	var free_minutes: float = live_traffic_state.free_link_costs[link_index].x
 	return Vector2(free_minutes + 60.0 * queue.x / capacity, free_minutes + 60.0 * queue.y / capacity)
 

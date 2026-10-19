@@ -43,37 +43,42 @@ func _run() -> void:
 	_check(curved_highways > 0, "starter highways should include broad bends")
 	_check(inland_curve, "open-land highways should bend rather than only detour around water")
 	_check(sharp_inland_turns == 0, "inland highways should not contain sharp polyline corners")
-	_check_highway_joins(region, 1729)
-	var previewed_continuation := false
-	for city_id in region.starting_city_ids:
-		var hub_id: int = region.city_highway_access_node_ids[city_id]
-		var old_outward := Vector2.ZERO
-		var highway_count := 0
-		for link in region.road_links:
-			if link.road_class != "Highway":
-				continue
-			if link.from_node_id == hub_id:
-				highway_count += 1
-				old_outward = link.points[1] - link.points[0]
-			elif link.to_node_id == hub_id:
-				highway_count += 1
-				old_outward = link.points[-2] - link.points[-1]
-		if highway_count != 1:
+	var highway_corridors: Dictionary = {}
+	for link in region.road_links:
+		if link.road_class != "Highway":
 			continue
-		for other_id in region.starting_city_ids:
-			if other_id == city_id:
+		if not highway_corridors.has(link.corridor_id):
+			highway_corridors[link.corridor_id] = Rect2(link.points[0], Vector2.ZERO)
+		var bounds: Rect2 = highway_corridors[link.corridor_id]
+		for point in link.points:
+			bounds = bounds.expand(point)
+		highway_corridors[link.corridor_id] = bounds
+	var trunks := 0
+	var connectors := 0
+	for bounds in highway_corridors.values():
+		if bounds.size.x > bounds.size.y * 3.0 and bounds.size.x > 500.0:
+			trunks += 1
+		else:
+			connectors += 1
+			_check(bounds.size.x > 30.0 and bounds.size.y > 30.0, "the single cross-state highway connection should be diagonal")
+	_check(trunks == 2 and connectors == 1 and highway_corridors.size() == 3, "the starter network needs two lengthwise trunks joined by one diagonal route")
+	_check_highway_joins(region, 1729)
+	var direct_city_connections := 0
+	for city_id in region.starting_city_ids:
+		var access_id: int = region.city_highway_access_node_ids[city_id]
+		var highway_count := 0
+		var arterial_count := 0
+		for link in region.road_links:
+			if link.from_node_id != access_id and link.to_node_id != access_id:
 				continue
-			var continuation: Dictionary = RoadPlanner.link_preview(region, hub_id, region.city_highway_access_node_ids[other_id], "Highway", PackedVector2Array(), region.current_day_key)
-			if not continuation.get("ok", false):
-				continue
-			var new_outward: Vector2 = continuation["points"][1] - continuation["points"][0]
-			var continuation_error: float = 180.0 - absf(rad_to_deg(old_outward.angle_to(new_outward)))
-			_check(continuation_error < 0.25, "a new highway must continue the existing one without a visible junction angle")
-			previewed_continuation = true
-			break
-		if previewed_continuation:
-			break
-	_check(previewed_continuation, "a new highway continuation should be previewable")
+			highway_count += 1 if link.road_class == "Highway" else 0
+			arterial_count += 1 if link.road_class == "Arterial" else 0
+		_check(highway_count >= 1 and arterial_count >= 1 and region.road_nodes[access_id].kind == "Highway", "a city arterial must join a trunk node rather than a terminal highway spur")
+		var center: Vector2 = region.cities[city_id]["center_km"]
+		var access: Vector2 = region.road_nodes[access_id].position_km
+		if absf(center.x - access.x) < 5.1:
+			direct_city_connections += 1
+	_check(direct_city_connections == region.starting_city_ids.size(), "city arterials should meet lengthwise trunk highways on their perpendicular projection")
 	for seed_value in [291, 3819]:
 		_check_highway_joins(RegionSetup.build(seed_value, 32, 0.10)["region"], seed_value)
 	for city_count in [32, 256, 768]:
@@ -187,8 +192,7 @@ func _check_highway_joins(region, seed_value: int) -> void:
 		if node.kind != "Highway":
 			continue
 		var hub_id: int = node.id
-		var outward: Array[Vector2] = []
-		var neighbors: Array[Vector2] = []
+		var by_corridor: Dictionary = {}
 		for link in region.road_links:
 			if link.road_class != "Highway":
 				continue
@@ -196,30 +200,24 @@ func _check_highway_joins(region, seed_value: int) -> void:
 				if region.road_nodes[link.to_node_id].kind != "Highway":
 					branch_count += 1
 					continue
-				outward.append(link.points[1] - link.points[0])
-				neighbors.append(region.road_nodes[link.to_node_id].position_km - region.road_nodes[hub_id].position_km)
+				if not by_corridor.has(link.corridor_id):
+					by_corridor[link.corridor_id] = []
+				by_corridor[link.corridor_id].append(link.points[1] - link.points[0])
 			elif link.to_node_id == hub_id:
 				if region.road_nodes[link.from_node_id].kind != "Highway":
 					branch_count += 1
 					continue
-				outward.append(link.points[-2] - link.points[-1])
-				neighbors.append(region.road_nodes[link.from_node_id].position_km - region.road_nodes[hub_id].position_km)
-		if outward.size() < 2:
-			continue
-		pair_count += 1
-		var best_first := 0
-		var best_second := 1
-		var best_dot := INF
-		for first_index in range(neighbors.size()):
-			for second_index in range(first_index + 1, neighbors.size()):
-				var alignment: float = neighbors[first_index].normalized().dot(neighbors[second_index].normalized())
-				if alignment < best_dot:
-					best_dot = alignment
-					best_first = first_index
-					best_second = second_index
-		var error: float = 180.0 - absf(rad_to_deg(outward[best_first].angle_to(outward[best_second])))
-		largest_error = maxf(largest_error, error)
-		_check(error < 2.0, "seed %d trunk node %d has a %.3f degree kink in its through-highway pair" % [seed_value, hub_id, error])
+				if not by_corridor.has(link.corridor_id):
+					by_corridor[link.corridor_id] = []
+				by_corridor[link.corridor_id].append(link.points[-2] - link.points[-1])
+		for corridor_id in by_corridor:
+			var outward: Array = by_corridor[corridor_id]
+			if outward.size() != 2:
+				continue
+			pair_count += 1
+			var error: float = 180.0 - absf(rad_to_deg(outward[0].angle_to(outward[1])))
+			largest_error = maxf(largest_error, error)
+			_check(error < 2.0, "seed %d trunk node %d has a %.3f degree kink in its through-highway pair" % [seed_value, hub_id, error])
 	_check(pair_count > 0, "road seed should contain a continuous through-highway corridor")
 	_check(smallest_radius >= RoadRouteBuilder.MIN_HIGHWAY_RADIUS_KM, "seed %d needs highway bends of at least 2 km radius" % seed_value)
 	print("Seed %d (%d cities): %d highway junctions (%d branched), largest through turn %.3f degrees, smallest bend radius %.3f km." % [seed_value, region.cities.size(), pair_count, branch_count, largest_error, smallest_radius])
