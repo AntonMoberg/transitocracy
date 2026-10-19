@@ -17,6 +17,10 @@ const Character = preload("res://scripts/simulation/neighborhood_character.gd")
 const CELL_SIZE_KM = LayoutGenerator.FRONTAGE_KM
 const CELL_OVERLAP_KM = 0.18
 const THROUGH_CANDIDATE_PERCENT = 14
+const CORE_ZONING_RADIUS_KM = 3.5
+const MIN_SHARED_EDGE_KM = 0.04
+const MIN_CANDIDATE_HALF_WIDTH_KM = 0.13
+const MIN_NARROW_PART_AREA_SHARE = 0.12
 
 
 static func refresh_candidates(region) -> void:
@@ -41,7 +45,8 @@ static func refresh_candidates(region) -> void:
 			claimed[neighborhood.city_id] = []
 			established[neighborhood.city_id] = []
 		claimed[neighborhood.city_id].append(neighborhood.street_layout.polygon)
-		established[neighborhood.city_id].append(neighborhood.street_layout.polygon)
+		if neighborhood.development_approved:
+			established[neighborhood.city_id].append(neighborhood.street_layout.polygon)
 	for link in region.road_links:
 		if link.road_class != Roads.ARTERIAL or rooted[link.from_node_id] == 0 or rooted[link.to_node_id] == 0:
 			continue
@@ -68,6 +73,8 @@ static func refresh_candidates(region) -> void:
 		var inside: Vector2 = (polygon[triangles[0]] + polygon[triangles[1]] + polygon[triangles[2]]) / 3.0
 		var city_id: int = region.city_id_at_point(inside)
 		if city_id < 0 or _overlaps_claimed(polygon, claimed.get(city_id, [])):
+			continue
+		if not _can_expand_to(region, city_id, polygon, established.get(city_id, [])):
 			continue
 		var city_polygon: PackedVector2Array = region.jurisdictions[region.city_jurisdiction_ids[city_id]].polygon_km
 		var contained_area := 0.0
@@ -123,7 +130,7 @@ static func refresh_candidates(region) -> void:
 			var through_city_id: int = region.city_id_at_point(center)
 			if through_city_id >= 0:
 				var through_key: String = "%d:%d:%d:through" % [through_city_id, corridor_id, slot]
-				if posmod(hash("%d:%s" % [region.generation_seed, through_key]), 100) < THROUGH_CANDIDATE_PERCENT and not proposed_keys.has(through_key):
+				if center.distance_to(region.cities[through_city_id]["center_km"]) <= CORE_ZONING_RADIUS_KM and posmod(hash("%d:%s" % [region.generation_seed, through_key]), 100) < THROUGH_CANDIDATE_PERCENT and not proposed_keys.has(through_key):
 					proposed_keys[through_key] = true
 					var through_route: PackedVector2Array = LayoutGenerator.frontage(route, maxf(0.0, station - 1.0), minf(length, station + 1.0))
 					proposals.append({"kind": "through", "key": through_key, "city_id": through_city_id, "route": through_route, "frontage_id": frontage_id, "priority": _near_existing_score(center, established.get(through_city_id, [])) + 0.5})
@@ -156,16 +163,20 @@ static func refresh_candidates(region) -> void:
 							var city_polygon: PackedVector2Array = region.jurisdictions[region.city_jurisdiction_ids[city_id]].polygon_km
 							cell = _largest_intersection(expanded[0], city_polygon)
 						var pieces: Array[PackedVector2Array] = Geometry2D.intersect_polygons(cell, corridor_outline)
-						if pieces.size() != 1:
-							continue
-						var outline: PackedVector2Array = pieces[0]
-						var available: PackedVector2Array = _largest_available_piece(outline, established.get(city_id, []))
-						if available.size() < 3 or Geography.polygon_area(available) < 0.4:
-							if Geography.polygon_area(available) >= 0.02:
-								small_remainders.append({"city_id": city_id, "outline": outline, "key": key, "route": directed, "frontage_id": frontage_id})
-							continue
-						proposed_keys[key] = true
-						proposals.append({"kind": "edge", "key": key, "city_id": city_id, "route": directed, "frontage_id": frontage_id, "outline": outline, "priority": _adjacency_score(available, established.get(city_id, []))})
+						for piece_index in range(pieces.size()):
+							var piece_key: String = key if pieces.size() == 1 else "%s:%d" % [key, piece_index]
+							if proposed_keys.has(piece_key):
+								continue
+							var outline: PackedVector2Array = pieces[piece_index]
+							var available: PackedVector2Array = _largest_available_piece(outline, established.get(city_id, []))
+							if not _can_expand_to(region, city_id, available, established.get(city_id, [])):
+								continue
+							if available.size() < 3 or Geography.polygon_area(available) < 0.4:
+								if Geography.polygon_area(available) >= 0.02:
+									small_remainders.append({"city_id": city_id, "outline": outline, "key": piece_key, "route": directed, "frontage_id": frontage_id})
+								continue
+							proposed_keys[piece_key] = true
+							proposals.append({"kind": "edge", "key": piece_key, "city_id": city_id, "route": directed, "corridor_origin": route[0], "frontage_id": frontage_id, "outline": outline, "priority": _adjacency_score(available, established.get(city_id, []))})
 	proposals.sort_custom(func(first: Dictionary, second: Dictionary) -> bool:
 		if not is_equal_approx(float(first["priority"]), float(second["priority"])):
 			return float(first["priority"]) > float(second["priority"])
@@ -182,11 +193,17 @@ static func refresh_candidates(region) -> void:
 			input = {"route": proposal["route"], "edge_frontage": false, "boundaries": [], "arterial_sides": PackedByteArray()}
 		else:
 			var available: PackedVector2Array = _largest_available_piece(proposal["outline"], claimed.get(city_id, []))
+			if not _can_expand_to(region, city_id, available, established.get(city_id, [])):
+				continue
+			available = _trim_narrow_parts(available)
 			if available.size() < 3 or Geography.polygon_area(available) < 0.4:
 				if Geography.polygon_area(available) >= 0.02:
 					small_remainders.append({"city_id": city_id, "outline": proposal["outline"], "key": key, "route": proposal["route"], "frontage_id": proposal["frontage_id"]})
 				continue
 			var grid_guide: Dictionary = _neighbor_grid_guide(region, available, city_id)
+			if not grid_guide.has("axis"):
+				grid_guide["axis"] = (proposal["route"][-1] - proposal["route"][0]).normalized()
+				grid_guide["origin"] = proposal["corridor_origin"]
 			layout = LayoutGenerator.generate(region, city_id, proposal["route"], key, [], true, [], PackedByteArray([1, 0, 0, 0]), "Grid", available, grid_guide)
 			input = {"route": proposal["route"], "edge_frontage": true, "boundaries": [], "arterial_sides": PackedByteArray([1, 0, 0, 0]), "grid_guide": grid_guide}
 		if layout.polygon.size() < 3:
@@ -197,7 +214,9 @@ static func refresh_candidates(region) -> void:
 		claimed[city_id].append(layout.polygon)
 		if proposal["kind"] == "edge":
 			candidate_claim_slots[region.development_candidates.size() - 1] = claimed[city_id].size() - 1
-	_resolve_small_remainders(region, small_remainders, claimed, candidate_claim_slots)
+	_resolve_small_remainders(region, small_remainders, claimed, established, candidate_claim_slots)
+	_propagate_approved_grid_guides(region)
+	_align_through_candidates(region)
 	for key in chosen_styles:
 		if region.development_candidate_keys.has(key):
 			set_candidate_style(region, int(region.development_candidate_keys[key]), chosen_styles[key])
@@ -206,10 +225,13 @@ static func refresh_candidates(region) -> void:
 			set_candidate_character(region, int(region.development_candidate_keys[key]), chosen_characters[key])
 
 
-static func _resolve_small_remainders(region, remainders: Array[Dictionary], claimed: Dictionary, claim_slots: Dictionary) -> void:
+static func _resolve_small_remainders(region, remainders: Array[Dictionary], claimed: Dictionary, established: Dictionary, claim_slots: Dictionary) -> void:
 	for item in remainders:
 		var city_id: int = item["city_id"]
 		var piece: PackedVector2Array = _largest_available_piece(item["outline"], claimed.get(city_id, []))
+		if not _can_expand_to(region, city_id, piece, established.get(city_id, [])):
+			continue
+		piece = _trim_narrow_parts(piece)
 		var area: float = Geography.polygon_area(piece)
 		if area < 0.02 or area >= 0.4:
 			continue
@@ -226,6 +248,9 @@ static func _resolve_small_remainders(region, remainders: Array[Dictionary], cla
 				continue
 			var joined: Array[PackedVector2Array] = Geometry2D.merge_polygons(candidate["polygon"], piece)
 			if joined.size() != 1 or Geography.polygon_area(joined[0]) > 5.0 or absf(Geography.polygon_area(joined[0]) - Geography.polygon_area(candidate["polygon"]) - area) > 0.005:
+				continue
+			# A remainder must not restore a narrow neck that the width pass removed.
+			if Geography.polygon_area(joined[0]) - Geography.polygon_area(_trim_narrow_parts(joined[0])) > 0.01:
 				continue
 			best_id = candidate_id
 			best_score = score
@@ -259,27 +284,88 @@ static func _resolve_small_remainders(region, remainders: Array[Dictionary], cla
 		claimed[city_id] = city_claims
 
 
+static func _propagate_approved_grid_guides(region) -> void:
+	var anchored: Dictionary = {}
+	for candidate in region.development_candidates:
+		var neighborhood_id: int = int(candidate["neighborhood_id"])
+		if neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved:
+			anchored[candidate["key"]] = true
+	if anchored.is_empty():
+		return
+	for pass_index in range(4):
+		var added := 0
+		for candidate_id in range(region.development_candidates.size()):
+			var candidate: Dictionary = region.development_candidates[candidate_id]
+			if anchored.has(candidate["key"]) or int(candidate["neighborhood_id"]) >= 0:
+				continue
+			var input: Dictionary = candidate["layout_input"]
+			if not input.get("edge_frontage", false) or not input.get("boundaries", []).is_empty() or candidate["layout"].interior_style != "Grid":
+				continue
+			var guide: Dictionary = _neighbor_grid_guide(region, candidate["polygon"], int(candidate["city_id"]), String(candidate["key"]), anchored)
+			if not guide.has("source_key"):
+				continue
+			var layout = LayoutGenerator.generate(region, int(candidate["city_id"]), input["route"], candidate["key"], [], true, [], input["arterial_sides"], "Grid", candidate["polygon"], guide)
+			if layout.polygon.size() < 3 or layout.core_paths.is_empty() or absf(Geography.polygon_area(layout.polygon) - Geography.polygon_area(candidate["polygon"])) > 0.005:
+				continue
+			candidate["layout"] = layout
+			input["grid_guide"] = guide
+			candidate["layout_input"] = input
+			region.development_candidates[candidate_id] = candidate
+			anchored[candidate["key"]] = true
+			added += 1
+		if added == 0:
+			break
+
+
+static func _align_through_candidates(region) -> void:
+	for candidate_id in range(region.development_candidates.size()):
+		var candidate: Dictionary = region.development_candidates[candidate_id]
+		if int(candidate["neighborhood_id"]) >= 0 or not String(candidate["key"]).ends_with(":through") or candidate["layout"].interior_style != "Grid":
+			continue
+		var guide: Dictionary = _neighbor_grid_guide(region, candidate["polygon"], int(candidate["city_id"]), String(candidate["key"]))
+		if not guide.has("source_key"):
+			continue
+		var input: Dictionary = candidate["layout_input"]
+		var layout = LayoutGenerator.generate(region, int(candidate["city_id"]), input["route"], candidate["key"], [], false, [], PackedByteArray(), "Grid", candidate["polygon"], guide)
+		if layout.polygon.size() < 3 or layout.core_paths.is_empty() or absf(Geography.polygon_area(layout.polygon) - Geography.polygon_area(candidate["polygon"])) > 0.005:
+			continue
+		candidate["layout"] = layout
+		input["grid_guide"] = guide
+		candidate["layout_input"] = input
+		region.development_candidates[candidate_id] = candidate
+
+
 static func _shared_boundary_on_arterial(region, first: PackedVector2Array, second: PackedVector2Array) -> bool:
 	var shared := 0.0
 	var arterial := 0.0
 	for index in range(first.size()):
 		var start: Vector2 = first[index]
 		var finish: Vector2 = first[(index + 1) % first.size()]
-		var middle: Vector2 = (start + finish) * 0.5
-		var touches := false
-		for other_index in range(second.size()):
-			if middle.distance_to(Geometry2D.get_closest_point_to_segment(middle, second[other_index], second[(other_index + 1) % second.size()])) < 0.006:
-				touches = true
-				break
-		if not touches:
+		var edge: Vector2 = finish - start
+		var length: float = edge.length()
+		if length < 0.001:
 			continue
-		var length: float = start.distance_to(finish)
-		shared += length
-		for link_index in Spatial.near_links(region, middle):
-			var link = region.road_links[link_index]
-			if link.road_class == Roads.ARTERIAL and RoadPlanner.closest_point(link.points, middle).distance_to(middle) < 0.015:
-				arterial += length
-				break
+		var direction: Vector2 = edge / length
+		for other_index in range(second.size()):
+			var other_start: Vector2 = second[other_index]
+			var other_finish: Vector2 = second[(other_index + 1) % second.size()]
+			var other_edge: Vector2 = other_finish - other_start
+			if other_edge.length() < 0.001 or absf(direction.dot(other_edge.normalized())) < 0.995:
+				continue
+			if absf(direction.cross(other_start - start)) > 0.006 or absf(direction.cross(other_finish - start)) > 0.006:
+				continue
+			var low: float = maxf(0.0, minf((other_start - start).dot(direction), (other_finish - start).dot(direction)))
+			var high: float = minf(length, maxf((other_start - start).dot(direction), (other_finish - start).dot(direction)))
+			var overlap: float = maxf(0.0, high - low)
+			if overlap < 0.005:
+				continue
+			shared += overlap
+			var middle: Vector2 = start + direction * ((low + high) * 0.5)
+			for link_index in Spatial.near_links(region, middle):
+				var link = region.road_links[link_index]
+				if link.road_class == Roads.ARTERIAL and RoadPlanner.closest_point(link.points, middle).distance_to(middle) < 0.015:
+					arterial += overlap
+					break
 	return shared > 0.0 and arterial > shared * 0.25
 
 
@@ -313,6 +399,35 @@ static func _largest_available_piece(polygon: PackedVector2Array, exclusions: Ar
 	return best
 
 
+static func _trim_narrow_parts(polygon: PackedVector2Array) -> PackedVector2Array:
+	if polygon.size() < 3:
+		return PackedVector2Array()
+	# Keep land that can hold a core at least two radii wide. Re-expanding
+	# preserves the useful outer boundary while dropping thin peninsulas and
+	# narrow connections between otherwise separate pieces.
+	var largest := 0.0
+	var best := PackedVector2Array()
+	for core in Geometry2D.offset_polygon(polygon, -MIN_CANDIDATE_HALF_WIDTH_KM, Geometry2D.JOIN_MITER):
+		for expanded in Geometry2D.offset_polygon(core, MIN_CANDIDATE_HALF_WIDTH_KM, Geometry2D.JOIN_MITER):
+			for clipped in Geometry2D.intersect_polygons(expanded, polygon):
+				var clean: PackedVector2Array = LayoutGenerator._clean_polygon(clipped)
+				var area: float = Geography.polygon_area(clean)
+				if area > largest:
+					best = clean
+					largest = area
+	# Tiny tapered corners are useful for closing gaps along curved roads.
+	# Keep them unless the removed part is substantial or extends far from
+	# the usable core, as a long thin tail can be small by area.
+	var reach := INF
+	if best.size() >= 3:
+		var original_bounds: Rect2 = Geography._bounds(polygon)
+		var core_bounds: Rect2 = Geography._bounds(best)
+		reach = maxf(maxf(absf(original_bounds.position.x - core_bounds.position.x), absf(original_bounds.end.x - core_bounds.end.x)), maxf(absf(original_bounds.position.y - core_bounds.position.y), absf(original_bounds.end.y - core_bounds.end.y)))
+	if Geography.polygon_area(polygon) - largest < 0.005 or (Geography.polygon_area(polygon) - largest < Geography.polygon_area(polygon) * MIN_NARROW_PART_AREA_SHARE and reach < 0.5):
+		return polygon
+	return best
+
+
 static func _largest_intersection(first: PackedVector2Array, second: PackedVector2Array) -> PackedVector2Array:
 	var best := PackedVector2Array()
 	var largest := 0.0
@@ -333,7 +448,9 @@ static func _near_existing_score(point: Vector2, polygons: Array) -> float:
 
 
 static func _adjacency_score(polygon: PackedVector2Array, established: Array) -> float:
-	var shared := 0.0
+	var shared: float = _shared_edge_length_with_any(polygon, established)
+	if shared >= MIN_SHARED_EDGE_KM:
+		return 1000.0 + shared * 10.0
 	var nearest := INF
 	for other in established:
 		for index in range(polygon.size()):
@@ -343,31 +460,134 @@ static func _adjacency_score(polygon: PackedVector2Array, established: Array) ->
 			for other_index in range(other.size()):
 				var distance: float = middle.distance_to(Geometry2D.get_closest_point_to_segment(middle, other[other_index], other[(other_index + 1) % other.size()]))
 				nearest = minf(nearest, distance)
-				if distance < 0.006:
-					shared += first.distance_to(last)
-					break
-	return shared * 10.0 - nearest if nearest < INF else -1000.0
+	return -nearest if nearest < INF else -1000.0
 
 
-static func _neighbor_grid_guide(region, polygon: PackedVector2Array, city_id: int) -> Dictionary:
-	var best_score := 0.25
+static func _shared_edge_length(first: PackedVector2Array, second: PackedVector2Array) -> float:
+	var shared := 0.0
+	for first_index in range(first.size()):
+		var start: Vector2 = first[first_index]
+		var finish: Vector2 = first[(first_index + 1) % first.size()]
+		var edge: Vector2 = finish - start
+		var length: float = edge.length()
+		if length < 0.001:
+			continue
+		var direction: Vector2 = edge / length
+		for second_index in range(second.size()):
+			var other_start: Vector2 = second[second_index]
+			var other_finish: Vector2 = second[(second_index + 1) % second.size()]
+			var other_edge: Vector2 = other_finish - other_start
+			if other_edge.length() < 0.001 or absf(direction.dot(other_edge.normalized())) < 0.995:
+				continue
+			if absf(direction.cross(other_start - start)) > 0.006 or absf(direction.cross(other_finish - start)) > 0.006:
+				continue
+			var low: float = maxf(0.0, minf((other_start - start).dot(direction), (other_finish - start).dot(direction)))
+			var high: float = minf(length, maxf((other_start - start).dot(direction), (other_finish - start).dot(direction)))
+			shared += maxf(0.0, high - low)
+	return shared
+
+
+static func _can_expand_to(region, city_id: int, polygon: PackedVector2Array, established: Array) -> bool:
+	if polygon.size() < 3:
+		return false
+	var center: Vector2 = region.cities[city_id]["center_km"]
+	if Jurisdiction.polygon_contains_point(center, polygon):
+		return true
+	for index in range(polygon.size()):
+		if center.distance_to(Geometry2D.get_closest_point_to_segment(center, polygon[index], polygon[(index + 1) % polygon.size()])) <= CORE_ZONING_RADIUS_KM:
+			return true
+	if _shared_edge_length_with_any(polygon, established) >= MIN_SHARED_EDGE_KM:
+		return true
+	# A tiny seam between the clipped polygons should not strand a district.
+	for other in established:
+		if Geography._bounds(polygon).grow(0.12).intersects(Geography._bounds(other)) and _outline_distance(polygon, other) <= 0.12:
+			return true
+	return false
+
+
+static func _shared_edge_length_with_any(polygon: PackedVector2Array, others: Array) -> float:
+	var shared := 0.0
+	var bounds: Rect2 = Geography._bounds(polygon).grow(0.01)
+	for other in others:
+		if bounds.intersects(Geography._bounds(other)):
+			shared += _shared_edge_length(polygon, other)
+	return shared
+
+
+static func _outline_distance(first: PackedVector2Array, second: PackedVector2Array) -> float:
+	var nearest := INF
+	for vertex in first:
+		for index in range(second.size()):
+			nearest = minf(nearest, vertex.distance_to(Geometry2D.get_closest_point_to_segment(vertex, second[index], second[(index + 1) % second.size()])))
+	for vertex in second:
+		for index in range(first.size()):
+			nearest = minf(nearest, vertex.distance_to(Geometry2D.get_closest_point_to_segment(vertex, first[index], first[(index + 1) % first.size()])))
+	return nearest
+
+
+static func _neighbor_grid_guide(region, polygon: PackedVector2Array, city_id: int, exclude_key: String = "", allowed_sources: Dictionary = {}) -> Dictionary:
+	var best_score := 0.0
 	var best: Dictionary = {}
+	var seam_targets: Array[Dictionary] = []
 	if city_id < 0 or city_id >= region.cities.size():
 		return best
 	var bounds: Rect2 = Geography._bounds(polygon)
-	for neighborhood_id in region.cities[city_id]["neighborhood_ids"]:
-		var neighborhood = region.neighborhoods[neighborhood_id]
-		if neighborhood.street_layout == null or not neighborhood.development_approved:
+	for candidate in region.development_candidates:
+		if int(candidate["city_id"]) != city_id or candidate["key"] == exclude_key or (not allowed_sources.is_empty() and not allowed_sources.has(candidate["key"])):
 			continue
-		var layout = neighborhood.street_layout
-		if layout.interior_style != "Grid" or layout.grid_axis == Vector2.ZERO or not bounds.grow(0.02).intersects(layout.bounds):
+		var neighborhood_id: int = int(candidate["neighborhood_id"])
+		if neighborhood_id >= 0 and not region.neighborhoods[neighborhood_id].development_approved:
 			continue
-		var score: float = _adjacency_score(polygon, [layout.polygon])
-		if score <= best_score or _shared_boundary_on_arterial(region, polygon, layout.polygon):
+		var layout = candidate["layout"]
+		if not bounds.grow(0.02).intersects(layout.bounds):
+			continue
+		var shared: float = _shared_edge_length(polygon, layout.polygon)
+		if shared < MIN_SHARED_EDGE_KM or _shared_boundary_on_arterial(region, polygon, layout.polygon):
+			continue
+		_append_seam_targets(seam_targets, polygon, layout)
+		if layout.interior_style != "Grid" or layout.grid_axis == Vector2.ZERO:
+			continue
+		var score: float = shared + (0.15 if neighborhood_id >= 0 else 0.0)
+		if score <= best_score:
 			continue
 		best_score = score
-		best = {"axis": layout.grid_axis, "origin": layout.grid_origin, "column_spacing": layout.grid_column_spacing_km, "row_spacing": layout.grid_row_spacing_km}
+		var collector_points := PackedVector2Array()
+		var collector_directions := PackedVector2Array()
+		for edge_id in range(layout.edges.size()):
+			if layout.classes[edge_id] != Roads.COLLECTOR:
+				continue
+			var pair: Vector2 = layout.edges[edge_id]
+			var first: Vector2 = layout.nodes[int(pair.x)]
+			var last: Vector2 = layout.nodes[int(pair.y)]
+			collector_points.append((first + last) * 0.5)
+			collector_directions.append((last - first).normalized())
+		best = {"axis": layout.grid_axis, "origin": layout.grid_origin, "column_spacing": layout.grid_column_spacing_km, "row_spacing": layout.grid_row_spacing_km, "collector_points": collector_points, "collector_directions": collector_directions, "source_key": candidate["key"]}
+	if not seam_targets.is_empty():
+		best["seam_targets"] = seam_targets
 	return best
+
+
+static func _append_seam_targets(targets: Array[Dictionary], polygon: PackedVector2Array, layout) -> void:
+	var bounds: Rect2 = Geography._bounds(polygon).grow(0.02)
+	for edge_id in range(layout.edges.size()):
+		if layout.classes[edge_id] not in [Roads.LOCAL, Roads.COLLECTOR]:
+			continue
+		var pair: Vector2 = layout.edges[edge_id]
+		var first: Vector2 = layout.nodes[int(pair.x)]
+		var last: Vector2 = layout.nodes[int(pair.y)]
+		for reversed in [false, true]:
+			var point: Vector2 = last if not reversed else first
+			var interior: Vector2 = first if not reversed else last
+			if not bounds.has_point(point) or _point_outline_distance(point, polygon) > 0.012 or _point_outline_distance(point, layout.polygon) > 0.012 or _point_outline_distance(interior, polygon) < 0.03:
+				continue
+			targets.append({"point": point, "direction": (point - interior).normalized(), "road_class": layout.classes[edge_id]})
+
+
+static func _point_outline_distance(point: Vector2, polygon: PackedVector2Array) -> float:
+	var nearest := INF
+	for index in range(polygon.size()):
+		nearest = minf(nearest, point.distance_to(Geometry2D.get_closest_point_to_segment(point, polygon[index], polygon[(index + 1) % polygon.size()])))
+	return nearest
 
 
 static func _register_candidate(region, layout, neighborhood_id: int, frontage_id: int, layout_input: Dictionary = {}) -> void:

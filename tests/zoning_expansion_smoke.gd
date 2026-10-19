@@ -61,6 +61,7 @@ func _run() -> void:
 	layout.nodes = PackedVector2Array([Vector2(1.5, 3)])
 	layout.arterial_nodes = PackedInt32Array([0])
 	established.street_layout = layout
+	established.development_approved = true
 	curved.neighborhoods.append(established)
 	Planner.refresh_candidates(curved)
 	if not _candidates_do_not_overlap(curved):
@@ -113,8 +114,47 @@ func _run() -> void:
 	if boundary_local_streets == 0 or least_block_coverage < 0.98:
 		_fail("Irregular expansion districts need local streets and blocks reaching their outer edges.")
 		return
+	if not _check_remote_expansion():
+		return
 	print("Expansion candidates prioritize existing districts, preserve curved road edges, and occasionally contain an arterial (%d through, %d edge, %d uncovered samples, %.2f block coverage, %d boundary locals)." % [through, edge, uncovered, least_block_coverage, boundary_local_streets])
 	quit(0)
+
+
+func _check_remote_expansion() -> bool:
+	var remote = _region(PackedVector2Array([Vector2(1, 3), Vector2(39, 3)]), 40.0)
+	remote.cities[0]["center_km"] = Vector2(3, 3)
+	Planner.refresh_candidates(remote)
+	for candidate in remote.development_candidates:
+		if candidate["center_km"].x > 12.0:
+			_fail("An isolated stretch of arterial should not create remote zoning plans.")
+			return false
+	var existing = Neighborhood.new()
+	existing.id = 0
+	existing.city_id = 0
+	var layout = Layout.new()
+	layout.key = "remote-existing"
+	layout.city_id = 0
+	layout.polygon = PackedVector2Array([Vector2(23, 3.6), Vector2(25, 3.6), Vector2(25, 4.4), Vector2(23, 4.4)])
+	layout.bounds = Geography._bounds(layout.polygon)
+	layout.nodes = PackedVector2Array([Vector2(24, 3)])
+	layout.arterial_nodes = PackedInt32Array([0])
+	existing.street_layout = layout
+	existing.development_approved = true
+	remote.neighborhoods.append(existing)
+	Planner.refresh_candidates(remote)
+	var touching := 0
+	for candidate in remote.development_candidates:
+		if int(candidate["neighborhood_id"]) >= 0 or candidate["center_km"].x < 12.0:
+			continue
+		if Planner._shared_edge_length(candidate["polygon"], layout.polygon) >= Planner.MIN_SHARED_EDGE_KM:
+			touching += 1
+		elif Planner._outline_distance(candidate["polygon"], layout.polygon) > 0.12:
+			_fail("Remote zoning must adjoin developed land or fill a narrow seam beside it.")
+			return false
+	if touching == 0:
+		_fail("An established remote neighborhood should allow expansion along a shared edge.")
+		return false
+	return true
 
 
 func _region(points: PackedVector2Array, width: float):

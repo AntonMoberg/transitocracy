@@ -24,8 +24,8 @@ func _run() -> void:
 		_fail("The small wedge beside Northbank 7 still has no candidate zone.")
 		return
 	var candidate: Dictionary = region.development_candidates[candidate_id]
-	if Geography.polygon_area(candidate["polygon"]) < 1.2:
-		_fail("The wedge should join its larger neighbor when their boundaries meet.")
+	if Geography.polygon_area(candidate["polygon"]) < 0.4:
+		_fail("The previously empty wedge should be part of a usable neighborhood zone.")
 		return
 	var has_block := false
 	for block in candidate["layout"].blocks:
@@ -33,14 +33,14 @@ func _run() -> void:
 			has_block = true
 			break
 	if not has_block:
-		_fail("The fused wedge needs buildable street blocks, not only a larger outline.")
+		_fail("The Northbank wedge needs buildable street blocks, not only a zone outline.")
 		return
 	for other in region.development_candidates:
 		if other["id"] == candidate_id or other["city_id"] != 98:
 			continue
 		for overlap in Geometry2D.intersect_polygons(candidate["polygon"], other["polygon"]):
 			if Geography.polygon_area(overlap) > 0.001:
-				_fail("Fusing the Northbank wedge overlapped another district.")
+				_fail("The Northbank wedge overlaps another district.")
 				return
 	var small_plans := 0
 	var first_small_id := -1
@@ -63,13 +63,13 @@ func _run() -> void:
 		return
 	region.jurisdictions[region.city_jurisdiction_ids[98]].treasury = 1000000000.0
 	if not Planner.set_approval(region, candidate_id, true).get("ok", false):
-		_fail("The fused Northbank plan should be approvable.")
+		_fail("The Northbank wedge plan should be approvable.")
 		return
 	var neighborhood_id: int = region.development_candidates[candidate_id]["neighborhood_id"]
 	if neighborhood_id < 0 or not Jurisdiction.polygon_contains_point(gap, region.neighborhoods[neighborhood_id].street_layout.polygon):
-		_fail("Approving the fused plan must keep the added land in the neighborhood.")
+		_fail("Approving the plan must keep the wedge in the neighborhood.")
 		return
-	print("Northbank 7's wedge joins an adjacent buildable plan; %d other small gaps remain usable plans." % small_plans)
+	print("Northbank 7's wedge belongs to a buildable plan; %d other small gaps remain usable plans." % small_plans)
 	quit(0)
 
 

@@ -68,7 +68,7 @@ func _run() -> void:
 	_check(Traffic.fork_for_week(setup["traffic_state"]).local_districts.has(0), "worker forks must retain local traffic")
 	var candidate_id := -1
 	for candidate in region.development_candidates:
-		if candidate["neighborhood_id"] >= 0 or candidate["frontage_link_id"] < 0 or not candidate["layout_input"].get("edge_frontage", false):
+		if candidate["neighborhood_id"] >= 0 or candidate["frontage_link_id"] < 0 or not candidate["layout_input"].get("edge_frontage", false) or candidate["layout"].phase_costs[1] <= 0 or candidate["layout"].phase_costs[2] <= 0:
 			continue
 		candidate_id = candidate["id"]
 		break

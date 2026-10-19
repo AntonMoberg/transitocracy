@@ -41,7 +41,7 @@ func _run() -> void:
 			elif aspect > 1.45:
 				rectangular_blocks += 1
 		if covered_area < Geography.polygon_area(layout.polygon) * 0.95:
-			push_error("Candidate %s leaves too much boundary land without blocks" % candidate["key"])
+			push_error("Candidate %s leaves too much boundary land without blocks (%.2f coverage, guide %s)" % [candidate["key"], covered_area / Geography.polygon_area(layout.polygon), candidate["layout_input"].get("grid_guide", {}).get("source_key", "corridor")])
 			quit(1)
 			return
 		var origins := PackedVector2Array()
@@ -125,6 +125,10 @@ func _run() -> void:
 			push_error("An adjacent plan without an arterial boundary should continue its neighbor's grid")
 			quit(1)
 			return
+		if next_candidate["layout"].grid_origin.distance_to(guide["origin"]) > 0.001:
+			push_error("A continued grid must retain its neighbor's alignment origin")
+			quit(1)
+			return
 	var second_neighborhood = region.neighborhoods[next_candidate["neighborhood_id"]]
 	for phase in [1, 2, 3]:
 		StreetNetwork.open_phase(region, second_neighborhood, phase)
@@ -137,8 +141,8 @@ func _run() -> void:
 		if link.road_class == Roads.COLLECTOR and link.managed_neighborhood_id == second_neighborhood.id and ((first_neighborhood.access_node_ids.has(link.from_node_id) and second_neighborhood.access_node_ids.has(link.to_node_id)) or (first_neighborhood.access_node_ids.has(link.to_node_id) and second_neighborhood.access_node_ids.has(link.from_node_id))):
 			connectors += 1
 			connector_length += link.length_km
-	if new_arterials != 0 or connectors < 1 or connectors > 2:
-		push_error("Adjacent development must connect collector networks without adding arterials: %d arterial, %d connectors" % [new_arterials, connectors])
+	if new_arterials != 0 or connectors < 1 or connectors > 2 or connector_length > 0.65:
+		push_error("Adjacent development must connect collector networks without long detours or new arterials: %d arterial, %d connectors, %.2f km" % [new_arterials, connectors, connector_length])
 		quit(1)
 		return
 	if not _check_local_fallback():
