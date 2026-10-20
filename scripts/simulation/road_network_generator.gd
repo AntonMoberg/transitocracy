@@ -6,6 +6,8 @@ const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd
 const StreetNetwork = preload("res://scripts/simulation/street_network.gd")
 const StreetLayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
+const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
+const Streamlines = preload("res://scripts/simulation/street_streamline_tracer.gd")
 
 
 static func generate(region) -> void:
@@ -70,10 +72,7 @@ static func _build_starting_highways(region) -> void:
 	var last_x: float = minf(state_bounds.end.x - 10.0, _starting_x_limit(region, false))
 	var ordered: Array[int] = region.starting_city_ids.duplicate()
 	ordered.sort_custom(func(a: int, b: int) -> bool: return region.cities[a]["center_km"].y < region.cities[b]["center_km"].y)
-	# Balance the cities between two trunks. A largest-gap split can strand
-	# nearly all cities on one highway and require very long arterial feeders.
-	var split_index: int = clampi(roundi(float(ordered.size()) * 0.5), 2, ordered.size() - 2)
-	var bands: Array = [ordered.slice(0, split_index), ordered.slice(split_index)]
+	var bands: Array = _choose_highway_bands(region, ordered, last_x - first_x)
 	var trunk_nodes: Array = []
 	var access_options: Dictionary = {}
 	for band_index in range(bands.size()):
@@ -82,18 +81,9 @@ static func _build_starting_highways(region) -> void:
 		var stations: Array = []
 		for station in range(ceili((last_x - first_x) / 35.0) + 1):
 			stations.append({"x": lerpf(first_x, last_x, float(station) / float(maxi(1, ceili((last_x - first_x) / 35.0)))), "city": -1, "cross": -1})
-		# Both trunks offer city-longitude exits where useful. Avoid inserting
-		# nearly coincident stations for cities assigned to the other trunk.
-		for city_id in region.starting_city_ids:
-			if not band.has(city_id):
-				var adjacent_access := false
-				for band_city_id in band:
-					if absf(region.cities[city_id]["center_km"].x - region.cities[band_city_id]["center_km"].x) < 18.0:
-						adjacent_access = true
-						break
-				if adjacent_access:
-					continue
-			stations.append({"x": region.cities[city_id]["center_km"].x, "city": city_id if band.has(city_id) else -1, "access_city": city_id})
+		# Place exits on the corridor actually assigned to each city.
+		for city_id in band:
+			stations.append({"x": region.cities[city_id]["center_km"].x, "city": city_id, "access_city": city_id})
 		stations.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["x"] < b["x"])
 		var sparse_stations: Array = []
 		for entry in stations:
@@ -106,7 +96,21 @@ static func _build_starting_highways(region) -> void:
 				if near_access:
 					continue
 			sparse_stations.append(entry)
-		stations = sparse_stations
+		stations = []
+		for entry in sparse_stations:
+			if not stations.is_empty() and absf(float(entry["x"]) - float(stations[-1]["x"])) < 5.0:
+				var access_city: int = int(entry.get("access_city", -1))
+				if access_city >= 0:
+					var merged: Dictionary = stations[-1]
+					merged["access_cities"].append(access_city)
+					if int(merged["city"]) < 0:
+						merged["city"] = access_city
+				continue
+			var station_entry: Dictionary = entry.duplicate()
+			station_entry["access_cities"] = []
+			if int(entry.get("access_city", -1)) >= 0:
+				station_entry["access_cities"].append(int(entry["access_city"]))
+			stations.append(station_entry)
 		var sites: Array[Vector2] = _corridor_sites(region, stations, target_y, band)
 		var ids: Array[int] = []
 		for station_index in range(stations.size()):
@@ -119,8 +123,7 @@ static func _build_starting_highways(region) -> void:
 			node.city_id = region.city_id_at_point(site)
 			region.road_nodes.append(node)
 			ids.append(node.id)
-			if int(entry.get("access_city", -1)) >= 0:
-				var access_city: int = entry["access_city"]
+			for access_city in entry["access_cities"]:
 				if not access_options.has(access_city):
 					access_options[access_city] = []
 				access_options[access_city].append(node.id)
@@ -132,10 +135,11 @@ static func _build_starting_highways(region) -> void:
 				continue
 			var before: Vector2 = sites[maxi(0, index - 2)]
 			var after: Vector2 = sites[mini(sites.size() - 1, index + 1)]
-			_add_link(region, ids[index - 1], ids[index], RoadLinkData.HIGHWAY, 2, (last - before).normalized(), (after - first).normalized())
+			_add_traced_highway(region, ids[index - 1], ids[index], (last - before).normalized(), (after - first).normalized(), band_index)
 			region.road_links[-1].corridor_id = trunk_corridor_id
 		trunk_nodes.append(ids)
-	_connect_highway_bands(region, trunk_nodes[0], trunk_nodes[1], first_x, last_x)
+	for band_index in range(1, trunk_nodes.size()):
+		_connect_highway_bands(region, trunk_nodes[band_index - 1], trunk_nodes[band_index], last_x - first_x)
 	for city_id in region.starting_city_ids:
 		var center: Vector2 = region.cities[city_id]["center_km"]
 		var access_id := -1
@@ -155,34 +159,92 @@ static func _build_starting_highways(region) -> void:
 		_add_link(region, connector_node, access_id, RoadLinkData.ARTERIAL, 1)
 
 
-static func _connect_highway_bands(region, north_nodes: Array, south_nodes: Array, first_x: float, last_x: float) -> void:
+static func _choose_highway_bands(region, ordered: Array[int], span: float) -> Array:
+	var costs: Array = _highway_band_costs(region, ordered)
+	var count: int = ordered.size()
+	var best: Array = [ordered]
+	var best_score: float = span + costs[0][count]
+	for cut in range(2, count - 1):
+		var trial: Array = [ordered.slice(0, cut), ordered.slice(cut)]
+		var score: float = span * 2.0 + 35.0 + costs[0][cut] + costs[cut][count]
+		if score < best_score:
+			best = trial
+			best_score = score
+		for second_cut in range(cut + 2, count - 1):
+			trial = [ordered.slice(0, cut), ordered.slice(cut, second_cut), ordered.slice(second_cut)]
+			score = span * 3.0 + 70.0 + costs[0][cut] + costs[cut][second_cut] + costs[second_cut][count]
+			if score < best_score:
+				best = trial
+				best_score = score
+	return best
+
+
+static func _highway_band_costs(region, ordered: Array[int]) -> Array:
+	var ys := PackedFloat64Array()
+	var sums := PackedFloat64Array([0.0])
+	for city_id in ordered:
+		var y: float = region.cities[city_id]["center_km"].y
+		ys.append(y)
+		sums.append(sums[-1] + y)
+	var costs: Array = []
+	for start in range(ordered.size()):
+		var row := PackedFloat64Array()
+		row.resize(ordered.size() + 1)
+		for finish in range(start + 1, ordered.size() + 1):
+			var middle_index: int = start + (finish - start) / 2
+			var middle: float = ys[middle_index]
+			var feeder: float = middle * float(middle_index - start) - (sums[middle_index] - sums[start])
+			feeder += sums[finish] - sums[middle_index + 1] - middle * float(finish - middle_index - 1)
+			var left := start
+			var right := middle_index
+			while left < right:
+				var probe: int = (left + right) / 2
+				if ys[probe] < middle - 36.0:
+					left = probe + 1
+				else:
+					right = probe
+			var remote: float = (middle - 36.0) * float(left - start) - (sums[left] - sums[start])
+			left = middle_index + 1
+			right = finish
+			while left < right:
+				var probe: int = (left + right) / 2
+				if ys[probe] <= middle + 36.0:
+					left = probe + 1
+				else:
+					right = probe
+			remote += sums[finish] - sums[left] - (middle + 36.0) * float(finish - left)
+			row[finish] = feeder * 5.0 + remote * 50.0
+		costs.append(row)
+	return costs
+
+
+static func _connect_highway_bands(region, north_nodes: Array, south_nodes: Array, span: float) -> void:
 	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
-	var span: float = last_x - first_x
 	var candidates: Array[Dictionary] = []
 	for north_id in north_nodes:
 		var north: Vector2 = region.road_nodes[north_id].position_km
 		for south_id in south_nodes:
 			var south: Vector2 = region.road_nodes[south_id].position_km
 			var run: float = south.x - north.x
-			if run < span * 0.06 or run > span * 0.32:
+			if run < span * 0.035 or run > span * 0.35:
 				continue
 			var rise: float = south.y - north.y
-			if rise < 30.0 or rise < run * 1.3:
+			if rise < 12.0 or rise < run * 0.35:
 				continue
 			var cross_direction: Vector2 = (south - north).normalized()
-			if absf(cross_direction.cross(_trunk_tangent(region, north_nodes, north_id))) < 0.57 or absf(cross_direction.cross(_trunk_tangent(region, south_nodes, south_id))) < 0.57:
+			if absf(cross_direction.cross(_trunk_tangent(region, north_nodes, north_id))) < 0.4 or absf(cross_direction.cross(_trunk_tangent(region, south_nodes, south_id))) < 0.4:
 				continue
 			if not StateGeography.segment_on_land(land, north, south) or _segment_crosses_starter(region, north, south):
 				continue
 			var middle_x: float = (north.x + south.x) * 0.5
-			var score: float = absf(run - rise * 1.1) + absf(middle_x - (first_x + last_x) * 0.5) * 0.3 + north.distance_to(south) * 0.03
+			var score: float = absf(run - rise * 0.9) + absf(middle_x - (region.jurisdictions[0].bounds_km.position.x + region.jurisdictions[0].bounds_km.end.x) * 0.5) * 0.25 + north.distance_to(south) * 0.03
 			candidates.append({"north": north_id, "south": south_id, "score": score})
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["score"] < b["score"])
 	for candidate in candidates:
 		var first_id: int = candidate["north"]
 		var last_id: int = candidate["south"]
 		var direction: Vector2 = (region.road_nodes[last_id].position_km - region.road_nodes[first_id].position_km).normalized()
-		_add_link(region, first_id, last_id, RoadLinkData.HIGHWAY, 2, direction, direction, true)
+		_add_traced_highway(region, first_id, last_id, direction, direction, north_nodes.size() + south_nodes.size(), true)
 		var link = region.road_links[-1]
 		var clear := true
 		for segment in range(1, link.points.size()):
@@ -197,7 +259,7 @@ static func _connect_highway_bands(region, north_nodes: Array, south_nodes: Arra
 			region.road_nodes[node_id].is_interchange = true
 			region.road_nodes[node_id].interchange_owner_jurisdiction_id = _highway_owner_at(region, region.road_nodes[node_id].position_km)
 		return
-	assert(false, "The two starter highways need one clear diagonal connection.")
+	assert(false, "Starter highway corridors need a clear diagonal connection.")
 
 
 static func _trunk_tangent(region, node_ids: Array, node_id: int) -> Vector2:
@@ -205,6 +267,41 @@ static func _trunk_tangent(region, node_ids: Array, node_id: int) -> Vector2:
 	var before: Vector2 = region.road_nodes[node_ids[maxi(0, index - 1)]].position_km
 	var after: Vector2 = region.road_nodes[node_ids[mini(node_ids.size() - 1, index + 1)]].position_km
 	return (after - before).normalized()
+
+
+static func _add_traced_highway(region, first_id: int, last_id: int, start_tangent: Vector2, end_tangent: Vector2, corridor_index: int, land_certified: bool = false) -> void:
+	var first: Vector2 = region.road_nodes[first_id].position_km
+	var last: Vector2 = region.road_nodes[last_id].position_km
+	var lead: float = minf(1.0, first.distance_to(last) * 0.12)
+	var trace_start: Vector2 = first + start_tangent.normalized() * lead
+	var trace_end: Vector2 = last - end_tangent.normalized() * lead
+	if trace_start.distance_to(trace_end) < lead * 0.5:
+		_add_link(region, first_id, last_id, RoadLinkData.HIGHWAY, 2, start_tangent, end_tangent, land_certified)
+		return
+	var traced: PackedVector2Array = PackedVector2Array([first])
+	traced.append_array(DirectionField.trace_regional(trace_start, trace_end, start_tangent, end_tangent, region.generation_seed, corridor_index))
+	traced.append(last)
+	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
+	var valid := true
+	for segment in range(1, traced.size()):
+		if not StateGeography.segment_on_land(land, traced[segment - 1], traced[segment]) or _segment_crosses_starter(region, traced[segment - 1], traced[segment]):
+			valid = false
+			break
+	if not valid or RoadRouteBuilder.minimum_curve_radius(traced) < RoadRouteBuilder.MIN_HIGHWAY_RADIUS_KM:
+		_add_link(region, first_id, last_id, RoadLinkData.HIGHWAY, 2, start_tangent, end_tangent, land_certified)
+		return
+	var link = RoadLinkData.new()
+	link.id = region.next_road_link_id
+	region.next_road_link_id += 1
+	link.corridor_id = link.id
+	link.from_node_id = first_id
+	link.to_node_id = last_id
+	link.road_class = RoadLinkData.HIGHWAY
+	link.lanes_per_direction = 2
+	link.points = traced
+	link.recalculate_length()
+	link.owner_jurisdiction_id = region.road_owner_for_points(link.points, RoadLinkData.HIGHWAY)
+	region.road_links.append(link)
 
 
 static func _starting_x_limit(region, first: bool) -> float:
@@ -448,6 +545,15 @@ static func _build_city_arterials(region, city: Dictionary) -> void:
 	for row in range(-1, rows + 2):
 		for column in range(-1, columns + 2):
 			var point: Vector2 = center + axis * float(column_offsets[column]) + normal * float(row_offsets[row])
+			positions[Vector2i(column, row)] = point
+	var field_positions: Dictionary = {}
+	for row in range(-1, rows + 2):
+		for column in range(-1, columns + 2):
+			field_positions[Vector2i(column + 1, row + 1)] = positions[Vector2i(column, row)]
+	field_positions = Streamlines.trace_grid(field_positions, columns + 2, rows + 2, region.generation_seed, city_id, Vector2.ZERO, false, center, 0.015)
+	for row in range(-1, rows + 2):
+		for column in range(-1, columns + 2):
+			var point: Vector2 = field_positions[Vector2i(column + 1, row + 1)]
 			if column >= 0 and column <= columns and row >= 0 and row <= rows and column != trunk_column and not arterial_rows.has(row):
 				# Move only collector-grid junctions. Each district keeps simple, shared
 				# straight sides, while the resulting quadrilaterals stay irregular.

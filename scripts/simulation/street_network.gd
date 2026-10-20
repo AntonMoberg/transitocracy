@@ -271,14 +271,17 @@ static func _join_local_streets(region, neighborhood, other, seam: PackedVector2
 		for last_id in last_nodes:
 			var last_point: Vector2 = last_layout.nodes[last_id]
 			var gap: float = first_point.distance_to(last_point)
-			if gap < 0.015 or gap > 0.32:
+			if gap > 0.32:
+				continue
+			var shared_node: bool = gap < 0.015 and _near_polygon_edge(first_layout.polygon, first_point) and _near_polygon_edge(last_layout.polygon, last_point)
+			if gap < 0.015 and not shared_node:
 				continue
 			var seam_distance := INF
 			for point in seam:
 				seam_distance = minf(seam_distance, point.distance_to(Geometry2D.get_closest_point_to_segment(point, first_point, last_point)))
-			if seam_distance > 0.035 or _crosses_arterial(region, first_point, last_point) or _connector_crosses_blocks(first_layout, first_point, last_point) or _connector_crosses_blocks(last_layout, first_point, last_point):
+			if (not shared_node and seam_distance > 0.035) or _crosses_arterial(region, first_point, last_point) or _connector_crosses_blocks(first_layout, first_point, last_point) or _connector_crosses_blocks(last_layout, first_point, last_point):
 				continue
-			var score: float = gap + float(first_tree["distances"][first_id] + last_tree["distances"][last_id]) * 0.4 + seam_distance * 2.0
+			var score: float = gap + float(first_tree["distances"][first_id] + last_tree["distances"][last_id]) * 0.4 + (0.0 if shared_node else seam_distance * 2.0)
 			if score < best_score:
 				best_score = score
 				best = {"first": first_id, "last": last_id}

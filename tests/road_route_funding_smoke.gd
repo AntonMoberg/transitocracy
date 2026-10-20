@@ -60,8 +60,8 @@ func _run() -> void:
 			trunks += 1
 		else:
 			connectors += 1
-			_check(bounds.size.x > 30.0 and bounds.size.y > 30.0, "the single cross-state highway connection should be diagonal")
-	_check(trunks == 2 and connectors == 1 and highway_corridors.size() == 3, "the starter network needs two lengthwise trunks joined by one diagonal route")
+			_check(bounds.size.x > 20.0 and bounds.size.y > 10.0, "cross-state highway connections should be diagonal")
+	_check(trunks >= 1 and trunks <= 3 and connectors == trunks - 1 and highway_corridors.size() == trunks + connectors, "the starter network needs one to three lengthwise trunks joined into a single network")
 	_check_highway_joins(region, 1729)
 	var direct_city_connections := 0
 	for city_id in region.starting_city_ids:

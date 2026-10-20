@@ -135,24 +135,29 @@ func _run() -> void:
 	var new_arterials := 0
 	var connectors := 0
 	var connector_length := 0.0
+	var shared_access := 0
+	for node_id in first_neighborhood.access_node_ids:
+		if second_neighborhood.access_node_ids.has(node_id):
+			shared_access += 1
+	var shared_arterial: bool = Planner._shared_boundary_on_arterial(region, first_neighborhood.street_layout.polygon, second_neighborhood.street_layout.polygon)
 	for link in region.road_links:
 		if link.road_class == Roads.ARTERIAL and link.managed_neighborhood_id in [first_neighborhood.id, second_neighborhood.id]:
 			new_arterials += 1
 		if link.road_class == Roads.COLLECTOR and link.managed_neighborhood_id == second_neighborhood.id and ((first_neighborhood.access_node_ids.has(link.from_node_id) and second_neighborhood.access_node_ids.has(link.to_node_id)) or (first_neighborhood.access_node_ids.has(link.to_node_id) and second_neighborhood.access_node_ids.has(link.from_node_id))):
 			connectors += 1
 			connector_length += link.length_km
-	if new_arterials != 0 or connectors < 1 or connectors > 2 or connector_length > 0.65:
-		push_error("Adjacent development must connect collector networks without long detours or new arterials: %d arterial, %d connectors, %.2f km" % [new_arterials, connectors, connector_length])
+	if new_arterials != 0 or (connectors < 1 and shared_access == 0 and not shared_arterial) or connectors > 2 or connector_length > 0.65:
+		push_error("Adjacent development must connect collector networks without long detours or new arterials: %d arterial, %d connectors, %d shared nodes, %.2f km" % [new_arterials, connectors, shared_access, connector_length])
 		quit(1)
 		return
-	if not _check_local_fallback():
+	if not _check_local_fallback(false) or not _check_local_fallback(true):
 		quit(1)
 		return
-	print("Adjacent plans connect by %d collector links (%.2f km total); offset local streets also join." % [connectors, connector_length])
+	print("Adjacent plans connect by %d collector links, %d shared nodes, arterial seam %s (%.2f km total); offset and coincident local streets also join." % [connectors, shared_access, shared_arterial, connector_length])
 	quit(0)
 
 
-func _check_local_fallback() -> bool:
+func _check_local_fallback(shared_node: bool) -> bool:
 	var region = Region.new()
 	region.city_jurisdiction_ids.append(1)
 	for point in [Vector2(0.7, 0), Vector2(1.3, 0), Vector2(0.7, 0.2), Vector2(1.3, 0.2)]:
@@ -178,7 +183,7 @@ func _check_local_fallback() -> bool:
 		var layout = Layout.new()
 		layout.polygon = PackedVector2Array([Vector2(id, 0), Vector2(id + 1, 0), Vector2(id + 1, 1), Vector2(id, 1)])
 		layout.bounds = Rect2(Vector2(id, 0), Vector2.ONE)
-		layout.nodes = PackedVector2Array([region.road_nodes[id].position_km, region.road_nodes[id + 2].position_km, Vector2(0.92 if id == 0 else 1.08, 0.5)])
+		layout.nodes = PackedVector2Array([region.road_nodes[id].position_km, region.road_nodes[id + 2].position_km, Vector2(1.0 if shared_node else (0.92 if id == 0 else 1.08), 0.5)])
 		layout.edges = PackedVector2Array([Vector2(0, 1), Vector2(1, 2)])
 		layout.classes = PackedStringArray([Roads.COLLECTOR, Roads.LOCAL])
 		layout.phases = PackedInt32Array([1, 1])
@@ -198,7 +203,9 @@ func _check_local_fallback() -> bool:
 	for link in region.road_links:
 		if link.road_class == Roads.LOCAL:
 			local_links += 1
-	if local_links != 3 or not region.neighborhoods[0].development_plan.core_node_ids.has(2) or not region.neighborhoods[1].development_plan.core_node_ids.has(2):
-		push_error("Offset neighborhood streets did not connect through their existing local grids")
+	var first_join: int = region.neighborhoods[0].development_plan.core_node_ids.get(2, -1)
+	var last_join: int = region.neighborhoods[1].development_plan.core_node_ids.get(2, -1)
+	if local_links != (2 if shared_node else 3) or first_join < 0 or last_join < 0 or (shared_node and first_join != last_join):
+		push_error("Neighborhood streets did not connect through their existing local grids (shared node %s)" % shared_node)
 		return false
 	return true

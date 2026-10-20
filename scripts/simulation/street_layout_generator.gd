@@ -5,6 +5,7 @@ const Geography = preload("res://scripts/simulation/state_geography.gd")
 const Jurisdiction = preload("res://scripts/simulation/jurisdiction_data.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
+const Streamlines = preload("res://scripts/simulation/street_streamline_tracer.gd")
 const SPACING_KM = 0.12
 const FRONTAGE_KM = 1.2
 const DEPTH_KM = 0.72
@@ -91,8 +92,8 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 	var half_row: int = 0 if edge_frontage else rows / 2
 	var maximum_distance: int = rows if edge_frontage else rows / 2
 	var available_sides: PackedByteArray = PackedByteArray([1, 1, 1, 1]) if arterial_sides.is_empty() else arterial_sides
-	var column_fractions: PackedFloat32Array = _fractions(columns, rng, false)
-	var row_fractions: PackedFloat32Array = _fractions(rows, rng, false)
+	var column_fractions: PackedFloat32Array = _fractions(columns, rng, organic)
+	var row_fractions: PackedFloat32Array = _fractions(rows, rng, organic)
 	var aligned_to_guide := false
 	if boundary_routes.is_empty() and not grid_guide.is_empty() and grid_guide.get("axis", Vector2.ZERO) != Vector2.ZERO and not organic and _route_is_straight(route) and (absf(axis.dot(grid_guide.get("axis", Vector2.ZERO))) >= 0.94 or absf(axis.dot(grid_guide.get("axis", Vector2.ZERO))) <= 0.34):
 		aligned_to_guide = true
@@ -119,17 +120,17 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 			maximum_distance = maxi(half_row, rows - half_row)
 	if not edge_frontage:
 		if not aligned_to_guide:
-			row_fractions = _fractions(rows / 2, rng, false)
+			row_fractions = _fractions(rows / 2, rng, organic)
 			for index in range(row_fractions.size()):
 				row_fractions[index] *= 0.5
-			var upper_rows: PackedFloat32Array = _fractions(rows / 2, rng, false)
+			var upper_rows: PackedFloat32Array = _fractions(rows / 2, rng, organic)
 			for index in range(1, upper_rows.size()):
 				row_fractions.append(0.5 + upper_rows[index] * 0.5)
 	if not boundary_routes.is_empty():
 		columns = maxi(6, roundi(float(roundi(FRONTAGE_KM / column_spacing)) / 3.0) * 3)
 		rows = maxi(6, roundi(float(roundi(DEPTH_KM * 2.0 / row_spacing)) / 2.0) * 2)
-		column_fractions = _fractions(columns, rng, false)
-		row_fractions = _fractions(rows, rng, false)
+		column_fractions = _fractions(columns, rng, organic)
+		row_fractions = _fractions(rows, rng, organic)
 		columns = column_fractions.size() - 1
 		rows = row_fractions.size() - 1
 		maximum_distance = rows
@@ -189,8 +190,9 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 	var convex: bool = absf(Geography.polygon_area(Geometry2D.convex_hull(outline)) - Geography.polygon_area(outline)) < 0.000001
 	var grid: Dictionary = {}
 	var grid_positions: Dictionary = {}
-	var bend: float = rng.randf_range(0.008, 0.018) if organic else 0.0
-	var phase: float = rng.randf_range(0.0, TAU)
+	var field_guide: Vector2 = grid_guide.get("axis", Vector2.ZERO)
+	if field_guide != Vector2.ZERO and absf(field_guide.dot(axis)) < 0.5:
+		field_guide = field_guide.orthogonal()
 	for row in range(rows + 1):
 		for column in range(columns + 1):
 			var across: float = column_fractions[column]
@@ -203,11 +205,19 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				if not edge_frontage:
 					lateral = (inward * 2.0 - 1.0) * through_depth_km * _profile(lower_depths if row < half_row else upper_depths, across)
 				position = samples[column] + normals[column] * lateral
-			if row > 0 and row < rows and row != half_row and column > 0 and column < columns:
-				var fade: float = sin(across * PI) * sin(PI * (inward if edge_frontage else absf(inward * 2.0 - 1.0)))
-				position += normals[column] * sin(across * TAU + phase) * bend * fade
-				position += normals[column].orthogonal() * sin(inward * TAU + phase) * bend * fade * 0.5
 			grid_positions[Vector2i(column, row)] = position
+	var seed_positions: Dictionary = grid_positions
+	grid_positions = Streamlines.trace_grid(grid_positions, columns, rows, region.generation_seed, city_id, field_guide, organic, region.cities[city_id]["center_km"], 0.075 if organic else 0.04, half_row if not edge_frontage else -1)
+	for address in grid_positions:
+		var original: Vector2 = seed_positions[address]
+		for segment in range(outline.size()):
+			if original.distance_squared_to(Geometry2D.get_closest_point_to_segment(original, outline[segment], outline[(segment + 1) % outline.size()])) < 0.0004:
+				grid_positions[address] = original
+				break
+	_snap_grid_seams(grid_positions, outline, grid_guide.get("seam_targets", []), columns, rows, half_row, edge_frontage)
+	for row in range(rows + 1):
+		for column in range(columns + 1):
+			var position: Vector2 = grid_positions[Vector2i(column, row)]
 			if not Jurisdiction.polygon_contains_point(position, outline):
 				continue
 			grid[Vector2i(column, row)] = layout.nodes.size()
@@ -263,8 +273,11 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				if road_class == Roads.COLLECTOR and step == Vector2i.DOWN:
 					stage = 1
 				_append_edge(layout, first, second, road_class, stage)
-	if open_frontage:
-		_extend_streets_to_boundary(layout, grid, grid_positions, collector_columns, columns, rows, outline, collector_row, maximum_distance, grid_guide)
+	if open_frontage or (not edge_frontage and boundary_routes.is_empty()):
+		_extend_streets_to_boundary(layout, grid, grid_positions, collector_columns, columns, rows, outline, collector_row, maximum_distance, grid_guide, not edge_frontage)
+	if boundary_routes.is_empty():
+		_fill_clipped_grid_lines(region, layout, grid, grid_positions, columns, rows, outline)
+		_build_boundary_roads(region, layout, outline)
 	var diagonals: Dictionary = {}
 	for row in range(rows):
 		for column in range(columns):
@@ -337,6 +350,8 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				boundary_corners.append(grid[address])
 	if open_frontage:
 		_ensure_frontage_collector(layout)
+	if boundary_routes.is_empty():
+		_service_pointed_fringe(layout)
 	_build_core_paths(layout, boundary_corners)
 	var has_frontage_access := not open_frontage
 	if open_frontage:
@@ -436,13 +451,42 @@ static func _guided_collector_row(sample: Vector2, normal: Vector2, axis: Vector
 	return best_row
 
 
-static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dictionary, collector_columns: Dictionary, columns: int, rows: int, outline: PackedVector2Array, collector_row: int, maximum_distance: int, guide: Dictionary) -> void:
+static func _snap_grid_seams(positions: Dictionary, outline: PackedVector2Array, targets: Array, columns: int, rows: int, half_row: int, edge_frontage: bool) -> void:
+	if targets.is_empty():
+		return
+	var used: Dictionary = {}
+	for row in range(rows + 1):
+		if (row == half_row and not edge_frontage) or (row == 0 and edge_frontage):
+			continue
+		for column in range(columns + 1):
+			var address := Vector2i(column, row)
+			var point: Vector2 = positions[address]
+			var boundary_distance := INF
+			for segment in range(outline.size()):
+				boundary_distance = minf(boundary_distance, point.distance_to(Geometry2D.get_closest_point_to_segment(point, outline[segment], outline[(segment + 1) % outline.size()])))
+			if boundary_distance > 0.025:
+				continue
+			var nearest := 0.075
+			var selected := -1
+			for target_id in range(targets.size()):
+				if used.has(target_id):
+					continue
+				var distance: float = point.distance_to(targets[target_id]["point"])
+				if distance < nearest:
+					nearest = distance
+					selected = target_id
+			if selected >= 0:
+				positions[address] = targets[selected]["point"]
+				used[selected] = true
+
+
+static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dictionary, collector_columns: Dictionary, columns: int, rows: int, outline: PackedVector2Array, collector_row: int, maximum_distance: int, guide: Dictionary, through: bool = false) -> void:
 	var seam_targets: Array = guide.get("seam_targets", [])
 	var used_targets: Dictionary = {}
 	for row in range(rows + 1):
 		for column in range(columns + 1):
 			var address := Vector2i(column, row)
-			if row == 0 or not grid.has(address):
+			if (row == 0 and not through) or not grid.has(address):
 				continue
 			for step in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
 				# Only continue a street that already reaches this interior node.
@@ -457,15 +501,15 @@ static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dic
 				if not is_finite(boundary.x) or first.distance_to(boundary) < 0.01:
 					continue
 				var selected_target := -1
-				var collector: bool = (step.x != 0 and row == collector_row) or (step.y != 0 and collector_columns.has(column))
-				var best_score := 0.065
+				var collector: bool = (step.x != 0 and (absi(row - rows / 2) == 3 if through else row == collector_row)) or (step.y != 0 and ((column % 4 == 0 or column == columns) if through else collector_columns.has(column)))
+				var best_score := 0.09
 				for target_id in range(seam_targets.size()):
 					if used_targets.has(target_id):
 						continue
 					var seam_target: Dictionary = seam_targets[target_id]
 					var seam_point: Vector2 = seam_target["point"]
 					var distance: float = boundary.distance_to(seam_point)
-					if distance > 0.065 or (seam_point - first).normalized().dot(seam_target["direction"]) > -0.7 or not Geography.segment_on_land(outline, first, seam_point):
+					if distance > 0.09 or (seam_point - first).normalized().dot(seam_target["direction"]) > -0.55 or not Geography.segment_on_land(outline, first, seam_point):
 						continue
 					var same_class: bool = collector == (seam_target["road_class"] == Roads.COLLECTOR)
 					var score: float = distance + (0.025 if not same_class else 0.0)
@@ -478,7 +522,7 @@ static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dic
 					collector = collector or seam_targets[selected_target]["road_class"] == Roads.COLLECTOR
 				var boundary_id: int = layout.nodes.size()
 				layout.nodes.append(boundary)
-				var stage: int = 1 if collector else _phase(row, maximum_distance)
+				var stage: int = 1 if collector else _phase(absi(row - rows / 2) if through else row, maximum_distance)
 				_append_edge(layout, grid[address], boundary_id, Roads.COLLECTOR if collector else Roads.LOCAL, stage)
 
 
@@ -494,6 +538,224 @@ static func _first_boundary_crossing(first: Vector2, last: Vector2, outline: Pac
 			distance = along
 			nearest = hit
 	return nearest
+
+
+# A tapered tip can cut several grid cells without containing any grid
+# junctions. Clip their shared grid lines into streets so those cells do not
+# form one visually empty cap between the last full row and the perimeter.
+static func _fill_clipped_grid_lines(region, layout, grid: Dictionary, positions: Dictionary, columns: int, rows: int, outline: PackedVector2Array) -> void:
+	for row in range(rows + 1):
+		for column in range(columns + 1):
+			var address := Vector2i(column, row)
+			for step in [Vector2i.RIGHT, Vector2i.DOWN]:
+				var next: Vector2i = address + step
+				if next.x > columns or next.y > rows or (grid.has(address) and grid.has(next)):
+					continue
+				var first: Vector2 = positions[address]
+				var last: Vector2 = positions[next]
+				if first.distance_to(last) < 0.04:
+					continue
+				var stations: Array[Dictionary] = []
+				for point in [first, last]:
+					if Jurisdiction.polygon_contains_point(point, outline) or _point_on_outline(point, outline):
+						stations.append({"point": point, "distance": first.distance_to(point)})
+				for segment in range(outline.size()):
+					var hit = Geometry2D.segment_intersects_segment(first, last, outline[segment], outline[(segment + 1) % outline.size()])
+					if hit == null:
+						continue
+					var duplicate := false
+					for station in stations:
+						if station["point"].distance_to(hit) < 0.003:
+							duplicate = true
+							break
+					if not duplicate:
+						stations.append({"point": hit, "distance": first.distance_to(hit)})
+				stations.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["distance"]) < float(b["distance"]))
+				for index in range(stations.size() - 1):
+					var start: Vector2 = stations[index]["point"]
+					var finish: Vector2 = stations[index + 1]["point"]
+					if start.distance_to(finish) < 0.065:
+						continue
+					var middle: Vector2 = (start + finish) * 0.5
+					if not Jurisdiction.polygon_contains_point(middle, outline) or _near_layout_road(layout, middle, 0.008) or _near_highway(region, middle, 0.07) or _crosses_layout_road(layout, start, finish):
+						continue
+					var start_id: int = _ensure_boundary_node(layout, start)
+					var finish_id: int = _ensure_boundary_node(layout, finish)
+					if start_id != finish_id:
+						_append_edge(layout, start_id, finish_id, Roads.LOCAL, 1)
+
+
+# A clipped fringe is a buildable block, but it looks like vacant land when its
+# outside edge has no street. Continue local streets along the usable district
+# perimeter and join each new run to the existing interior network.
+static func _build_boundary_roads(region, layout, outline: PackedVector2Array) -> void:
+	var boundary_nodes: Dictionary = {}
+	for segment in range(outline.size()):
+		var first: Vector2 = outline[segment]
+		var last: Vector2 = outline[(segment + 1) % outline.size()]
+		var length: float = first.distance_to(last)
+		if length < 0.015:
+			continue
+		var stations: Array[Dictionary] = [{"point": first, "distance": 0.0}, {"point": last, "distance": length}]
+		for node_id in range(layout.nodes.size()):
+			var point: Vector2 = layout.nodes[node_id]
+			var along: float = (point - first).dot((last - first) / length)
+			if along <= 0.003 or along >= length - 0.003:
+				continue
+			if point.distance_to(Geometry2D.get_closest_point_to_segment(point, first, last)) < 0.003:
+				stations.append({"point": point, "distance": along})
+		stations.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["distance"]) < float(b["distance"]))
+		for index in range(stations.size() - 1):
+			var start: Vector2 = stations[index]["point"]
+			var finish: Vector2 = stations[index + 1]["point"]
+			if start.distance_to(finish) < 0.012:
+				continue
+			var middle: Vector2 = (start + finish) * 0.5
+			if _near_layout_road(layout, middle, 0.014) or _near_highway(region, middle, 0.07):
+				continue
+			var start_id: int = _ensure_boundary_node(layout, start)
+			var finish_id: int = _ensure_boundary_node(layout, finish)
+			if start_id == finish_id:
+				continue
+			_append_edge(layout, start_id, finish_id, Roads.LOCAL, 1)
+			boundary_nodes[start_id] = true
+			boundary_nodes[finish_id] = true
+	_connect_boundary_roads(layout, outline, boundary_nodes)
+
+
+static func _ensure_boundary_node(layout, point: Vector2) -> int:
+	for node_id in range(layout.nodes.size()):
+		if layout.nodes[node_id].distance_squared_to(point) < 0.003 * 0.003:
+			return node_id
+	var result: int = layout.nodes.size()
+	layout.nodes.append(point)
+	return result
+
+
+static func _near_layout_road(layout, point: Vector2, tolerance: float) -> bool:
+	for edge in layout.edges:
+		if point.distance_to(Geometry2D.get_closest_point_to_segment(point, layout.nodes[int(edge.x)], layout.nodes[int(edge.y)])) < tolerance:
+			return true
+	return false
+
+
+static func _near_highway(region, point: Vector2, tolerance: float) -> bool:
+	for link in region.road_links:
+		if link.road_class != Roads.HIGHWAY or not Geography._bounds(link.points).grow(tolerance).has_point(point):
+			continue
+		for segment in range(1, link.points.size()):
+			if point.distance_to(Geometry2D.get_closest_point_to_segment(point, link.points[segment - 1], link.points[segment])) < tolerance:
+				return true
+	return false
+
+
+static func _connect_boundary_roads(layout, outline: PackedVector2Array, boundary_nodes: Dictionary) -> void:
+	if boundary_nodes.is_empty():
+		return
+	var connected: Dictionary = _arterial_reachable_nodes(layout)
+	for boundary_id in boundary_nodes:
+		if connected.has(boundary_id):
+			continue
+		var point: Vector2 = layout.nodes[boundary_id]
+		var nearest := 0.35
+		var target_id := -1
+		for candidate_id in connected:
+			var target: Vector2 = layout.nodes[candidate_id]
+			var distance: float = point.distance_to(target)
+			if distance < 0.02 or distance >= nearest or not Geography.segment_on_land(outline, point, target) or _crosses_layout_road(layout, point, target):
+				continue
+			nearest = distance
+			target_id = candidate_id
+		if target_id >= 0:
+			_append_edge(layout, boundary_id, target_id, Roads.LOCAL, 1)
+			connected = _arterial_reachable_nodes(layout)
+
+
+static func _arterial_reachable_nodes(layout) -> Dictionary:
+	var neighbors: Dictionary = {}
+	for edge in layout.edges:
+		var first: int = int(edge.x)
+		var last: int = int(edge.y)
+		if not neighbors.has(first):
+			neighbors[first] = []
+		if not neighbors.has(last):
+			neighbors[last] = []
+		neighbors[first].append(last)
+		neighbors[last].append(first)
+	var connected: Dictionary = {}
+	var pending: Array[int] = []
+	for node_id in layout.arterial_nodes:
+		connected[node_id] = true
+		pending.append(node_id)
+	while not pending.is_empty():
+		var node_id: int = pending.pop_back()
+		for next_id in neighbors.get(node_id, []):
+			if connected.has(next_id):
+				continue
+			connected[next_id] = true
+			pending.append(next_id)
+	return connected
+
+
+static func _crosses_layout_road(layout, first: Vector2, last: Vector2) -> bool:
+	for edge in layout.edges:
+		var hit = Geometry2D.segment_intersects_segment(first, last, layout.nodes[int(edge.x)], layout.nodes[int(edge.y)])
+		if hit != null and hit.distance_to(first) > 0.003 and hit.distance_to(last) > 0.003:
+			return true
+	return false
+
+
+# Pointed fringe blocks have frontage on the first-phase perimeter street.
+# Let them develop with that street instead of leaving the tip vacant until a
+# distant grid row reaches its later construction phase.
+static func _service_pointed_fringe(layout) -> void:
+	var corners := PackedVector2Array()
+	for index in range(layout.polygon.size()):
+		var point: Vector2 = layout.polygon[index]
+		var before: Vector2 = layout.polygon[posmod(index - 1, layout.polygon.size())] - point
+		var after: Vector2 = layout.polygon[(index + 1) % layout.polygon.size()] - point
+		if before.length() < 0.08 or after.length() < 0.08:
+			continue
+		var angle: float = absf(rad_to_deg(before.angle_to(after)))
+		if angle < 15.0 or angle > 65.0:
+			continue
+		for edge_id in range(layout.edges.size()):
+			if layout.classes[edge_id] != Roads.LOCAL or layout.phases[edge_id] != 1:
+				continue
+			var edge: Vector2 = layout.edges[edge_id]
+			var first: Vector2 = layout.nodes[int(edge.x)]
+			var last: Vector2 = layout.nodes[int(edge.y)]
+			if minf(first.distance_to(point), last.distance_to(point)) < 0.42 and _point_on_outline(first, layout.polygon) and _point_on_outline(last, layout.polygon):
+				corners.append(point)
+				break
+	if corners.is_empty():
+		return
+	for block in layout.blocks:
+		if not block.get("fringe", false) or int(block["phase"]) <= 1:
+			continue
+		var polygon: PackedVector2Array = block["polygon"]
+		var center := Vector2.ZERO
+		for point in polygon:
+			center += point
+		center /= float(polygon.size())
+		for corner in corners:
+			if center.distance_to(corner) > 0.42:
+				continue
+			var has_boundary_frontage := false
+			for point in polygon:
+				if point.distance_to(corner) < 0.42 and _point_on_outline(point, layout.polygon):
+					has_boundary_frontage = true
+					break
+			if has_boundary_frontage:
+				block["phase"] = 1
+				break
+
+
+static func _point_on_outline(point: Vector2, outline: PackedVector2Array) -> bool:
+	for index in range(outline.size()):
+		if point.distance_to(Geometry2D.get_closest_point_to_segment(point, outline[index], outline[(index + 1) % outline.size()])) < 0.003:
+			return true
+	return false
 
 
 static func _fractions(count: int, rng: RandomNumberGenerator, varied: bool) -> PackedFloat32Array:

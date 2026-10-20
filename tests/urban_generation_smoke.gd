@@ -18,6 +18,7 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	var starter_highway_counts: Dictionary = {}
 	for city_count in [32, 256, 768]:
 		for seed_value in ([1, 2, 7, 42, 291, 1729, 3819, 6061, 8363444, 918273] if city_count == 32 else [42, 6061]):
 			var setup: Dictionary = Setup.build(seed_value, city_count, 0.1)
@@ -35,11 +36,12 @@ func _run() -> void:
 				if link.road_class != Roads.ARTERIAL:
 					continue
 				if not corridors.has(link.corridor_id):
-					corridors[link.corridor_id] = {"origin": link.points[0], "axis": (link.points[-1] - link.points[0]).normalized(), "length": 0.0}
+					corridors[link.corridor_id] = {"origin": link.points[0], "axis": (link.points[-1] - link.points[0]).normalized(), "length": 0.0, "links": 0, "deviation": 0.0}
 				var corridor: Dictionary = corridors[link.corridor_id]
 				corridor["length"] += link.length_km
+				corridor["links"] += 1
 				for point in link.points:
-					_check(absf((point - corridor["origin"]).cross(corridor["axis"])) < 0.001, "arterials must stay straight across neighborhood boundaries and collector junctions")
+					corridor["deviation"] = maxf(float(corridor["deviation"]), absf((point - corridor["origin"]).cross(corridor["axis"])))
 				for node_id in [link.from_node_id, link.to_node_id]:
 					if not arterial_neighbors.has(node_id):
 						arterial_neighbors[node_id] = []
@@ -47,6 +49,8 @@ func _run() -> void:
 				arterial_neighbors[link.to_node_id].append(link.from_node_id)
 			var long_corridors := 0
 			for corridor in corridors.values():
+				if int(corridor["links"]) > 1:
+					_check(float(corridor["deviation"]) < 0.30, "arterial spines must bend smoothly without wandering across neighborhood blocks")
 				long_corridors += 1 if corridor["length"] >= 3.0 else 0
 			_check(long_corridors >= 16, "most arterial spines must continue for several kilometers without turning")
 			var visited: Dictionary = {}
@@ -64,6 +68,7 @@ func _run() -> void:
 						if neighbor_id != current.y:
 							pending.append(Vector2i(neighbor_id, current.x))
 			var all_starter_polygons: Array[PackedVector2Array] = []
+			var highway_corridors: Dictionary = {}
 			for city_id in region.starting_city_ids:
 				var hub = region.road_nodes[region.city_hub_node_ids[city_id]]
 				var access = region.road_nodes[region.city_highway_access_node_ids[city_id]]
@@ -121,6 +126,10 @@ func _run() -> void:
 			for link in region.road_links:
 				if link.road_class != Roads.HIGHWAY:
 					continue
+				var corridor_bounds: Rect2 = highway_corridors.get(link.corridor_id, Rect2(link.points[0], Vector2.ZERO))
+				for point in link.points:
+					corridor_bounds = corridor_bounds.expand(point)
+				highway_corridors[link.corridor_id] = corridor_bounds
 				for mask in RoadLand.clearance_corridor(link.points, Roads.HIGHWAY):
 					var mask_bounds: Rect2 = Geography._bounds(mask)
 					for polygon in all_starter_polygons:
@@ -128,6 +137,21 @@ func _run() -> void:
 							continue
 						for overlap in Geometry2D.intersect_polygons(mask, polygon):
 							_check(Geography.polygon_area(overlap) < 0.00001, "regional highway %d crosses a starter neighbourhood at seed %d / %d cities (%.5f km²)" % [link.id, seed_value, city_count, Geography.polygon_area(overlap)])
+			if city_count == 32:
+				var trunks := 0
+				for bounds in highway_corridors.values():
+					if bounds.size.x > 250.0 and bounds.size.x > bounds.size.y * 2.0:
+						trunks += 1
+				_check(trunks >= 1 and trunks <= 3 and highway_corridors.size() == trunks * 2 - 1, "starter highway corridors must form one connected network of one to three trunks")
+				starter_highway_counts[trunks] = true
+				if seed_value == 42:
+					var repeated = Generator.generate_region(seed_value)
+					RoadGenerator.generate(repeated)
+					_check(repeated.road_links.size() == region.road_links.size(), "the same seed must reproduce the regional road graph")
+					if repeated.road_links.size() == region.road_links.size():
+						for link_index in range(region.road_links.size()):
+							_check(repeated.road_links[link_index].points == region.road_links[link_index].points, "the same seed must reproduce each road route")
+					_check(repeated.neighborhoods[0].street_layout.nodes == region.neighborhoods[0].street_layout.nodes, "the same seed must reproduce the district street field")
 			_check(streeted == 40, "seed %d at %d cities must have all forty starting street layouts" % [seed_value, city_count])
 			_check(rectangular == 0 and irregular == streeted, "all starter neighborhoods with open arterial spines need irregular boundaries: %d rectangular, %d irregular" % [rectangular, irregular])
 			_check(quadrilaterals > triangles * 4 and elongated_blocks > quadrilaterals * 0.55, "regular interiors must favour rectangular blocks: %d / %d elongated" % [elongated_blocks, quadrilaterals])
@@ -140,8 +164,9 @@ func _run() -> void:
 			_check(filled >= Geography.polygon_area(first_layout.polygon) * 0.90, "street blocks must follow and fill an irregular starter neighborhood")
 			print("Seed %d (%d cities): %d rectangular / %d irregular districts, %d triangular blocks" % [seed_value, city_count, rectangular, irregular, triangles])
 	_check_shared_collectors()
+	_check(starter_highway_counts.size() >= 2, "seeded starter maps should vary their number of main highways")
 	if failures == 0:
-		print("Fourteen seeded states retain varied neighborhoods and blocks around long, straight arterial spines without arterial perimeter rings.")
+		print("Fourteen seeded states retain varied neighborhoods and blocks around long, coherent arterial spines without arterial perimeter rings.")
 	quit(1 if failures > 0 else 0)
 
 
