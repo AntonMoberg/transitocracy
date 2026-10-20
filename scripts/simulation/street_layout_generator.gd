@@ -66,8 +66,17 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 			column_spacing = float(grid_guide.get("row_spacing", column_spacing))
 			row_spacing = float(grid_guide.get("column_spacing", row_spacing))
 	var columns: int = maxi(4, roundi(length / column_spacing))
-	var rows: int = maxi(6, roundi(DEPTH_KM * 2.0 / row_spacing))
-	var frontage_depth_km: float = DEPTH_KM * 2.0
+	var through_depth_km: float = DEPTH_KM
+	if not edge_frontage and not fixed_outline.is_empty():
+		# Painted districts may span farther than the usual fixed-width
+		# through corridor. Cover both sides of their complete outline.
+		for vertex in fixed_outline:
+			var nearest := INF
+			for segment in range(1, route.size()):
+				nearest = minf(nearest, vertex.distance_to(Geometry2D.get_closest_point_to_segment(vertex, route[segment - 1], route[segment])))
+			through_depth_km = maxf(through_depth_km, nearest + 0.02)
+	var frontage_depth_km: float = through_depth_km * 2.0
+	var rows: int = maxi(6, roundi(frontage_depth_km / row_spacing))
 	if edge_frontage and boundary_routes.is_empty() and arterial_sides == PackedByteArray([1, 0, 0, 0]) and not fixed_outline.is_empty():
 		# A small fused fringe can extend past the usual frontage depth.
 		# Give its grid enough rows to reach the added land.
@@ -96,7 +105,7 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 			rows = row_fractions.size() - 1
 			maximum_distance = rows
 		else:
-			var aligned_rows: PackedFloat32Array = _aligned_fractions((route[0] - normal * DEPTH_KM).dot(normal), guide_origin.dot(normal), DEPTH_KM * 2.0, row_spacing)
+			var aligned_rows: PackedFloat32Array = _aligned_fractions((route[0] - normal * through_depth_km).dot(normal), guide_origin.dot(normal), through_depth_km * 2.0, row_spacing)
 			row_fractions = PackedFloat32Array()
 			for fraction in aligned_rows:
 				if fraction < 0.499:
@@ -154,9 +163,9 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 			outline = frontage_outline(route)
 		else:
 			for column in range(columns + 1):
-				outline.append(samples[column] + normals[column] * DEPTH_KM * _profile(upper_depths, column_fractions[column]))
+				outline.append(samples[column] + normals[column] * through_depth_km * _profile(upper_depths, column_fractions[column]))
 			for column in range(columns, -1, -1):
-				outline.append(samples[column] - normals[column] * DEPTH_KM * _profile(lower_depths, column_fractions[column]))
+				outline.append(samples[column] - normals[column] * through_depth_km * _profile(lower_depths, column_fractions[column]))
 	if not fixed_outline.is_empty():
 		outline = fixed_outline.duplicate()
 	else:
@@ -192,7 +201,7 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 			else:
 				var lateral: float = inward * frontage_depth_km
 				if not edge_frontage:
-					lateral = (inward * 2.0 - 1.0) * DEPTH_KM * _profile(lower_depths if row < half_row else upper_depths, across)
+					lateral = (inward * 2.0 - 1.0) * through_depth_km * _profile(lower_depths if row < half_row else upper_depths, across)
 				position = samples[column] + normals[column] * lateral
 			if row > 0 and row < rows and row != half_row and column > 0 and column < columns:
 				var fade: float = sin(across * PI) * sin(PI * (inward if edge_frontage else absf(inward * 2.0 - 1.0)))

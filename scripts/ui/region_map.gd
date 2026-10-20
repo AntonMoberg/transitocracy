@@ -2,6 +2,9 @@ extends Control
 
 signal neighborhood_selected(neighborhood_id: int)
 signal candidate_selected(candidate_id: int)
+signal growth_stroke_finished(points: PackedVector2Array, erase: bool)
+signal growth_polygon_finished(points: PackedVector2Array)
+signal growth_vertex_moved(draft_id: int, vertex_id: int, position: Vector2)
 signal local_street_selected(neighborhood_id: int, edge_id: int)
 signal road_node_clicked(node_id: int)
 signal road_link_clicked(link_id: int, world_position: Vector2)
@@ -12,11 +15,13 @@ signal jurisdiction_selected(jurisdiction_id: int)
 
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
+const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
 const UrbanMapLayer = preload("res://scripts/ui/urban_map_layer.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const GrowthAreas = preload("res://scripts/simulation/growth_area_planner.gd")
 const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
 const MIN_VISIBLE_SOCIAL_TRIPS = 0.05
@@ -45,10 +50,18 @@ var flow_profile
 var next_day_profile
 var traffic_profile
 var map_mode: String = "Roads"
+var zoning_tool: String = "Inspect"
+var growth_stroke: PackedVector2Array = PackedVector2Array()
+var growth_polygon_anchors: Array[Dictionary] = []
+var growth_hover_anchor: Dictionary = {}
+var growth_polygon_city_id: int = -1
+var growth_angle_snap_enabled: bool = false
+var growth_edit_vertex: int = -1
 var detail_level: String = "Neighborhood"
 var road_tool: String = "Inspect"
 var road_draw_mode: String = RoadRouteBuilder.STRAIGHT
 var road_snap_enabled: bool = false
+var road_length_snap_enabled: bool = false
 var selected_road_link_id: int = -1
 var selected_local_street := Vector2i(-1, -1)
 var preview_start_node: int = -1
@@ -179,7 +192,96 @@ func set_traffic_profile(new_profile) -> void:
 
 
 func set_map_mode(mode: String) -> void:
+	if mode != "Zoning":
+		clear_growth_polygon()
 	map_mode = mode
+	queue_redraw()
+
+
+func clear_growth_polygon() -> void:
+	growth_polygon_anchors.clear()
+	growth_hover_anchor.clear()
+	growth_polygon_city_id = -1
+	queue_redraw()
+
+
+func set_growth_angle_snap(enabled: bool) -> void:
+	growth_angle_snap_enabled = enabled
+	if region != null and map_mode == "Zoning" and zoning_tool == "Draw" and not growth_polygon_anchors.is_empty():
+		growth_hover_anchor = _growth_snap_at(_world_to_screen(hover_world_position))
+	queue_redraw()
+
+
+func undo_growth_corner() -> void:
+	if growth_polygon_anchors.is_empty():
+		return
+	growth_polygon_anchors.pop_back()
+	if growth_polygon_anchors.is_empty():
+		clear_growth_polygon()
+	else:
+		queue_redraw()
+
+
+func finish_growth_polygon() -> void:
+	if growth_polygon_anchors.size() < 3 or region == null:
+		return
+	growth_polygon_finished.emit(GrowthAreas.outline_from_anchors(region, growth_polygon_anchors))
+
+
+func _growth_city_at(point: Vector2) -> int:
+	var city_id: int = region.city_id_at_point(point)
+	if city_id >= 0:
+		return city_id
+	for offset in [Vector2(0.02, 0), Vector2(-0.02, 0), Vector2(0, 0.02), Vector2(0, -0.02)]:
+		city_id = region.city_id_at_point(point + offset)
+		if city_id >= 0:
+			return city_id
+	return -1
+
+
+func _growth_snap_at(screen_point: Vector2) -> Dictionary:
+	if _growth_close_hit(screen_point):
+		var close_anchor: Dictionary = growth_polygon_anchors[0].duplicate()
+		close_anchor["closing"] = true
+		return close_anchor
+	var world: Vector2 = _screen_to_world(screen_point)
+	var city_id: int = growth_polygon_city_id if growth_polygon_city_id >= 0 else _growth_city_at(world)
+	var tolerance: float = clampf(14.0 / maxf(0.01, _map_scale() * zoom), 0.001, 0.25)
+	var previous_anchor: Dictionary = growth_polygon_anchors[-1] if not growth_polygon_anchors.is_empty() else {}
+	var anchor: Dictionary
+	if region.is_large_scale and zoom >= 2.0:
+		_ensure_spatial_index()
+		var nearby_links: Array[int] = _spatial_near_indices(spatial_road_links, screen_point, 18.0, true)
+		anchor = GrowthAreas.snap_anchor(region, city_id, world, tolerance, -1, nearby_links, true, previous_anchor)
+	else:
+		anchor = GrowthAreas.snap_anchor(region, city_id, world, tolerance, -1, [], false, previous_anchor)
+	if growth_angle_snap_enabled and not growth_polygon_anchors.is_empty() and not anchor.has("kind"):
+		return GrowthAreas.angle_snap_anchor(region, growth_polygon_anchors, world)
+	return anchor
+
+
+func _growth_close_hit(screen_point: Vector2) -> bool:
+	return growth_polygon_anchors.size() >= 3 and _world_to_screen(growth_polygon_anchors[0]["point"]).distance_to(screen_point) <= 16.0
+
+
+func _growth_add_corner(screen_point: Vector2, double_click: bool) -> void:
+	if region == null:
+		return
+	if _growth_close_hit(screen_point):
+		finish_growth_polygon()
+		return
+	if double_click and growth_polygon_anchors.size() >= 3:
+		finish_growth_polygon()
+		return
+	if growth_polygon_city_id < 0:
+		growth_polygon_city_id = _growth_city_at(_screen_to_world(screen_point))
+	if growth_polygon_city_id < 0:
+		return
+	var anchor: Dictionary = _growth_snap_at(screen_point)
+	if not growth_polygon_anchors.is_empty() and anchor["point"].distance_to(growth_polygon_anchors[-1]["point"]) < 0.005:
+		return
+	growth_polygon_anchors.append(anchor)
+	growth_hover_anchor = anchor
 	queue_redraw()
 
 
@@ -200,9 +302,10 @@ func set_road_tool(tool_name: String) -> void:
 	queue_redraw()
 
 
-func set_road_input_mode(mode: String, snap_enabled: bool) -> void:
+func set_road_input_mode(mode: String, snap_enabled: bool, length_snap_enabled: bool = false) -> void:
 	road_draw_mode = mode
 	road_snap_enabled = snap_enabled
+	road_length_snap_enabled = length_snap_enabled
 	queue_redraw()
 
 
@@ -563,6 +666,7 @@ func _draw() -> void:
 	_draw_grade_crossings()
 	if map_mode == "Zoning":
 		_draw_zoning_candidates()
+		_draw_growth_controls()
 	if map_mode == "Trips":
 		_draw_hourly_flows()
 	if map_mode != "Zoning":
@@ -1261,14 +1365,14 @@ func _draw_road_preview() -> void:
 			var awaiting_guide: bool = multi_curve and preview_waypoints.size() % 2 == 0
 			if multi_curve and not preview_frozen_route.is_empty():
 				points = preview_frozen_route
-			var snap_guide: Dictionary = RoadPlanner.snap_guidance(region, preview_start_node, preview_waypoints, hover_world_position, road_tool, road_draw_mode) if road_snap_enabled else {}
+			var snap_guide: Dictionary = RoadPlanner.snap_guidance(region, preview_start_node, preview_waypoints, hover_world_position, road_tool, road_draw_mode, road_snap_enabled, road_length_snap_enabled) if road_snap_enabled or road_length_snap_enabled else {}
 			var ghost: Vector2 = snap_guide.get("position", hover_world_position)
 			var guide_origin: Vector2 = preview_waypoints[-1] if not preview_waypoints.is_empty() else region.road_nodes[preview_start_node].position_km
 			var ray: Vector2 = ghost - guide_origin
 			if ray.length() > 0.001:
 				draw_dashed_line(_world_to_screen(guide_origin), _world_to_screen(ghost), Color("a9d4ee", 0.6), 1.0, 6.0, true)
-				if road_snap_enabled:
-					if snap_guide["has_reference"] and (preview_waypoints.is_empty() or multi_curve):
+				if road_snap_enabled or road_length_snap_enabled:
+					if road_snap_enabled and snap_guide["has_reference"] and (preview_waypoints.is_empty() or multi_curve):
 						var reference: Vector2 = snap_guide["reference"]
 						draw_line(_world_to_screen(guide_origin - reference * 0.12), _world_to_screen(guide_origin), Color("85d4ff"), 3.0, true)
 					draw_string(get_theme_default_font(), _world_to_screen(ghost) + Vector2(10, -8), snap_guide["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d1eaff"))
@@ -1363,9 +1467,9 @@ func _draw_zoning_legend() -> void:
 	var font := get_theme_default_font()
 	var base := Vector2(18.0, size.y - 16.0)
 	draw_rect(Rect2(base - Vector2(9, 60), Vector2(440, 81)), Color(0.04, 0.09, 0.16, 0.90))
-	draw_string(font, base + Vector2(0, -42), "ZONING · CLICK A ROAD-FRONTAGE CELL", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
-	draw_string(font, base + Vector2(0, -17), "Amber = awaiting approval  •  Green = approved", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, base + Vector2(0, 4), "Zoom in to see neighborhood candidates", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+	draw_string(font, base + Vector2(0, -42), "ZONING · DRAW A DISTRICT OUTLINE", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
+	draw_string(font, base + Vector2(0, -17), "Click corners · Click first / Enter to close · Right click to undo", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	draw_string(font, base + Vector2(0, 4), "Edges snap to neighborhoods, arterials and highways", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 
 func _draw_zoning_candidates() -> void:
@@ -1390,6 +1494,8 @@ func _draw_zoning_candidates() -> void:
 		visible_ids.append(selected_candidate_id)
 	for candidate_id in visible_ids:
 		var candidate: Dictionary = region.development_candidates[candidate_id]
+		if int(candidate["neighborhood_id"]) < 0 and not candidate.has("growth_draft_id"):
+			continue
 		var id: int = candidate["id"]
 		var center: Vector2 = _world_to_screen(candidate["center_km"])
 		if not _screen_visible(center, 20.0):
@@ -1407,6 +1513,111 @@ func _draw_zoning_candidates() -> void:
 			draw_colored_polygon(polygon, color)
 		polygon.append(polygon[0])
 		draw_polyline(polygon, Color("fff0b0") if id == selected_candidate_id else Color(color.r, color.g, color.b, 0.65), 2.5 if id == selected_candidate_id else 1.0, true)
+		if id == selected_candidate_id and candidate.has("growth_draft_id") and zoning_tool == "Edit":
+			for draft in region.growth_area_drafts:
+				if int(draft["id"]) == int(candidate["growth_draft_id"]):
+					var draft_outline: PackedVector2Array = _screen_polyline(draft["polygon"])
+					draft_outline.append(draft_outline[0])
+					draw_polyline(draft_outline, Color("fff0b0", 0.8), 1.5, true)
+					for vertex in draft_outline.slice(0, -1):
+						draw_circle(vertex, 5.0, Color("fff0b0"))
+					break
+
+
+func _draw_growth_controls() -> void:
+	if not growth_stroke.is_empty():
+		var screen_stroke: PackedVector2Array = _screen_polyline(growth_stroke)
+		if screen_stroke.size() > 1:
+			draw_polyline(screen_stroke, Color("ec7373", 0.8), 5.0, true)
+		for point in screen_stroke:
+			draw_circle(point, 3.0, Color("ec7373"))
+	if zoning_tool == "Draw":
+		if not growth_polygon_anchors.is_empty():
+			_draw_growth_polygon_preview()
+		elif growth_hover_anchor.has("kind"):
+			_draw_growth_snap_marker(growth_hover_anchor)
+
+
+func _draw_growth_polygon_preview() -> void:
+	var anchors: Array[Dictionary] = growth_polygon_anchors.duplicate()
+	var hover: Dictionary = growth_hover_anchor
+	if hover.is_empty():
+		hover = {"point": hover_world_position}
+	if hover["point"].distance_to(anchors[-1]["point"]) > 0.005:
+		anchors.append(hover)
+	var outline: PackedVector2Array = GrowthAreas.outline_from_anchors(region, anchors, anchors.size() >= 3)
+	if outline.size() >= 3 and not Geometry2D.triangulate_polygon(outline).is_empty():
+		draw_colored_polygon(_screen_polyline(outline), Color(1.0, 0.70, 0.30, 0.13))
+	var confirmed: PackedVector2Array = GrowthAreas.outline_from_anchors(region, growth_polygon_anchors, false)
+	if confirmed.size() >= 2:
+		draw_polyline(_screen_polyline(confirmed), Color("ffd179"), 2.5, true)
+	if anchors.size() > growth_polygon_anchors.size():
+		var next_segment: PackedVector2Array = GrowthAreas.path_between(region, growth_polygon_anchors[-1], hover)
+		draw_polyline(_screen_polyline(next_segment), Color("ffe29f", 0.8), 2.0, true)
+		if hover.get("angle_snapped", false):
+			var snap_screen: Vector2 = _world_to_screen(hover["point"])
+			draw_circle(snap_screen, 3.5, Color("85d4ff"))
+			draw_arc(snap_screen, 8.0, 0.0, TAU, 20, Color("85d4ff"), 1.5, true)
+			draw_string(get_theme_default_font(), snap_screen + Vector2(12, -8), hover["angle_label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d1eaff"))
+			if hover.get("has_reference", false):
+				var origin: Vector2 = growth_polygon_anchors[-1]["point"]
+				var reference: Vector2 = hover["angle_reference"]
+				draw_line(_world_to_screen(origin - reference * 0.12), _world_to_screen(origin), Color("85d4ff"), 2.0, true)
+	var first: Vector2 = _world_to_screen(growth_polygon_anchors[0]["point"])
+	for anchor in growth_polygon_anchors:
+		draw_circle(_world_to_screen(anchor["point"]), 4.5, Color("ffd179"))
+	var can_finish: bool = growth_polygon_anchors.size() >= 3
+	var closing: bool = hover.get("closing", false)
+	draw_circle(first, 6.0 if closing else 4.0, Color("fff0b0"))
+	draw_arc(first, 16.0 if can_finish else 9.0, 0.0, TAU, 32, Color("70e2da") if closing else Color("fff0b0"), 2.5, true)
+	if closing:
+		draw_string(get_theme_default_font(), first + Vector2(19, -12), "Click to finish", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("fff0b0"))
+	elif hover.has("kind") and anchors.size() > growth_polygon_anchors.size():
+		_draw_growth_snap_marker(hover)
+
+
+func _draw_growth_snap_marker(anchor: Dictionary) -> void:
+	var screen_point: Vector2 = _world_to_screen(anchor["point"])
+	if anchor.get("snap_point", false):
+		draw_circle(screen_point, 4.0, Color("70e2da"))
+		draw_arc(screen_point, 11.0, 0.0, TAU, 24, Color("70e2da"), 2.0, true)
+		if anchor.get("intersection", false):
+			var label: String = "%s connection" % anchor["street_class"] if anchor.has("street_class") else "Intersection"
+			draw_string(get_theme_default_font(), screen_point + Vector2(15, -8), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d5fff7"))
+	else:
+		draw_arc(screen_point, 7.0, 0.0, TAU, 20, Color("70e2da"), 2.0, true)
+
+
+func _visible_zoning_candidate_at(point: Vector2) -> int:
+	for draft in region.growth_area_drafts:
+		var candidate_id: int = int(region.development_candidate_keys.get("growth:%d" % int(draft["id"]), -1))
+		if candidate_id >= 0 and JurisdictionData.polygon_contains_point(point, region.development_candidates[candidate_id]["polygon"]):
+			return candidate_id
+	var grid: Vector2i = StateGeography.cell_grid_at_point(region.generation_seed, point)
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			for candidate_id in region.development_candidate_cells.get("%d:%d" % [grid.x + offset_x, grid.y + offset_y], []):
+				var candidate: Dictionary = region.development_candidates[candidate_id]
+				if int(candidate["neighborhood_id"]) >= 0 and JurisdictionData.polygon_contains_point(point, candidate["polygon"]):
+					return candidate_id
+	return -1
+
+
+func _growth_vertex_at(screen_point: Vector2) -> int:
+	if selected_candidate_id < 0 or selected_candidate_id >= region.development_candidates.size():
+		return -1
+	var candidate: Dictionary = region.development_candidates[selected_candidate_id]
+	if not candidate.has("growth_draft_id"):
+		return -1
+	var draft_id: int = candidate["growth_draft_id"]
+	for draft in region.growth_area_drafts:
+		if int(draft["id"]) != draft_id:
+			continue
+		var outline: PackedVector2Array = draft["polygon"]
+		for index in range(outline.size()):
+			if _world_to_screen(outline[index]).distance_to(screen_point) <= 11.0:
+				return index
+	return -1
 
 
 func _draw_boundaries() -> void:
@@ -2229,7 +2440,36 @@ func _gui_input(event: InputEvent) -> void:
 				pointer_down = true
 				pointer_dragged = false
 				pointer_start = mouse_button.position
+				if map_mode == "Zoning":
+					if zoning_tool == "Erase":
+						growth_stroke = PackedVector2Array([hover_world_position])
+						queue_redraw()
+					elif zoning_tool == "Edit":
+						growth_edit_vertex = _growth_vertex_at(mouse_button.position)
 			else:
+				if map_mode == "Zoning" and zoning_tool == "Erase" and not growth_stroke.is_empty():
+					var finish: Vector2 = _screen_to_world(mouse_button.position)
+					if growth_stroke[-1].distance_to(finish) > 0.01:
+						growth_stroke.append(finish)
+					growth_stroke_finished.emit(growth_stroke, true)
+					growth_stroke = PackedVector2Array()
+					pointer_down = false
+					queue_redraw()
+					accept_event()
+					return
+				if map_mode == "Zoning" and zoning_tool == "Draw" and pointer_down and not pointer_dragged:
+					_growth_add_corner(mouse_button.position, pointer_double_clicked)
+					pointer_down = false
+					pointer_double_clicked = false
+					accept_event()
+					return
+				if map_mode == "Zoning" and zoning_tool == "Edit" and growth_edit_vertex >= 0:
+					var selected: Dictionary = region.development_candidates[selected_candidate_id]
+					growth_vertex_moved.emit(int(selected["growth_draft_id"]), growth_edit_vertex, _screen_to_world(mouse_button.position))
+					growth_edit_vertex = -1
+					pointer_down = false
+					accept_event()
+					return
 				if pointer_down and not pointer_dragged:
 					var label_area_id: int = _hit_jurisdiction_label(mouse_button.position)
 					if label_area_id >= 0:
@@ -2238,7 +2478,7 @@ func _gui_input(event: InputEvent) -> void:
 						accept_event()
 						return
 					if map_mode == "Zoning":
-						var candidate_id: int = region.development_candidate_at_point(_screen_to_world(mouse_button.position)) if _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 10.0 else -1
+						var candidate_id: int = _visible_zoning_candidate_at(_screen_to_world(mouse_button.position)) if _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 10.0 else -1
 						if candidate_id >= 0:
 							candidate_selected.emit(candidate_id)
 						else:
@@ -2287,22 +2527,34 @@ func _gui_input(event: InputEvent) -> void:
 		elif mouse_button.button_index == MOUSE_BUTTON_RIGHT and mouse_button.pressed and map_mode == "Roads":
 			road_cancel_requested.emit()
 			accept_event()
+		elif mouse_button.button_index == MOUSE_BUTTON_RIGHT and mouse_button.pressed and map_mode == "Zoning" and zoning_tool == "Draw":
+			undo_growth_corner()
+			accept_event()
 	elif event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
 		hover_world_position = _screen_to_world(motion.position)
 		if pointer_down:
 			if motion.position.distance_to(pointer_start) > 4.0:
 				pointer_dragged = true
-			if pointer_dragged:
+			if map_mode == "Zoning" and zoning_tool == "Erase" and not growth_stroke.is_empty():
+				if growth_stroke[-1].distance_to(hover_world_position) > 0.04:
+					growth_stroke.append(hover_world_position)
+					queue_redraw()
+			elif map_mode == "Zoning" and zoning_tool == "Edit" and growth_edit_vertex >= 0:
+				queue_redraw()
+			elif pointer_dragged:
 				pan += motion.relative
 				queue_redraw()
 		else:
+			if map_mode == "Zoning" and zoning_tool == "Draw" and region != null:
+				growth_hover_anchor = _growth_snap_at(motion.position)
+				queue_redraw()
 			var new_hover: int = -1 if map_mode == "Zoning" else _hit_test(motion.position)
-			var candidate_hover: int = region.development_candidate_at_point(_screen_to_world(motion.position)) if map_mode == "Zoning" and region != null and _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 10.0 else -1
+			var candidate_hover: int = _visible_zoning_candidate_at(_screen_to_world(motion.position)) if map_mode == "Zoning" and region != null and _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 10.0 else -1
 			var hovered_area_id: int = _hit_jurisdiction_label(motion.position)
 			if hovered_area_id < 0 and (map_mode == "Trips" or road_tool == "Inspect"):
 				hovered_area_id = _hit_jurisdiction_border(motion.position)
-			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if hovered_area_id >= 0 or new_hover >= 0 or candidate_hover >= 0 else Control.CURSOR_ARROW
+			mouse_default_cursor_shape = Control.CURSOR_CROSS if map_mode == "Zoning" and zoning_tool == "Draw" else (Control.CURSOR_POINTING_HAND if hovered_area_id >= 0 or new_hover >= 0 or candidate_hover >= 0 else Control.CURSOR_ARROW)
 			if new_hover != hovered_id:
 				hovered_id = new_hover
 				queue_redraw()

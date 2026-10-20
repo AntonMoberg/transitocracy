@@ -518,11 +518,11 @@ static func _point_near_polyline(points: PackedVector2Array, point: Vector2) -> 
 	return false
 
 
-static func snap_position(region, start_id: int, anchors: PackedVector2Array, point: Vector2, road_class: String, mode: String = RoadRouteBuilder.STRAIGHT) -> Vector2:
-	return snap_guidance(region, start_id, anchors, point, road_class, mode)["position"]
+static func snap_position(region, start_id: int, anchors: PackedVector2Array, point: Vector2, road_class: String, mode: String = RoadRouteBuilder.STRAIGHT, snap_angle: bool = true, snap_length: bool = false) -> Vector2:
+	return snap_guidance(region, start_id, anchors, point, road_class, mode, snap_angle, snap_length)["position"]
 
 
-static func snap_guidance(region, start_id: int, anchors: PackedVector2Array, point: Vector2, road_class: String, mode: String = RoadRouteBuilder.STRAIGHT) -> Dictionary:
+static func snap_guidance(region, start_id: int, anchors: PackedVector2Array, point: Vector2, road_class: String, mode: String = RoadRouteBuilder.STRAIGHT, snap_angle: bool = true, snap_length: bool = false) -> Dictionary:
 	if start_id < 0 or start_id >= region.road_nodes.size():
 		return {"position": point, "reference": Vector2.RIGHT, "has_reference": false, "label": ""}
 	var origin: Vector2 = anchors[-1] if not anchors.is_empty() else region.road_nodes[start_id].position_km
@@ -547,14 +547,17 @@ static func snap_guidance(region, start_id: int, anchors: PackedVector2Array, po
 	if reference.length_squared() < 0.000001:
 		reference = Vector2.RIGHT
 	var relative: float = reference.angle_to(delta)
-	var snapped: float = roundf(relative / deg_to_rad(5.0)) * deg_to_rad(5.0)
-	var position: Vector2 = origin + reference.rotated(snapped) * delta.length()
+	var direction: Vector2 = reference.rotated(roundf(relative / deg_to_rad(5.0)) * deg_to_rad(5.0)) if snap_angle else delta.normalized()
+	var length_km: float = roundf(delta.length() / 0.005) * 0.005 if snap_length else delta.length()
+	var position: Vector2 = origin + direction * length_km
 	var has_reference: bool = not anchors.is_empty() or connection != Vector2.ZERO
-	var display_angle: int = roundi(rad_to_deg(reference.angle_to(position - origin)) / 5.0) * 5
-	var label: String = "Bearing %d°" % (roundi(rad_to_deg((position - origin).angle()) / 5.0) * 5)
+	var display_angle: int = roundi(rad_to_deg(reference.angle_to(direction)) / 5.0) * 5
+	var label: String = "Bearing %d°" % (roundi(rad_to_deg(direction.angle()) / 5.0) * 5)
 	if has_reference:
 		label = "%+d°" % display_angle if display_angle != 0 else "0°"
-	return {"position": position, "reference": reference, "has_reference": has_reference, "label": label}
+	if snap_length:
+		label = "%s  ·  %d m" % [label, roundi(length_km * 1000.0)] if snap_angle else "%d m" % roundi(length_km * 1000.0)
+	return {"position": position, "reference": reference, "has_reference": has_reference, "label": label, "length_m": roundi(length_km * 1000.0)}
 
 
 static func frozen_multi_curve(region, start_id: int, anchors: PackedVector2Array, road_class: String) -> PackedVector2Array:

@@ -176,6 +176,12 @@ func _run() -> void:
 	branch.road_class = RoadLinkData.COLLECTOR
 	var collector_guide: Dictionary = RoadPlanner.snap_guidance(region, north.id, PackedVector2Array(), Vector2(1, 1), RoadLinkData.ARTERIAL)
 	_check(collector_guide["has_reference"] and collector_guide["label"] == "0°", "a new arterial should use the connected collector when no arterial exists")
+	var length_only: Dictionary = RoadPlanner.snap_guidance(region, 0, PackedVector2Array(), Vector2(1.1234, 3.249), RoadLinkData.ARTERIAL, RoadRouteBuilder.CURVED, false, true)
+	_check(length_only["length_m"] == 280 and length_only["label"] == "280 m" and is_equal_approx(length_only["position"].distance_to(Vector2(1, 3)), 0.28), "length snapping should quantize a curve guide in 5 m steps without changing its angle")
+	var snapped_guide: Vector2 = RoadPlanner.snap_position(region, 0, PackedVector2Array(), Vector2(1.1234, 3.249), RoadLinkData.ARTERIAL, RoadRouteBuilder.MULTIPOINT, true, true)
+	_check(is_equal_approx(snapped_guide.distance_to(Vector2(1, 3)), 0.28), "angle and length snapping should share the same first curve guide")
+	var next_length: Dictionary = RoadPlanner.snap_guidance(region, 0, PackedVector2Array([Vector2(3, 4), Vector2(4, 4)]), Vector2(4.263, 4.113), RoadLinkData.ARTERIAL, RoadRouteBuilder.MULTIPOINT, false, true)
+	_check(next_length["length_m"] == 285 and is_equal_approx(next_length["position"].distance_to(Vector2(4, 4)), 0.285), "each multi-curve guide should snap its length from the preceding frozen end")
 	print("Road geometry and land smoke: %d failures" % failures)
 	quit(1 if failures > 0 else 0)
 

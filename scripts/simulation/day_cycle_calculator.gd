@@ -59,6 +59,8 @@ static func _copy_large_region(source):
 	copy.development_candidates = source.development_candidates.duplicate(true)
 	copy.development_candidate_keys = source.development_candidate_keys.duplicate(true)
 	copy.development_candidate_cells = source.development_candidate_cells.duplicate(true)
+	copy.growth_area_drafts = source.growth_area_drafts.duplicate(true)
+	copy.next_growth_area_id = source.next_growth_area_id
 	copy.road_reservations = source.road_reservations.duplicate(true)
 	copy.urban_route_revision = source.urban_route_revision
 	for city_id in source.urban_route_cache:
@@ -189,6 +191,9 @@ static func advance_day(region, day_key: int, previous_flow, previous_traffic, p
 	FiscalCalculator.apply_due_policies(region, day_key * 86400)
 	var roads_changed: bool = RoadPlanner.advance_day(region, day_key)
 	roads_changed = DevelopmentBudget.advance_day(region, day_key) or roads_changed
+	if roads_changed:
+		DevelopmentPlanner.refresh_candidates(region)
+	roads_changed = DevelopmentPlanner.advance_growth_policies(region, day_key) or roads_changed
 	if roads_changed:
 		DevelopmentPlanner.refresh_candidates(region)
 		AccessibilityCalculator.recalculate(region)

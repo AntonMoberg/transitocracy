@@ -86,7 +86,7 @@ static func _generate(seed_value: int, city_count: int, neighborhood_count: int,
 					while current_id >= 0:
 						region.jurisdictions[current_id].neighborhood_ids.append(neighborhood.id)
 						current_id = region.jurisdictions[current_id].parent_id
-				region.cities.append({"id": city_id, "name": city_name, "center_km": Vector2.ZERO, "neighborhood_ids": neighborhood_ids, "county_id": county_index, "region_id": region_index, "jurisdiction_id": city.id, "density": density})
+				region.cities.append({"id": city_id, "name": city_name, "center_km": Vector2.ZERO, "neighborhood_ids": neighborhood_ids, "county_id": county_index, "region_id": region_index, "jurisdiction_id": city.id, "density": density, "growth_policy": {"enabled": true, "allowance": 0, "last_month": -1}})
 	for area in region.jurisdictions:
 		if area.kind in [JurisdictionData.REGION, JurisdictionData.COUNTY, JurisdictionData.CITY]:
 			area.generation_weight = pow(float(area.neighborhood_ids.size()), 0.65) * rng.randf_range(0.55, 1.8)

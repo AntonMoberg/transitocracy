@@ -14,6 +14,7 @@ const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const ArterialAreas = preload("res://scripts/simulation/arterial_areas.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
+const GrowthAreas = preload("res://scripts/simulation/growth_area_planner.gd")
 const CELL_SIZE_KM = LayoutGenerator.FRONTAGE_KM
 const CELL_OVERLAP_KM = 0.18
 const THROUGH_CANDIDATE_PERCENT = 14
@@ -223,6 +224,214 @@ static func refresh_candidates(region) -> void:
 	for key in chosen_characters:
 		if region.development_candidate_keys.has(key):
 			set_candidate_character(region, int(region.development_candidate_keys[key]), chosen_characters[key])
+	_register_growth_drafts(region)
+
+
+static func _register_growth_drafts(region) -> void:
+	var approved_sources: Dictionary = {}
+	for candidate in region.development_candidates:
+		var neighborhood_id: int = int(candidate["neighborhood_id"])
+		if neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved:
+			approved_sources[candidate["key"]] = true
+	if approved_sources.is_empty():
+		approved_sources["__no_approved_source__"] = true
+	for draft in region.growth_area_drafts:
+		var city_id: int = draft["city_id"]
+		var key: String = "growth:%d" % int(draft["id"])
+		var outline: PackedVector2Array = GrowthAreas.clip_to_city(region, city_id, draft["polygon"])
+		if Geography.polygon_area(outline) < GrowthAreas.MIN_AREA_KM2:
+			continue
+		var extended: PackedVector2Array = GrowthAreas.largest(Geometry2D.offset_polygon(outline, 0.20, Geometry2D.JOIN_ROUND))
+		var guide_outline: PackedVector2Array = GrowthAreas.clip_to_city(region, city_id, extended)
+		var guide: Dictionary = _neighbor_grid_guide(region, guide_outline, city_id, "", approved_sources) if guide_outline.size() >= 3 else {}
+		var proposal: Dictionary = GrowthAreas.plan(region, city_id, outline, key, guide, draft.get("style", "Grid"), draft.get("shape_mode", "brush") == "polygon")
+		if proposal.is_empty():
+			continue
+		_register_candidate(region, proposal["layout"], -1, proposal["frontage_id"], proposal["input"])
+		var candidate: Dictionary = region.development_candidates[-1]
+		candidate["growth_draft_id"] = draft["id"]
+		region.development_candidates[-1] = candidate
+		if draft.get("character", Character.AUTO) != Character.AUTO:
+			set_candidate_character(region, int(candidate["id"]), draft["character"])
+
+
+static func refresh_growth_drafts(region) -> void:
+	while not region.development_candidates.is_empty() and region.development_candidates[-1].has("growth_draft_id"):
+		var last: Dictionary = region.development_candidates.pop_back()
+		region.development_candidate_keys.erase(last["key"])
+	region.development_candidate_cells.clear()
+	for candidate in region.development_candidates:
+		var grid: Vector2i = candidate["grid"]
+		var cell_key: String = "%d:%d" % [grid.x, grid.y]
+		if not region.development_candidate_cells.has(cell_key):
+			region.development_candidate_cells[cell_key] = []
+		region.development_candidate_cells[cell_key].append(candidate["id"])
+	_register_growth_drafts(region)
+
+
+static func create_growth_area(region, outline: PackedVector2Array) -> Dictionary:
+	var polygon: PackedVector2Array = LayoutGenerator._clean_polygon(outline)
+	if polygon.size() < 3 or not _simple_growth_outline(polygon):
+		return {"ok": false, "reason": "The district outline crosses itself. Move or undo a corner."}
+	var triangles: PackedInt32Array = Geometry2D.triangulate_polygon(polygon)
+	if triangles.size() < 3:
+		return {"ok": false, "reason": "The district outline needs at least three corners around an area."}
+	var interior: Vector2 = (polygon[triangles[0]] + polygon[triangles[1]] + polygon[triangles[2]]) / 3.0
+	var city_id: int = region.city_id_at_point(interior)
+	if city_id < 0:
+		return {"ok": false, "reason": "Draw the district inside a city boundary."}
+	var area: float = Geography.polygon_area(polygon)
+	if area < GrowthAreas.MIN_AREA_KM2:
+		return {"ok": false, "reason": "Draw a district large enough for a few blocks."}
+	if area > GrowthAreas.MAX_AREA_KM2:
+		return {"ok": false, "reason": "This district is too large. Split it into smaller zones."}
+	var available: PackedVector2Array = GrowthAreas.clip_to_city(region, city_id, polygon)
+	if area - Geography.polygon_area(available) > maxf(0.01, area * 0.01):
+		return {"ok": false, "reason": "The outline overlaps developed land or crosses the city boundary. Follow the existing edge."}
+	for draft in region.growth_area_drafts:
+		if int(draft["city_id"]) != city_id:
+			continue
+		var overlap: PackedVector2Array = GrowthAreas.largest(Geometry2D.intersect_polygons(polygon, draft["polygon"]))
+		if Geography.polygon_area(overlap) > 0.01:
+			return {"ok": false, "reason": "The outline overlaps another draft. Follow its edge instead."}
+	var draft_id: int = region.next_growth_area_id
+	var key: String = "growth:%d" % draft_id
+	if GrowthAreas.plan(region, city_id, polygon, key, {}, "Grid", true).is_empty():
+		return {"ok": false, "reason": "This district needs a connected arterial along its edge or through it."}
+	region.growth_area_drafts.append({"id": draft_id, "city_id": city_id, "polygon": polygon, "shape_mode": "polygon"})
+	refresh_growth_drafts(region)
+	if not region.development_candidate_keys.has(key):
+		region.growth_area_drafts.pop_back()
+		refresh_growth_drafts(region)
+		return {"ok": false, "reason": "No street grid fits this outline. Adjust a corner and try again."}
+	region.next_growth_area_id += 1
+	return {"ok": true, "key": key}
+
+
+static func _simple_growth_outline(polygon: PackedVector2Array) -> bool:
+	for first in range(polygon.size()):
+		var next_first: int = (first + 1) % polygon.size()
+		if polygon[first].distance_to(polygon[next_first]) < 0.001:
+			return false
+		for second in range(first + 2, polygon.size()):
+			var next_second: int = (second + 1) % polygon.size()
+			if next_second == first:
+				continue
+			if Geometry2D.segment_intersects_segment(polygon[first], polygon[next_first], polygon[second], polygon[next_second]) != null:
+				return false
+	return true
+
+
+static func paint_growth_area(region, stroke: PackedVector2Array, erase: bool = false) -> Dictionary:
+	var brush: PackedVector2Array = GrowthAreas.painted_polygon(stroke)
+	if brush.size() < 3:
+		return {"ok": false, "reason": "Paint an area on the map."}
+	var city_id: int = region.city_id_at_point(stroke[0])
+	if city_id < 0:
+		return {"ok": false, "reason": "Paint inside a city boundary."}
+	var changed_id := -1
+	if erase:
+		for index in range(region.growth_area_drafts.size() - 1, -1, -1):
+			var draft: Dictionary = region.growth_area_drafts[index]
+			if int(draft["city_id"]) != city_id:
+				continue
+			if draft.get("shape_mode", "brush") == "polygon":
+				if Geography.polygon_area(GrowthAreas.largest(Geometry2D.intersect_polygons(draft["polygon"], brush))) > 0.001:
+					changed_id = int(draft["id"])
+					region.growth_area_drafts.remove_at(index)
+				continue
+			var clipped: PackedVector2Array = GrowthAreas.largest(Geometry2D.clip_polygons(draft["polygon"], brush))
+			if Geography.polygon_area(clipped) >= Geography.polygon_area(draft["polygon"]) - 0.001:
+				continue
+			changed_id = int(draft["id"])
+			if Geography.polygon_area(clipped) < GrowthAreas.MIN_AREA_KM2:
+				region.growth_area_drafts.remove_at(index)
+			else:
+				if GrowthAreas.plan(region, city_id, clipped, "growth:%d" % int(draft["id"]), {}, draft.get("style", "Grid")).is_empty():
+					region.growth_area_drafts.remove_at(index)
+				else:
+					draft["polygon"] = clipped
+					region.growth_area_drafts[index] = draft
+		if changed_id < 0:
+			return {"ok": false, "reason": "No painted draft under the eraser."}
+	else:
+		var polygon: PackedVector2Array = GrowthAreas.clip_to_city(region, city_id, brush)
+		var absorbed_ids: Array[int] = []
+		var merged_more := true
+		while merged_more:
+			merged_more = false
+			for draft in region.growth_area_drafts:
+				if int(draft["city_id"]) != city_id or absorbed_ids.has(int(draft["id"])):
+					continue
+				var merged: Array[PackedVector2Array] = Geometry2D.merge_polygons(draft["polygon"], polygon)
+				if merged.size() == 1 and Geography.polygon_area(merged[0]) < Geography.polygon_area(draft["polygon"]) + Geography.polygon_area(polygon) - 0.005:
+					polygon = GrowthAreas.clip_to_city(region, city_id, merged[0])
+					absorbed_ids.append(int(draft["id"]))
+					if changed_id < 0:
+						changed_id = int(draft["id"])
+					merged_more = true
+					break
+		polygon = _trim_narrow_parts(polygon)
+		if Geography.polygon_area(polygon) < GrowthAreas.MIN_AREA_KM2:
+			return {"ok": false, "reason": "Paint at least a few blocks of undeveloped land."}
+		if Geography.polygon_area(polygon) > GrowthAreas.MAX_AREA_KM2:
+			return {"ok": false, "reason": "This area is too large. Paint smaller districts."}
+		var key: String = "growth:%d" % (changed_id if changed_id >= 0 else region.next_growth_area_id)
+		var style := "Grid"
+		if changed_id >= 0:
+			for draft in region.growth_area_drafts:
+				if int(draft["id"]) == changed_id:
+					style = draft.get("style", "Grid")
+					break
+		if GrowthAreas.plan(region, city_id, polygon, key, {}, style).is_empty():
+			return {"ok": false, "reason": "No street preview fits here. Paint a wider area closer to a connected arterial."}
+		for index in range(region.growth_area_drafts.size() - 1, -1, -1):
+			if absorbed_ids.has(int(region.growth_area_drafts[index]["id"])) and int(region.growth_area_drafts[index]["id"]) != changed_id:
+				region.growth_area_drafts.remove_at(index)
+		if changed_id >= 0:
+			for index in range(region.growth_area_drafts.size()):
+				if int(region.growth_area_drafts[index]["id"]) == changed_id:
+					region.growth_area_drafts[index]["polygon"] = polygon
+					break
+		else:
+			changed_id = region.next_growth_area_id
+			region.next_growth_area_id += 1
+			region.growth_area_drafts.append({"id": changed_id, "city_id": city_id, "polygon": polygon})
+	refresh_growth_drafts(region)
+	return {"ok": true, "key": "growth:%d" % changed_id}
+
+
+static func move_growth_vertex(region, draft_id: int, vertex_id: int, point: Vector2) -> bool:
+	for index in range(region.growth_area_drafts.size()):
+		var draft: Dictionary = region.growth_area_drafts[index]
+		if int(draft["id"]) != draft_id:
+			continue
+		var polygon: PackedVector2Array = draft["polygon"].duplicate()
+		if vertex_id < 0 or vertex_id >= polygon.size():
+			return false
+		polygon[vertex_id] = GrowthAreas.snap_vertex(region, int(draft["city_id"]), point, draft_id)
+		if draft.get("shape_mode", "brush") == "polygon":
+			if not _simple_growth_outline(polygon) or Geometry2D.triangulate_polygon(polygon).is_empty():
+				return false
+			var available: PackedVector2Array = GrowthAreas.clip_to_city(region, int(draft["city_id"]), polygon)
+			var area: float = Geography.polygon_area(polygon)
+			if area - Geography.polygon_area(available) > maxf(0.01, area * 0.01):
+				return false
+			for other in region.growth_area_drafts:
+				if int(other["city_id"]) == int(draft["city_id"]) and int(other["id"]) != draft_id:
+					var overlap: PackedVector2Array = GrowthAreas.largest(Geometry2D.intersect_polygons(polygon, other["polygon"]))
+					if Geography.polygon_area(overlap) > 0.01:
+						return false
+		else:
+			polygon = GrowthAreas.clip_to_city(region, int(draft["city_id"]), polygon)
+			polygon = _trim_narrow_parts(polygon)
+		if Geography.polygon_area(polygon) < GrowthAreas.MIN_AREA_KM2 or GrowthAreas.plan(region, int(draft["city_id"]), polygon, "growth:%d" % draft_id, {}, draft.get("style", "Grid"), draft.get("shape_mode", "brush") == "polygon").is_empty():
+			return false
+		draft["polygon"] = polygon
+		region.growth_area_drafts[index] = draft
+		refresh_growth_drafts(region)
+		return true
+	return false
 
 
 static func _resolve_small_remainders(region, remainders: Array[Dictionary], claimed: Dictionary, established: Dictionary, claim_slots: Dictionary) -> void:
@@ -627,6 +836,11 @@ static func set_candidate_style(region, candidate_id: int, style: String) -> boo
 	if layout.polygon.size() < 3 or layout.arterial_nodes.is_empty() or layout.core_paths.is_empty():
 		return false
 	candidate["layout"] = layout
+	if candidate.has("growth_draft_id"):
+		for draft in region.growth_area_drafts:
+			if int(draft["id"]) == int(candidate["growth_draft_id"]):
+				draft["style"] = style
+				break
 	if candidate.get("character_override", Character.AUTO) == Character.AUTO:
 		var defaults: Dictionary = RegionGenerator.zone_defaults(region, int(candidate["city_id"]), candidate["grid"])
 		candidate["character_profile"] = Character.resolve(region, int(candidate["city_id"]), candidate["center_km"], style, defaults["shares"], defaults["density"])
@@ -642,6 +856,11 @@ static func set_candidate_character(region, candidate_id: int, profile: String) 
 		return false
 	var defaults: Dictionary = RegionGenerator.zone_defaults(region, int(candidate["city_id"]), candidate["grid"])
 	candidate["character_override"] = profile
+	if candidate.has("growth_draft_id"):
+		for draft in region.growth_area_drafts:
+			if int(draft["id"]) == int(candidate["growth_draft_id"]):
+				draft["character"] = profile
+				break
 	candidate["character_profile"] = Character.resolve(region, int(candidate["city_id"]), candidate["center_km"], candidate["layout"].interior_style, defaults["shares"], defaults["density"], profile)
 	region.development_candidates[candidate_id] = candidate
 	return true
@@ -710,10 +929,103 @@ static func set_approval(region, candidate_id: int, approved: bool, allocation: 
 	neighborhood.development_plan.reserved += allocation
 	neighborhood.development_plan.status = "Approved"
 	city.treasury -= allocation
+	if new_neighborhood and candidate.has("growth_draft_id"):
+		for draft_index in range(region.growth_area_drafts.size() - 1, -1, -1):
+			if int(region.growth_area_drafts[draft_index]["id"]) == int(candidate["growth_draft_id"]):
+				region.growth_area_drafts.remove_at(draft_index)
+				break
 	if not shares.is_empty():
 		Budget.queue_zoning(region, neighborhood.id, shares, density, region.current_day_key)
 	region.road_geometry_revision += 1
 	return {"ok": true, "new_neighborhood": new_neighborhood, "allocated": allocation}
+
+
+static func advance_growth_policies(region, day_key: int) -> bool:
+	var date: Dictionary = Time.get_datetime_dict_from_unix_time(day_key * 86400)
+	if int(date["day"]) != 1:
+		return false
+	var month_key: int = int(date["year"]) * 12 + int(date["month"])
+	var city_candidates: Dictionary = {}
+	for candidate in region.development_candidates:
+		if int(candidate["neighborhood_id"]) >= 0 or candidate.has("growth_draft_id") or int(candidate["frontage_link_id"]) < 0:
+			continue
+		var city_id: int = candidate["city_id"]
+		if not city_candidates.has(city_id):
+			city_candidates[city_id] = []
+		city_candidates[city_id].append(candidate)
+	var built := false
+	for city_id in range(region.cities.size()):
+		var city_info: Dictionary = region.cities[city_id]
+		var policy: Dictionary = city_info.get("growth_policy", {"enabled": true, "allowance": 0, "last_month": -1})
+		if int(policy.get("last_month", -1)) == month_key:
+			continue
+		var city = region.jurisdictions[region.city_jurisdiction_ids[city_id]]
+		var monthly: int = maxi(0, floori(float(city.treasury) * 0.10))
+		policy["allowance"] = mini(int(policy.get("allowance", 0)) + monthly, monthly * 3)
+		policy["last_month"] = month_key
+		city_info["growth_policy"] = policy
+		region.cities[city_id] = city_info
+		if not bool(policy.get("enabled", true)):
+			continue
+		var available: int = mini(int(policy["allowance"]), int(city.treasury))
+		var continued_project := false
+		if not region.dev_mode and available > 0:
+			for neighborhood_id in city_info["neighborhood_ids"]:
+				var neighborhood = region.neighborhoods[neighborhood_id]
+				if neighborhood.development_plan == null or not neighborhood.development_plan.active:
+					continue
+				var needed: int = Budget.remaining_cost(neighborhood) - neighborhood.development_plan.reserved
+				if needed <= 0:
+					continue
+				var top_up: int = mini(needed, available)
+				if Budget.allocate(region, neighborhood_id, top_up)["ok"]:
+					policy["allowance"] = int(policy["allowance"]) - top_up
+					city_info["growth_policy"] = policy
+					region.cities[city_id] = city_info
+					continued_project = true
+				break
+		if continued_project or not city_candidates.has(city_id):
+			continue
+		var homes := 0
+		var households := 0
+		var job_capacity := 0
+		var jobs := 0
+		var established: Array = []
+		for neighborhood_id in city_info["neighborhood_ids"]:
+			var neighborhood = region.neighborhoods[neighborhood_id]
+			if not neighborhood.development_approved:
+				continue
+			homes += neighborhood.housing_capacity
+			households += neighborhood.households
+			job_capacity += neighborhood.job_capacity
+			jobs += neighborhood.jobs
+			if neighborhood.street_layout != null:
+				established.append(neighborhood.street_layout.polygon)
+		if (homes == 0 or float(households) / float(homes) < 0.80) and (job_capacity == 0 or float(jobs) / float(job_capacity) < 0.70):
+			continue
+		var best_id := -1
+		var best_score := 0.0
+		for candidate in city_candidates[city_id]:
+			var area: float = Geography.polygon_area(candidate["polygon"])
+			if area < 0.18 or area > GrowthAreas.MAX_AREA_KM2:
+				continue
+			var score: float = _adjacency_score(candidate["polygon"], established)
+			if score > best_score and _can_expand_to(region, city_id, candidate["polygon"], established):
+				best_id = int(candidate["id"])
+				best_score = score
+		if best_id < 0:
+			continue
+		var estimate: int = region.development_candidates[best_id]["layout"].total_cost()
+		var allocation: int = 0 if region.dev_mode else mini(estimate, mini(int(policy["allowance"]), int(city.treasury)))
+		if allocation <= 0 and not region.dev_mode:
+			continue
+		var result: Dictionary = set_approval(region, best_id, true, allocation)
+		if result["ok"]:
+			policy["allowance"] = int(policy["allowance"]) - allocation
+			city_info["growth_policy"] = policy
+			region.cities[city_id] = city_info
+			built = true
+	return built
 
 
 static func _initialize_empty(neighborhood) -> void:

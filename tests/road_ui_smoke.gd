@@ -41,7 +41,9 @@ func _run_checks() -> void:
 	main._on_road_draw_selected(2)
 	main.road_snap_toggle.button_pressed = true
 	main._on_road_snap_toggled(true)
-	_check(main.road_draw_selector.visible and main.map_view.road_draw_mode == "Multi-point Curved" and main.map_view.road_snap_enabled, "road mode and snap controls must reach the map")
+	main.road_length_snap_toggle.button_pressed = true
+	main._on_road_length_snap_toggled(true)
+	_check(main.road_draw_selector.visible and main.map_view.road_draw_mode == "Multi-point Curved" and main.map_view.road_snap_enabled and main.map_view.road_length_snap_enabled, "road mode and both snap controls must reach the map")
 	var forward_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 0, 0, "Highway")
 	var reverse_side: Vector2 = Vector2.RIGHT.orthogonal() * main.map_view._road_lane_offset(2, 1, 0, "Highway")
 	_check(forward_side.y > 0.0 and reverse_side.y < 0.0, "road directions must keep right-hand lanes")
@@ -84,6 +86,15 @@ func _run_checks() -> void:
 	if not multi_case.is_empty():
 		main.road_snap_toggle.button_pressed = false
 		main._on_road_snap_toggled(false)
+		main._on_road_node_clicked(multi_case["start_id"])
+		var origin: Vector2 = main.region.road_nodes[multi_case["start_id"]].position_km
+		main._on_road_empty_clicked(origin + Vector2(0.101, 0.003))
+		_check(main.road_waypoints.size() == 1 and is_equal_approx(main.road_waypoints[0].distance_to(origin), 0.1), "the placed multi-curve guide must use the 5 m length snap")
+		main._cancel_road_preview()
+		main.road_snap_toggle.button_pressed = false
+		main._on_road_snap_toggled(false)
+		main.road_length_snap_toggle.button_pressed = false
+		main._on_road_length_snap_toggled(false)
 		main._on_road_node_clicked(multi_case["start_id"])
 		main._on_road_empty_clicked(multi_case["guide_one"])
 		_check(main.road_waypoints.size() == 1, "the first multi-curve click should place a guide")
