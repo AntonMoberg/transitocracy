@@ -6,6 +6,7 @@ const Jurisdiction = preload("res://scripts/simulation/jurisdiction_data.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
 const Streamlines = preload("res://scripts/simulation/street_streamline_tracer.gd")
+const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
 const SPACING_KM = 0.12
 const FRONTAGE_KM = 1.2
 const DEPTH_KM = 0.72
@@ -207,7 +208,8 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				position = samples[column] + normals[column] * lateral
 			grid_positions[Vector2i(column, row)] = position
 	var seed_positions: Dictionary = grid_positions
-	grid_positions = Streamlines.trace_grid(grid_positions, columns, rows, region.generation_seed, city_id, field_guide, organic, region.cities[city_id]["center_km"], 0.075 if organic else 0.04, half_row if not edge_frontage else -1)
+	var field_context: Dictionary = DirectionField.city_context(region, city_id, layout.bounds)
+	grid_positions = Streamlines.trace_grid(grid_positions, columns, rows, region.generation_seed, city_id, field_guide, organic, region.cities[city_id]["center_km"], 0.11 if organic else 0.04, half_row if not edge_frontage else -1, field_context)
 	for address in grid_positions:
 		var original: Vector2 = seed_positions[address]
 		for segment in range(outline.size()):
@@ -215,6 +217,18 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 				grid_positions[address] = original
 				break
 	_snap_grid_seams(grid_positions, outline, grid_guide.get("seam_targets", []), columns, rows, half_row, edge_frontage)
+	var organic_paths: Dictionary = {}
+	if organic:
+		for row in range(rows + 1):
+			for column in range(columns + 1):
+				var address := Vector2i(column, row)
+				for step in [Vector2i.RIGHT, Vector2i.DOWN]:
+					var next: Vector2i = address + step
+					if next.x > columns or next.y > rows:
+						continue
+					var path: PackedVector2Array = _organic_grid_path(region, city_id, grid_positions[address], grid_positions[next], field_guide, field_context, outline)
+					if path.size() > 2:
+						organic_paths[_grid_edge_key(address, next)] = path
 	for row in range(rows + 1):
 		for column in range(columns + 1):
 			var position: Vector2 = grid_positions[Vector2i(column, row)]
@@ -269,20 +283,27 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 						road_class = Roads.COLLECTOR
 				elif (step == Vector2i.RIGHT and absi(row - half_row) == 3) or (step == Vector2i.DOWN and (column % 4 == 0 or column == columns)):
 					road_class = Roads.COLLECTOR
+				if road_class != Roads.ARTERIAL and (_near_field_arterial(layout.nodes[first], layout.nodes[second], field_context, 0.075) or _near_parallel_outline(layout.nodes[first], layout.nodes[second], outline, 0.065)):
+					continue
 				var stage: int = _phase(maxi(absi(row - half_row), absi(next.y - half_row)), maximum_distance)
 				if road_class == Roads.COLLECTOR and step == Vector2i.DOWN:
 					stage = 1
-				_append_edge(layout, first, second, road_class, stage)
+				var curved_key: Vector3i = _grid_edge_key(address, next)
+				if organic_paths.has(curved_key):
+					_append_path_edge(layout, first, second, road_class, stage, organic_paths[curved_key])
+				else:
+					_append_edge(layout, first, second, road_class, stage)
 	if open_frontage or (not edge_frontage and boundary_routes.is_empty()):
-		_extend_streets_to_boundary(layout, grid, grid_positions, collector_columns, columns, rows, outline, collector_row, maximum_distance, grid_guide, not edge_frontage)
+		_extend_streets_to_boundary(layout, grid, grid_positions, collector_columns, columns, rows, outline, collector_row, maximum_distance, grid_guide, field_context, not edge_frontage)
 	if boundary_routes.is_empty():
-		_fill_clipped_grid_lines(region, layout, grid, grid_positions, columns, rows, outline)
-		_build_boundary_roads(region, layout, outline)
+		_fill_clipped_grid_lines(region, layout, grid, grid_positions, columns, rows, outline, field_context)
+		_build_boundary_roads(region, layout, outline, field_context)
 	var diagonals: Dictionary = {}
 	for row in range(rows):
 		for column in range(columns):
 			var corners: Array[Vector2i] = [Vector2i(column, row), Vector2i(column + 1, row), Vector2i(column + 1, row + 1), Vector2i(column, row + 1)]
 			var polygon := PackedVector2Array()
+			var curved_cell: PackedVector2Array = _organic_cell_polygon(corners, grid_positions, organic_paths) if organic else PackedVector2Array()
 			var corner_ids := PackedInt32Array()
 			for corner in corners:
 				if grid.has(corner):
@@ -296,9 +317,10 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 					if not Geography.segment_on_land(outline, polygon[corner], polygon[(corner + 1) % 4]):
 						contained = false
 			if not contained:
-				var cell := PackedVector2Array()
-				for corner in corners:
-					cell.append(grid_positions[corner])
+				var cell: PackedVector2Array = curved_cell
+				if cell.is_empty():
+					for corner in corners:
+						cell.append(grid_positions[corner])
 				if triangulate(cell).is_empty():
 					continue
 				for piece in Geometry2D.intersect_polygons(cell, outline):
@@ -342,7 +364,10 @@ static func generate(region, city_id: int, route: PackedVector2Array, key: Strin
 					_append_block(layout, PackedInt32Array([first, corner_ids[diagonal + 1], last]), stage, block_seed, false)
 					_append_block(layout, PackedInt32Array([first, last, corner_ids[(diagonal + 3) % 4]]), stage, rng.randi(), false)
 					continue
-			_append_block(layout, corner_ids, stage, block_seed, rng.randf() < 0.07)
+			if curved_cell.size() >= 4 and not triangulate(curved_cell).is_empty():
+				_append_block_polygon(layout, curved_cell, corner_ids, stage, block_seed, rng.randf() < 0.07, false)
+			else:
+				_append_block(layout, corner_ids, stage, block_seed, rng.randf() < 0.07)
 	var boundary_corners := PackedInt32Array()
 	if not boundary_routes.is_empty():
 		for address in [Vector2i.ZERO, Vector2i(columns, 0), Vector2i(columns, rows), Vector2i(0, rows)]:
@@ -480,7 +505,7 @@ static func _snap_grid_seams(positions: Dictionary, outline: PackedVector2Array,
 				used[selected] = true
 
 
-static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dictionary, collector_columns: Dictionary, columns: int, rows: int, outline: PackedVector2Array, collector_row: int, maximum_distance: int, guide: Dictionary, through: bool = false) -> void:
+static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dictionary, collector_columns: Dictionary, columns: int, rows: int, outline: PackedVector2Array, collector_row: int, maximum_distance: int, guide: Dictionary, field_context: Dictionary, through: bool = false) -> void:
 	var seam_targets: Array = guide.get("seam_targets", [])
 	var used_targets: Dictionary = {}
 	for row in range(rows + 1):
@@ -517,9 +542,12 @@ static func _extend_streets_to_boundary(layout, grid: Dictionary, positions: Dic
 						best_score = score
 						selected_target = target_id
 				if selected_target >= 0:
-					used_targets[selected_target] = true
 					boundary = seam_targets[selected_target]["point"]
 					collector = collector or seam_targets[selected_target]["road_class"] == Roads.COLLECTOR
+				if _near_field_arterial(first, boundary, field_context, 0.075):
+					continue
+				if selected_target >= 0:
+					used_targets[selected_target] = true
 				var boundary_id: int = layout.nodes.size()
 				layout.nodes.append(boundary)
 				var stage: int = 1 if collector else _phase(absi(row - rows / 2) if through else row, maximum_distance)
@@ -543,13 +571,18 @@ static func _first_boundary_crossing(first: Vector2, last: Vector2, outline: Pac
 # A tapered tip can cut several grid cells without containing any grid
 # junctions. Clip their shared grid lines into streets so those cells do not
 # form one visually empty cap between the last full row and the perimeter.
-static func _fill_clipped_grid_lines(region, layout, grid: Dictionary, positions: Dictionary, columns: int, rows: int, outline: PackedVector2Array) -> void:
+static func _fill_clipped_grid_lines(region, layout, grid: Dictionary, positions: Dictionary, columns: int, rows: int, outline: PackedVector2Array, field_context: Dictionary) -> void:
+	var built_connections: Dictionary = {}
+	for edge in layout.edges:
+		built_connections[Vector2i(mini(int(edge.x), int(edge.y)), maxi(int(edge.x), int(edge.y)))] = true
 	for row in range(rows + 1):
 		for column in range(columns + 1):
 			var address := Vector2i(column, row)
 			for step in [Vector2i.RIGHT, Vector2i.DOWN]:
 				var next: Vector2i = address + step
-				if next.x > columns or next.y > rows or (grid.has(address) and grid.has(next)):
+				if next.x > columns or next.y > rows:
+					continue
+				if grid.has(address) and grid.has(next) and built_connections.has(Vector2i(mini(grid[address], grid[next]), maxi(grid[address], grid[next]))):
 					continue
 				var first: Vector2 = positions[address]
 				var last: Vector2 = positions[next]
@@ -577,18 +610,15 @@ static func _fill_clipped_grid_lines(region, layout, grid: Dictionary, positions
 					if start.distance_to(finish) < 0.065:
 						continue
 					var middle: Vector2 = (start + finish) * 0.5
-					if not Jurisdiction.polygon_contains_point(middle, outline) or _near_layout_road(layout, middle, 0.008) or _near_highway(region, middle, 0.07) or _crosses_layout_road(layout, start, finish):
+					if not Jurisdiction.polygon_contains_point(middle, outline) or _near_layout_road(layout, middle, 0.008) or _near_highway(region, middle, 0.07) or _near_field_arterial(start, finish, field_context, 0.075) or _near_parallel_outline(start, finish, outline, 0.065) or _near_parallel_layout_road(layout, start, finish, 0.055):
 						continue
-					var start_id: int = _ensure_boundary_node(layout, start)
-					var finish_id: int = _ensure_boundary_node(layout, finish)
-					if start_id != finish_id:
-						_append_edge(layout, start_id, finish_id, Roads.LOCAL, 1)
+					_append_clipped_street_run(layout, start, finish, outline)
 
 
 # A clipped fringe is a buildable block, but it looks like vacant land when its
 # outside edge has no street. Continue local streets along the usable district
 # perimeter and join each new run to the existing interior network.
-static func _build_boundary_roads(region, layout, outline: PackedVector2Array) -> void:
+static func _build_boundary_roads(region, layout, outline: PackedVector2Array, field_context: Dictionary) -> void:
 	var boundary_nodes: Dictionary = {}
 	for segment in range(outline.size()):
 		var first: Vector2 = outline[segment]
@@ -613,13 +643,25 @@ static func _build_boundary_roads(region, layout, outline: PackedVector2Array) -
 			var middle: Vector2 = (start + finish) * 0.5
 			if _near_layout_road(layout, middle, 0.014) or _near_highway(region, middle, 0.07):
 				continue
+			var on_arterial: bool = _near_field_arterial(start, finish, field_context, 0.002)
+			if not on_arterial and _near_field_arterial(start, finish, field_context, 0.075):
+				# The actual regional arterial already serves this thin frontage.
+				# A local perimeter street here would draw almost on top of it.
+				continue
 			var start_id: int = _ensure_boundary_node(layout, start)
 			var finish_id: int = _ensure_boundary_node(layout, finish)
 			if start_id == finish_id:
 				continue
-			_append_edge(layout, start_id, finish_id, Roads.LOCAL, 1)
-			boundary_nodes[start_id] = true
-			boundary_nodes[finish_id] = true
+			if on_arterial:
+				_append_edge(layout, start_id, finish_id, Roads.ARTERIAL, 1)
+				if not layout.arterial_nodes.has(start_id):
+					layout.arterial_nodes.append(start_id)
+				if not layout.arterial_nodes.has(finish_id):
+					layout.arterial_nodes.append(finish_id)
+			else:
+				_append_edge(layout, start_id, finish_id, Roads.LOCAL, 1)
+				boundary_nodes[start_id] = true
+				boundary_nodes[finish_id] = true
 	_connect_boundary_roads(layout, outline, boundary_nodes)
 
 
@@ -630,6 +672,117 @@ static func _ensure_boundary_node(layout, point: Vector2) -> int:
 	var result: int = layout.nodes.size()
 	layout.nodes.append(point)
 	return result
+
+
+static func _layout_edge_path(layout, edge_id: int) -> PackedVector2Array:
+	if layout.edge_paths.has(edge_id):
+		return layout.edge_paths[edge_id]
+	var edge: Vector2 = layout.edges[edge_id]
+	return PackedVector2Array([layout.nodes[int(edge.x)], layout.nodes[int(edge.y)]])
+
+
+static func _path_length(path: PackedVector2Array) -> float:
+	var length := 0.0
+	for index in range(1, path.size()):
+		length += path[index - 1].distance_to(path[index])
+	return length
+
+
+static func _ensure_street_intersection(layout, point: Vector2) -> int:
+	for node_id in range(layout.nodes.size()):
+		if layout.nodes[node_id].distance_squared_to(point) < 0.003 * 0.003:
+			return node_id
+	for edge_id in range(layout.edges.size()):
+		var path: PackedVector2Array = _layout_edge_path(layout, edge_id)
+		for segment in range(1, path.size()):
+			var nearest: Vector2 = Geometry2D.get_closest_point_to_segment(point, path[segment - 1], path[segment])
+			if nearest.distance_to(point) > 0.003 or nearest.distance_to(path[segment - 1]) < 0.005 or nearest.distance_to(path[segment]) < 0.005:
+				continue
+			var edge: Vector2 = layout.edges[edge_id]
+			var old_length: float = layout.lengths[edge_id]
+			var first_path: PackedVector2Array = path.slice(0, segment)
+			first_path.append(nearest)
+			var second_path := PackedVector2Array([nearest])
+			second_path.append_array(path.slice(segment))
+			var new_id: int = layout.nodes.size()
+			layout.nodes.append(nearest)
+			layout.edges[edge_id] = Vector2(edge.x, new_id)
+			layout.lengths[edge_id] = _path_length(first_path)
+			if first_path.size() > 2:
+				layout.edge_paths[edge_id] = first_path
+			else:
+				layout.edge_paths.erase(edge_id)
+			var road_class: String = layout.classes[edge_id]
+			var phase: int = layout.phases[edge_id]
+			if road_class == Roads.ARTERIAL:
+				layout.arterial_nodes.append(new_id)
+			else:
+				layout.phase_costs[phase - 1] += roundi(layout.lengths[edge_id] * Roads.construction_cost(road_class)) - roundi(old_length * Roads.construction_cost(road_class))
+				layout.phase_upkeep[phase - 1] += (layout.lengths[edge_id] - old_length) * Roads.upkeep(road_class)
+			_append_path_edge(layout, new_id, int(edge.y), road_class, phase, second_path)
+			return new_id
+	return _ensure_boundary_node(layout, point)
+
+
+static func _append_clipped_street_run(layout, first: Vector2, last: Vector2, outline: PackedVector2Array) -> void:
+	var stations: Array[Vector2] = [first, last]
+	for edge_id in range(layout.edges.size()):
+		var path: PackedVector2Array = _layout_edge_path(layout, edge_id)
+		for segment in range(1, path.size()):
+			var hit = Geometry2D.segment_intersects_segment(first, last, path[segment - 1], path[segment])
+			if hit == null or hit.distance_to(first) < 0.003 or hit.distance_to(last) < 0.003:
+				continue
+			var duplicate := false
+			for station in stations:
+				if station.distance_to(hit) < 0.003:
+					duplicate = true
+					break
+			if not duplicate:
+				stations.append(hit)
+	stations.sort_custom(func(a: Vector2, b: Vector2) -> bool: return first.distance_squared_to(a) < first.distance_squared_to(b))
+	for index in range(stations.size() - 1):
+		var start: Vector2 = stations[index]
+		var finish: Vector2 = stations[index + 1]
+		if start.distance_to(finish) < 0.065 or not Jurisdiction.polygon_contains_point((start + finish) * 0.5, outline) or _near_layout_road(layout, (start + finish) * 0.5, 0.008):
+			continue
+		var start_id: int = _ensure_street_intersection(layout, start)
+		var finish_id: int = _ensure_street_intersection(layout, finish)
+		if start_id == finish_id:
+			continue
+		_append_edge(layout, start_id, finish_id, Roads.LOCAL, 1)
+
+
+static func _near_parallel_layout_road(layout, first: Vector2, last: Vector2, tolerance: float) -> bool:
+	var direction: Vector2 = (last - first).normalized()
+	if direction == Vector2.ZERO:
+		return false
+	var middle: Vector2 = (first + last) * 0.5
+	for edge_id in range(layout.edges.size()):
+		var path: PackedVector2Array = _layout_edge_path(layout, edge_id)
+		for segment in range(1, path.size()):
+			var other: Vector2 = path[segment] - path[segment - 1]
+			if other.length_squared() < 0.000001 or absf(direction.dot(other.normalized())) < 0.93:
+				continue
+			if middle.distance_to(Geometry2D.get_closest_point_to_segment(middle, path[segment - 1], path[segment])) < tolerance:
+				return true
+	return false
+
+
+static func _near_parallel_outline(first: Vector2, last: Vector2, outline: PackedVector2Array, tolerance: float) -> bool:
+	var direction: Vector2 = (last - first).normalized()
+	if direction == Vector2.ZERO:
+		return false
+	var middle: Vector2 = (first + last) * 0.5
+	for index in range(outline.size()):
+		var before: Vector2 = outline[index]
+		var after: Vector2 = outline[(index + 1) % outline.size()]
+		var side: Vector2 = after - before
+		if side.length_squared() < 0.000001 or absf(direction.dot(side.normalized())) < 0.93:
+			continue
+		var distance: float = middle.distance_to(Geometry2D.get_closest_point_to_segment(middle, before, after))
+		if distance > 0.003 and distance < tolerance:
+			return true
+	return false
 
 
 static func _near_layout_road(layout, point: Vector2, tolerance: float) -> bool:
@@ -758,11 +911,79 @@ static func _point_on_outline(point: Vector2, outline: PackedVector2Array) -> bo
 	return false
 
 
+static func _grid_edge_key(first: Vector2i, last: Vector2i) -> Vector3i:
+	return Vector3i(mini(first.x, last.x), mini(first.y, last.y), 0 if first.y == last.y else 1)
+
+
+static func _grid_edge_path(first: Vector2i, last: Vector2i, positions: Dictionary, paths: Dictionary) -> PackedVector2Array:
+	var path: PackedVector2Array = paths.get(_grid_edge_key(first, last), PackedVector2Array())
+	if path.is_empty():
+		return PackedVector2Array([positions[first], positions[last]])
+	if first.x > last.x or first.y > last.y:
+		path = path.duplicate()
+		path.reverse()
+	return path
+
+
+static func _organic_cell_polygon(corners: Array[Vector2i], positions: Dictionary, paths: Dictionary) -> PackedVector2Array:
+	var polygon := PackedVector2Array()
+	for side in range(4):
+		var path: PackedVector2Array = _grid_edge_path(corners[side], corners[(side + 1) % 4], positions, paths)
+		for index in range(path.size() - 1):
+			polygon.append(path[index])
+	return polygon if not triangulate(polygon).is_empty() else PackedVector2Array()
+
+
+static func _organic_grid_path(region, city_id: int, first: Vector2, last: Vector2, guide: Vector2, field_context: Dictionary, outline: PackedVector2Array) -> PackedVector2Array:
+	var distance: float = first.distance_to(last)
+	if distance < 0.055 or _point_on_outline(first, outline) or _point_on_outline(last, outline):
+		return PackedVector2Array()
+	var chord: Vector2 = (last - first) / distance
+	var center: Vector2 = region.cities[city_id]["center_km"]
+	var entry: Vector2 = DirectionField.axis(region.generation_seed, city_id, first, chord, guide, true, center, field_context)
+	var exit: Vector2 = DirectionField.axis(region.generation_seed, city_id, last, chord, guide, true, center, field_context)
+	entry = chord.slerp(entry, 1.0).normalized()
+	exit = chord.slerp(exit, 1.0).normalized()
+	var control_first: Vector2 = first + entry * distance * 0.45
+	var control_last: Vector2 = last - exit * distance * 0.45
+	var result := PackedVector2Array([first])
+	for station in range(1, 4):
+		var t: float = float(station) / 4.0
+		var inverse: float = 1.0 - t
+		var point: Vector2 = first * inverse * inverse * inverse + control_first * 3.0 * inverse * inverse * t + control_last * 3.0 * inverse * t * t + last * t * t * t
+		if point.distance_to(Geometry2D.get_closest_point_to_segment(point, first, last)) > minf(0.030, distance * 0.22) or not Jurisdiction.polygon_contains_point(point, outline):
+			return PackedVector2Array()
+		result.append(point)
+	result.append(last)
+	return result
+
+
+static func _near_field_arterial(first: Vector2, last: Vector2, field_context: Dictionary, tolerance: float) -> bool:
+	var direction: Vector2 = (last - first).normalized()
+	if direction == Vector2.ZERO:
+		return false
+	for road in field_context.get("roads", []):
+		if absf(direction.dot(road["axis"])) < 0.93:
+			continue
+		var close := true
+		for t in [0.25, 0.5, 0.75]:
+			var point: Vector2 = first.lerp(last, t)
+			if point.distance_to(Geometry2D.get_closest_point_to_segment(point, road["first"], road["last"])) >= tolerance:
+				close = false
+				break
+		if close:
+			return true
+	return false
+
+
 static func _fractions(count: int, rng: RandomNumberGenerator, varied: bool) -> PackedFloat32Array:
 	var weights := PackedFloat32Array()
 	var total := 0.0
+	var phase: float = rng.randf_range(0.0, TAU) if varied else 0.0
 	for index in range(count):
-		var weight: float = rng.randf_range(0.6, 1.65) if varied else 1.0
+		# Organic spacing changes gradually across several blocks. Independent
+		# random widths made the same district look like a distorted grid.
+		var weight: float = clampf(1.0 + 0.22 * sin(float(index) * 0.48 + phase) + 0.12 * sin(float(index) * 0.21 - phase * 1.3), 0.72, 1.28) if varied else 1.0
 		weights.append(weight)
 		total += weight
 	var result := PackedFloat32Array([0.0])
@@ -868,6 +1089,23 @@ static func _append_edge(layout, first: int, last: int, road_class: String, phas
 		layout.phase_upkeep[phase - 1] += length * Roads.upkeep(road_class)
 
 
+static func _append_path_edge(layout, first: int, last: int, road_class: String, phase: int, path: PackedVector2Array) -> void:
+	if path.size() < 3:
+		_append_edge(layout, first, last, road_class, phase)
+		return
+	layout.edges.append(Vector2(first, last))
+	layout.classes.append(road_class)
+	layout.phases.append(phase)
+	layout.edge_paths[layout.edges.size() - 1] = path
+	var length := 0.0
+	for index in range(1, path.size()):
+		length += path[index - 1].distance_to(path[index])
+	layout.lengths.append(length)
+	if road_class != Roads.ARTERIAL:
+		layout.phase_costs[phase - 1] += roundi(length * Roads.construction_cost(road_class))
+		layout.phase_upkeep[phase - 1] += length * Roads.upkeep(road_class)
+
+
 static func _append_block(layout, nodes: PackedInt32Array, phase: int, seed_value: int, park: bool) -> void:
 	var polygon := PackedVector2Array()
 	for node_id in nodes:
@@ -926,8 +1164,14 @@ static func _build_core_paths(layout, boundary_corners: PackedInt32Array = Packe
 				edges.append(edge_id)
 				stage = maxi(stage, layout.phases[edge_id])
 				var edge: Vector2 = layout.edges[edge_id]
-				cursor = int(edge.y) if int(edge.x) == cursor else int(edge.x)
-				points.append(layout.nodes[cursor])
+				var forward: bool = int(edge.x) == cursor
+				cursor = int(edge.y) if forward else int(edge.x)
+				var path: PackedVector2Array = _layout_edge_path(layout, edge_id)
+				if not forward:
+					path = path.duplicate()
+					path.reverse()
+				for point_id in range(1, path.size()):
+					points.append(path[point_id])
 				phase_boundary = neighbors[cursor].size() == 2 and layout.phases[neighbors[cursor][0]] != layout.phases[neighbors[cursor][1]]
 				if neighbors[cursor].size() != 2 or layout.arterial_nodes.has(cursor) or boundary_corners.has(cursor) or phase_boundary:
 					break

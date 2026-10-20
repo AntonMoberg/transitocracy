@@ -8,7 +8,7 @@ static func cache(region) -> Dictionary:
 		data = {}
 		region.street_spatial_cache = data
 	if data.is_empty():
-		data.assign({"nodes": {}, "links": {}, "pairs": {}, "id_indices": {}, "used_nodes": {}, "node_count": 0, "link_count": 0, "last_link": -1})
+		data.assign({"nodes": {}, "links": {}, "arterials": {}, "pairs": {}, "id_indices": {}, "used_nodes": {}, "node_count": 0, "link_count": 0, "last_link": -1})
 	for node_id in range(data["node_count"], region.road_nodes.size()):
 		index_node(data, region.road_nodes[node_id])
 	data["node_count"] = region.road_nodes.size()
@@ -30,6 +30,11 @@ static func cache(region) -> Dictionary:
 						data["links"][cell] = []
 					if not data["links"][cell].has(link_index):
 						data["links"][cell].append(link_index)
+					if link.road_class == "Arterial":
+						if not data["arterials"].has(cell):
+							data["arterials"][cell] = []
+						if not data["arterials"][cell].has(link_index):
+							data["arterials"][cell].append(link_index)
 	data["link_count"] = region.road_links.size()
 	data["last_link"] = region.road_links[-1].id if not region.road_links.is_empty() else -1
 	return data

@@ -517,6 +517,8 @@ static func _build_city_arterials(region, city: Dictionary) -> void:
 		if score > best_score:
 			best_score = score
 			axis = trial
+	# Keep one base orientation for every later zoning operation in this city.
+	region.cities[city_id]["street_axis"] = axis
 	var normal := Vector2(-axis.y, axis.x)
 	var trunk_column: int = columns / 2
 	var trunk_row: int = rows / 2
@@ -550,7 +552,7 @@ static func _build_city_arterials(region, city: Dictionary) -> void:
 	for row in range(-1, rows + 2):
 		for column in range(-1, columns + 2):
 			field_positions[Vector2i(column + 1, row + 1)] = positions[Vector2i(column, row)]
-	field_positions = Streamlines.trace_grid(field_positions, columns + 2, rows + 2, region.generation_seed, city_id, Vector2.ZERO, false, center, 0.015)
+	field_positions = Streamlines.trace_grid(field_positions, columns + 2, rows + 2, region.generation_seed, city_id, Vector2.ZERO, false, center, 0.015, -1, {"base_axis": axis, "roads": []})
 	for row in range(-1, rows + 2):
 		for column in range(-1, columns + 2):
 			var point: Vector2 = field_positions[Vector2i(column + 1, row + 1)]

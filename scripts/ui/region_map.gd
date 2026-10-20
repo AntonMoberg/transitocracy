@@ -901,27 +901,37 @@ func _draw_roads() -> void:
 
 
 func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int, vertices: PackedVector2Array, colors: PackedColorArray) -> void:
+	var total_length := 0.0
+	for segment in range(1, screen_points.size()):
+		total_length += screen_points[segment - 1].distance_to(screen_points[segment])
+	if total_length < 16.0:
+		return
+	var station: float = minf(24.0, total_length * 0.5)
+	var traveled := 0.0
 	for segment in range(1, screen_points.size()):
 		var start_point: Vector2 = screen_points[segment - 1]
 		var end_point: Vector2 = screen_points[segment]
 		var displacement: Vector2 = end_point - start_point
 		var segment_length: float = displacement.length()
-		if segment_length < 16.0:
+		if segment_length < 0.001:
 			continue
 		var tangent: Vector2 = displacement / segment_length
 		var normal: Vector2 = tangent.orthogonal()
 		var bundle_offset: float = _road_median_half_gap("Highway") + _road_lane_spacing("Highway") * float(lanes) * 0.5
-		var arrow_length: float = clampf(segment_length * 0.18, 3.0, 6.0)
-		for direction in range(2):
-			var travel: Vector2 = tangent if direction == 0 else -tangent
-			var tip: Vector2 = start_point.lerp(end_point, 0.57 if direction == 0 else 0.43) + normal * bundle_offset * _road_direction_side(direction)
-			var base: Vector2 = tip - travel * arrow_length
-			var wing: Vector2 = travel.orthogonal() * 2.2
-			vertices.append(tip)
-			vertices.append(base + wing)
-			vertices.append(base - wing)
-			for corner in range(3):
-				colors.append(Color("f1f7fa", 0.88))
+		while station <= traveled + segment_length and station <= total_length - 8.0:
+			var point: Vector2 = start_point + tangent * (station - traveled)
+			for direction in range(2):
+				var travel: Vector2 = tangent if direction == 0 else -tangent
+				var tip: Vector2 = point + normal * bundle_offset * _road_direction_side(direction)
+				var base: Vector2 = tip - travel * 4.0
+				var wing: Vector2 = travel.orthogonal() * 2.2
+				vertices.append(tip)
+				vertices.append(base + wing)
+				vertices.append(base - wing)
+				for corner in range(3):
+					colors.append(Color("f1f7fa", 0.88))
+			station += 72.0
+		traveled += segment_length
 
 
 func _draw_active_road(screen_points: PackedVector2Array, lanes: int, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:

@@ -228,10 +228,20 @@ static func _affected_local_edges(layout, masks: Array[PackedVector2Array]) -> P
 	for edge_id in range(layout.edges.size()):
 		if layout.classes[edge_id] != "Local" or layout.closed_edges.has(edge_id):
 			continue
-		var edge: Vector2 = layout.edges[edge_id]
-		if _segment_intersects_masks(layout.nodes[int(edge.x)], layout.nodes[int(edge.y)], masks):
+		if _layout_edge_intersects_masks(layout, edge_id, masks):
 			result.append(edge_id)
 	return result
+
+
+static func _layout_edge_intersects_masks(layout, edge_id: int, masks: Array[PackedVector2Array]) -> bool:
+	var path: PackedVector2Array = layout.edge_paths.get(edge_id, PackedVector2Array())
+	if path.is_empty():
+		var edge: Vector2 = layout.edges[edge_id]
+		return _segment_intersects_masks(layout.nodes[int(edge.x)], layout.nodes[int(edge.y)], masks)
+	for segment in range(1, path.size()):
+		if _segment_intersects_masks(path[segment - 1], path[segment], masks):
+			return true
+	return false
 
 
 static func _demolish_blocks(neighborhood, affected: PackedInt32Array, masks: Array[PackedVector2Array]) -> void:
@@ -297,7 +307,7 @@ static func _rebuild_streets(neighborhood, points: PackedVector2Array, road_clas
 		if edge_id >= original_edge_count or layout.classes[edge_id] != "Local":
 			continue
 		var edge: Vector2 = layout.edges[edge_id]
-		if not _segment_intersects_masks(layout.nodes[int(edge.x)], layout.nodes[int(edge.y)], masks):
+		if not _layout_edge_intersects_masks(layout, edge_id, masks):
 			continue
 		for node_id in [int(edge.x), int(edge.y)]:
 			var endpoint: Vector2 = layout.nodes[node_id]

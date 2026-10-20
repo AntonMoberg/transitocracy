@@ -53,14 +53,16 @@ func _run() -> void:
 			var last: int = int(edge.y)
 			if layout.arterial_nodes.has(first) != layout.arterial_nodes.has(last):
 				origins.append(layout.nodes[first] if layout.arterial_nodes.has(first) else layout.nodes[last])
-		if origins.size() < 1 or origins.size() > 2:
-			push_error("One-sided plans need one or two collector entrances, got %d for %s" % [origins.size(), candidate["key"]])
+		if origins.size() < 1 or origins.size() > 3:
+			push_error("One-sided plans need spaced collector entrances, got %d for %s" % [origins.size(), candidate["key"]])
 			quit(1)
 			return
-		if origins.size() == 2 and origins[0].distance_to(origins[1]) < 0.36:
-			push_error("Collector entrances are nearly parallel at %s" % candidate["key"])
-			quit(1)
-			return
+		for first_id in range(origins.size()):
+			for second_id in range(first_id + 1, origins.size()):
+				if origins[first_id].distance_to(origins[second_id]) < 0.36:
+					push_error("Collector entrances are nearly parallel at %s" % candidate["key"])
+					quit(1)
+					return
 		checked_frontages += 1
 	if checked_frontages < 2:
 		push_error("Expected several one-sided candidate layouts")

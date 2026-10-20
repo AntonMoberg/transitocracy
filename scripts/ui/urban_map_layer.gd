@@ -34,13 +34,21 @@ func hit_street(map, point: Vector2) -> Vector2i:
 		for edge_id in range(layout.edges.size()):
 			if layout.classes[edge_id] != Roads.LOCAL or layout.phases[edge_id] > neighborhood.development_plan.completed_phase or layout.closed_edges.has(edge_id):
 				continue
-			var edge: Vector2 = layout.edges[edge_id]
-			var first: Vector2 = map._world_to_screen(layout.nodes[int(edge.x)])
-			var last: Vector2 = map._world_to_screen(layout.nodes[int(edge.y)])
-			var distance: float = point.distance_to(Geometry2D.get_closest_point_to_segment(point, first, last))
-			if distance < best_distance:
-				best = Vector2i(neighborhood.id, edge_id)
-				best_distance = distance
+			if layout.edge_paths.has(edge_id):
+				var path: PackedVector2Array = _screen_edge_path(map, layout, edge_id)
+				for segment in range(1, path.size()):
+					var distance: float = point.distance_to(Geometry2D.get_closest_point_to_segment(point, path[segment - 1], path[segment]))
+					if distance < best_distance:
+						best = Vector2i(neighborhood.id, edge_id)
+						best_distance = distance
+			else:
+				var edge: Vector2 = layout.edges[edge_id]
+				var first: Vector2 = map._world_to_screen(layout.nodes[int(edge.x)])
+				var last: Vector2 = map._world_to_screen(layout.nodes[int(edge.y)])
+				var distance: float = point.distance_to(Geometry2D.get_closest_point_to_segment(point, first, last))
+				if distance < best_distance:
+					best = Vector2i(neighborhood.id, edge_id)
+					best_distance = distance
 	return best
 
 
@@ -83,12 +91,18 @@ func draw(map) -> void:
 			var edge: Vector2 = layout.edges[edge_id]
 			var first: Vector2 = map._world_to_screen(layout.nodes[int(edge.x)])
 			var last: Vector2 = map._world_to_screen(layout.nodes[int(edge.y)])
-			if not Rect2(first, Vector2.ZERO).expand(last).grow(6.0).intersects(viewport):
+			var curved: bool = layout.edge_paths.has(edge_id)
+			if not Rect2(first, Vector2.ZERO).expand(last).grow(maxf(6.0, meters * 30.0) if curved else 6.0).intersects(viewport):
 				continue
+			var path: PackedVector2Array = _screen_edge_path(map, layout, edge_id) if curved else PackedVector2Array()
 			var built: bool = layout.phases[edge_id] <= plan.completed_phase
 			if not built:
 				if map.map_mode == "Zoning" or plan.constructing_phase == layout.phases[edge_id]:
-					map.draw_dashed_line(first, last, Color("c3ac78", 0.5), 1.0, 5.0, true)
+					if curved:
+						for segment in range(1, path.size()):
+							map.draw_dashed_line(path[segment - 1], path[segment], Color("c3ac78", 0.5), 1.0, 5.0, true)
+					else:
+						map.draw_dashed_line(first, last, Color("c3ac78", 0.5), 1.0, 5.0, true)
 				continue
 			if layout.classes[edge_id] != Roads.LOCAL:
 				continue
@@ -99,15 +113,28 @@ func draw(map) -> void:
 				color = map._congestion_color(maxf(rate.x, rate.y) / record["capacity"] + (queue.x + queue.y) / 100.0).lerp(Color("84928b"), 0.5)
 			if map.selected_local_street == Vector2i(neighborhood.id, edge_id):
 				color = Color("f7e4a0")
-			casing_lines.append(first)
-			casing_lines.append(last)
-			street_lines.append(first)
-			street_lines.append(last)
-			street_colors.append(color)
+			if curved:
+				for segment in range(1, path.size()):
+					casing_lines.append(path[segment - 1])
+					casing_lines.append(path[segment])
+					street_lines.append(path[segment - 1])
+					street_lines.append(path[segment])
+					street_colors.append(color)
+			else:
+				casing_lines.append(first)
+				casing_lines.append(last)
+				street_lines.append(first)
+				street_lines.append(last)
+				street_colors.append(color)
 			last_street_count += 1
 			if meters >= 0.5:
-				dashed_streets.append(first)
-				dashed_streets.append(last)
+				if curved:
+					for segment in range(1, path.size()):
+						dashed_streets.append(path[segment - 1])
+						dashed_streets.append(path[segment])
+				else:
+					dashed_streets.append(first)
+					dashed_streets.append(last)
 		last_street_draw_us += Time.get_ticks_usec() - street_started
 	if not casing_lines.is_empty():
 		var batch_started: int = Time.get_ticks_usec()
@@ -126,8 +153,14 @@ func draw(map) -> void:
 				var edge: Vector2 = layout.edges[edge_id]
 				var first: Vector2 = map._world_to_screen(layout.nodes[int(edge.x)])
 				var last: Vector2 = map._world_to_screen(layout.nodes[int(edge.y)])
-				if Rect2(first, Vector2.ZERO).expand(last).intersects(viewport):
-					map.draw_dashed_line(first, last, Color("dbc38a", 0.65), 1.3, 5.0, true)
+				var curved: bool = layout.edge_paths.has(edge_id)
+				if Rect2(first, Vector2.ZERO).expand(last).grow(meters * 30.0 if curved else 0.0).intersects(viewport):
+					if curved:
+						var path: PackedVector2Array = _screen_edge_path(map, layout, edge_id)
+						for segment in range(1, path.size()):
+							map.draw_dashed_line(path[segment - 1], path[segment], Color("dbc38a", 0.65), 1.3, 5.0, true)
+					else:
+						map.draw_dashed_line(first, last, Color("dbc38a", 0.65), 1.3, 5.0, true)
 	if pending_buildings and not building_update_scheduled:
 		building_update_scheduled = true
 		map.get_tree().create_timer(BUILDING_UPDATE_INTERVAL_S).timeout.connect(func() -> void:
@@ -135,6 +168,17 @@ func draw(map) -> void:
 			if is_instance_valid(map):
 				map.queue_redraw()
 		, CONNECT_ONE_SHOT)
+
+
+func _screen_edge_path(map, layout, edge_id: int) -> PackedVector2Array:
+	var path: PackedVector2Array = layout.edge_paths.get(edge_id, PackedVector2Array())
+	if path.is_empty():
+		var edge: Vector2 = layout.edges[edge_id]
+		return PackedVector2Array([map._world_to_screen(layout.nodes[int(edge.x)]), map._world_to_screen(layout.nodes[int(edge.y)])])
+	var screen := PackedVector2Array()
+	for point in path:
+		screen.append(map._world_to_screen(point))
+	return screen
 
 
 func _draw_blocks(map, neighborhood, viewport: Rect2, meters: float, building_deadline_us: int) -> bool:

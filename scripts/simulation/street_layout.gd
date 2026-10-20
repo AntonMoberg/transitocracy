@@ -13,6 +13,7 @@ var polygon: PackedVector2Array = PackedVector2Array()
 var bounds: Rect2 = Rect2()
 var nodes: PackedVector2Array = PackedVector2Array()
 var edges: PackedVector2Array = PackedVector2Array()
+var edge_paths: Dictionary = {}
 var classes: PackedStringArray = PackedStringArray()
 var phases: PackedInt32Array = PackedInt32Array()
 var lengths: PackedFloat32Array = PackedFloat32Array()

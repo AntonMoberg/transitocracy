@@ -7,19 +7,19 @@ const DirectionField = preload("res://scripts/simulation/street_direction_field.
 # rather than a displaced rectangular lattice, become the street junctions.
 # The supplied perimeter is held fixed so adjacent districts retain shared
 # streets and the player's drawn zoning outline stays exact.
-static func trace_grid(positions: Dictionary, columns: int, rows: int, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2, maximum_shift: float, fixed_row: int = -1) -> Dictionary:
+static func trace_grid(positions: Dictionary, columns: int, rows: int, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2, maximum_shift: float, fixed_row: int = -1, context: Dictionary = {}) -> Dictionary:
 	var horizontal: Array = []
 	var vertical: Array = []
 	for row in range(rows + 1):
 		var seeds := PackedVector2Array()
 		for column in range(columns + 1):
 			seeds.append(positions[Vector2i(column, row)])
-		horizontal.append(seeds if row == 0 or row == rows or row == fixed_row else _trace_family(seeds, seed_value, city_id, guide, organic, radial_center))
+		horizontal.append(seeds if row == 0 or row == rows or row == fixed_row else _trace_family(seeds, seed_value, city_id, guide, organic, radial_center, context))
 	for column in range(columns + 1):
 		var seeds := PackedVector2Array()
 		for row in range(rows + 1):
 			seeds.append(positions[Vector2i(column, row)])
-		vertical.append(seeds if column == 0 or column == columns else _trace_family(seeds, seed_value, city_id, guide, organic, radial_center))
+		vertical.append(seeds if column == 0 or column == columns else _trace_family(seeds, seed_value, city_id, guide, organic, radial_center, context))
 	var result: Dictionary = positions.duplicate()
 	for row in range(1, rows):
 		if row == fixed_row:
@@ -49,7 +49,7 @@ static func trace_grid(positions: Dictionary, columns: int, rows: int, seed_valu
 	return result
 
 
-static func _trace_family(seeds: PackedVector2Array, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2) -> PackedVector2Array:
+static func _trace_family(seeds: PackedVector2Array, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2, context: Dictionary) -> PackedVector2Array:
 	var traced := PackedVector2Array([seeds[0]])
 	for index in range(1, seeds.size()):
 		var base: Vector2 = seeds[index] - seeds[index - 1]
@@ -58,7 +58,7 @@ static func _trace_family(seeds: PackedVector2Array, seed_value: int, city_id: i
 			traced.append(traced[-1])
 			continue
 		var local_guide: Vector2 = guide.orthogonal() if guide != Vector2.ZERO and absf(guide.dot(base / length)) < 0.5 else guide
-		var step: Vector2 = _rk4_step(traced[-1], base / length, length, seed_value, city_id, local_guide, organic, radial_center)
+		var step: Vector2 = _rk4_step(traced[-1], base / length, length, seed_value, city_id, local_guide, organic, radial_center, context)
 		traced.append(traced[-1] + step)
 	# A linear endpoint correction preserves both perimeter anchors without
 	# replacing the field's integrated bends in the middle of the street.
@@ -74,9 +74,9 @@ static func _trace_family(seeds: PackedVector2Array, seed_value: int, city_id: i
 	return traced
 
 
-static func _rk4_step(point: Vector2, reference: Vector2, distance: float, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2) -> Vector2:
-	var first: Vector2 = DirectionField.axis(seed_value, city_id, point, reference, guide, organic, radial_center)
-	var second: Vector2 = DirectionField.axis(seed_value, city_id, point + first * distance * 0.5, reference, guide, organic, radial_center)
-	var third: Vector2 = DirectionField.axis(seed_value, city_id, point + second * distance * 0.5, reference, guide, organic, radial_center)
-	var fourth: Vector2 = DirectionField.axis(seed_value, city_id, point + third * distance, reference, guide, organic, radial_center)
+static func _rk4_step(point: Vector2, reference: Vector2, distance: float, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2, context: Dictionary) -> Vector2:
+	var first: Vector2 = DirectionField.axis(seed_value, city_id, point, reference, guide, organic, radial_center, context)
+	var second: Vector2 = DirectionField.axis(seed_value, city_id, point + first * distance * 0.5, reference, guide, organic, radial_center, context)
+	var third: Vector2 = DirectionField.axis(seed_value, city_id, point + second * distance * 0.5, reference, guide, organic, radial_center, context)
+	var fourth: Vector2 = DirectionField.axis(seed_value, city_id, point + third * distance, reference, guide, organic, radial_center, context)
 	return (first + second * 2.0 + third * 2.0 + fourth) * (distance / 6.0)
