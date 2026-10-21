@@ -47,11 +47,17 @@ var neighborhood_spoke_link_ids: Array[int] = []
 var development_candidates: Array = []
 var development_candidate_keys: Dictionary = {}
 var development_candidate_cells: Dictionary = {}
-var growth_area_drafts: Array[Dictionary] = []
-var next_growth_area_id: int = 0
+var development_candidate_city_ids: Dictionary = {}
 var urban_route_cache: Dictionary = {}
 var urban_route_revision: int = -1
 var street_spatial_cache: Dictionary = {}
+var city_street_junctions: Dictionary = {}
+var city_street_revision: int = -1
+var urban_sector_claims: Dictionary = {}
+var urban_plan_edges: Dictionary = {}
+var urban_corridors: Array[Dictionary] = []
+var rail_reservations: Array[Dictionary] = []
+var station_sites: Array[Dictionary] = []
 
 
 func reserved_development_funds(jurisdiction_id: int = 0) -> int:
@@ -163,7 +169,7 @@ func jurisdiction_at_point(point: Vector2) -> int:
 
 func road_owner_for_points(points: PackedVector2Array, road_class: String) -> int:
 	if road_class in ["Collector", "Local"]:
-		var city_id: int = city_id_at_point(points[points.size() / 2])
+		var city_id: int = city_id_at_point(points[floori(float(points.size()) / 2.0)])
 		if city_id >= 0:
 			return city_jurisdiction_ids[city_id]
 	var owner_id: int = jurisdiction_at_point(points[0])

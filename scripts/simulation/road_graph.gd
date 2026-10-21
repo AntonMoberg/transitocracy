@@ -402,7 +402,7 @@ static func _shortest_tree(region, costs: PackedVector2Array, neighbors: Array, 
 			heap_nodes.append(next_node)
 			heap_costs.append(next_distance)
 			while heap_index > 0:
-				var parent_index: int = (heap_index - 1) / 2
+				var parent_index: int = floori(float(heap_index - 1) / 2.0)
 				if heap_costs[parent_index] <= next_distance:
 					break
 				heap_nodes[heap_index] = heap_nodes[parent_index]

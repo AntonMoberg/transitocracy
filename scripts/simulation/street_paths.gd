@@ -58,7 +58,7 @@ static func _push(heap: Array[Vector2], entry: Vector2) -> void:
 	var cursor: int = heap.size()
 	heap.append(entry)
 	while cursor > 0:
-		var parent: int = (cursor - 1) / 2
+		var parent: int = floori(float(cursor - 1) / 2.0)
 		if heap[parent].y <= entry.y:
 			break
 		heap[cursor] = heap[parent]

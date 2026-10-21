@@ -3,6 +3,18 @@ extends RefCounted
 const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
 
 
+# Integrate a short, fixed window ending at an absolute city-grid junction.
+# No candidate perimeter or local row number enters this calculation.
+static func trace_absolute(point: Vector2, axis: Vector2, seed_value: int, city_id: int, organic: bool, radial_center: Vector2, context: Dictionary) -> Vector2:
+	var guide: Vector2 = axis.normalized()
+	var window: float = 0.30 if organic else 0.20
+	var start: Vector2 = point - guide * window
+	var step: Vector2 = _rk4_step(start, guide, window, seed_value, city_id, guide, organic, radial_center, context)
+	var transverse: Vector2 = guide.orthogonal()
+	var offset: float = clampf((step - guide * window).dot(transverse), -0.035 if organic else -0.012, 0.035 if organic else 0.012)
+	return point + transverse * offset
+
+
 # Trace both street families through the same axial field. Their crossings,
 # rather than a displaced rectangular lattice, become the street junctions.
 # The supplied perimeter is held fixed so adjacent districts retain shared
@@ -74,9 +86,9 @@ static func _trace_family(seeds: PackedVector2Array, seed_value: int, city_id: i
 	return traced
 
 
-static func _rk4_step(point: Vector2, reference: Vector2, distance: float, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2, context: Dictionary) -> Vector2:
-	var first: Vector2 = DirectionField.axis(seed_value, city_id, point, reference, guide, organic, radial_center, context)
-	var second: Vector2 = DirectionField.axis(seed_value, city_id, point + first * distance * 0.5, reference, guide, organic, radial_center, context)
-	var third: Vector2 = DirectionField.axis(seed_value, city_id, point + second * distance * 0.5, reference, guide, organic, radial_center, context)
-	var fourth: Vector2 = DirectionField.axis(seed_value, city_id, point + third * distance, reference, guide, organic, radial_center, context)
+static func _rk4_step(point: Vector2, reference_axis: Vector2, distance: float, seed_value: int, city_id: int, guide: Vector2, organic: bool, radial_center: Vector2, context: Dictionary) -> Vector2:
+	var first: Vector2 = DirectionField.axis(seed_value, city_id, point, reference_axis, guide, organic, radial_center, context)
+	var second: Vector2 = DirectionField.axis(seed_value, city_id, point + first * distance * 0.5, reference_axis, guide, organic, radial_center, context)
+	var third: Vector2 = DirectionField.axis(seed_value, city_id, point + second * distance * 0.5, reference_axis, guide, organic, radial_center, context)
+	var fourth: Vector2 = DirectionField.axis(seed_value, city_id, point + third * distance, reference_axis, guide, organic, radial_center, context)
 	return (first + second * 2.0 + third * 2.0 + fourth) * (distance / 6.0)

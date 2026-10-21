@@ -58,7 +58,7 @@ static func _generate(seed_value: int, city_count: int, neighborhood_count: int,
 				var city_id: int = region.cities.size()
 				var city_name: String = CITY_NAMES[city_id % CITY_NAMES.size()]
 				if large_scale:
-					city_name += " %d" % (city_id / CITY_NAMES.size() + 1)
+					city_name += " %d" % (floori(float(city_id) / float(CITY_NAMES.size())) + 1)
 				var city = _add_jurisdiction(region, JurisdictionData.CITY, city_name, county.id)
 				city.treasury = 10000000.0
 				region.city_jurisdiction_ids.append(city.id)
@@ -86,7 +86,7 @@ static func _generate(seed_value: int, city_count: int, neighborhood_count: int,
 					while current_id >= 0:
 						region.jurisdictions[current_id].neighborhood_ids.append(neighborhood.id)
 						current_id = region.jurisdictions[current_id].parent_id
-				region.cities.append({"id": city_id, "name": city_name, "center_km": Vector2.ZERO, "neighborhood_ids": neighborhood_ids, "county_id": county_index, "region_id": region_index, "jurisdiction_id": city.id, "density": density, "growth_policy": {"enabled": true, "allowance": 0, "last_month": -1}})
+				region.cities.append({"id": city_id, "name": city_name, "center_km": Vector2.ZERO, "neighborhood_ids": neighborhood_ids, "county_id": county_index, "region_id": region_index, "jurisdiction_id": city.id, "density": density, "growth_policy": {"enabled": false, "allowance": 0, "last_month": -1}, "urban_policy": {"growth_focus": 0, "block_design": 0, "land_use_focus": 0, "density": density}})
 	for area in region.jurisdictions:
 		if area.kind in [JurisdictionData.REGION, JurisdictionData.COUNTY, JurisdictionData.CITY]:
 			area.generation_weight = pow(float(area.neighborhood_ids.size()), 0.65) * rng.randf_range(0.55, 1.8)
@@ -165,10 +165,18 @@ static func append_neighborhood(region, city_id: int, polygon: PackedVector2Arra
 static func zone_defaults(region, city_id: int, grid: Vector2i) -> Dictionary:
 	var shares: Dictionary = ARCHETYPES[posmod(city_id * 13 + grid.x * 7 + grid.y * 11, ARCHETYPES.size())].duplicate(true)
 	var density: Dictionary = {}
+	var urban_policy: Dictionary = region.cities[city_id].get("urban_policy", {})
+	match int(urban_policy.get("land_use_focus", 0)):
+		1:
+			shares = {"Residential": 55, "Commercial": 8, "Office": 7, "Mixed": 25, "Industry": 5}
+		2:
+			shares = {"Residential": 25, "Commercial": 20, "Office": 20, "Mixed": 25, "Industry": 10}
+		3:
+			shares = {"Residential": 35, "Commercial": 10, "Office": 10, "Mixed": 40, "Industry": 5}
 	var rng := RandomNumberGenerator.new()
 	rng.seed = absi(region.generation_seed * 1000003 + city_id * 9176 + grid.x * 7309 + grid.y * 1543)
 	for zone in RegionData.ZONE_TYPES:
-		density[zone] = clampi(int(region.cities[city_id]["density"]) + rng.randi_range(-1, 1), 0, 2)
+		density[zone] = clampi(int(urban_policy.get("density", region.cities[city_id]["density"])) + rng.randi_range(-1, 1), 0, 2)
 	return {"shares": shares, "density": density}
 
 

@@ -153,7 +153,7 @@ static func _divide_children(region, child_ids: Array[int], polygon: PackedVecto
 		_update_bounds(child)
 		_partition(region, child, rng)
 		return
-	var first_count: int = child_ids.size() / 2
+	var first_count: int = floori(float(child_ids.size()) / 2.0)
 	var bounds: Rect2 = _bounds(polygon)
 	var preferred_axis: int = 0 if bounds.size.x >= bounds.size.y else 1
 	if maxf(bounds.size.x, bounds.size.y) < minf(bounds.size.x, bounds.size.y) * 1.8 and rng.randf() < 0.25:

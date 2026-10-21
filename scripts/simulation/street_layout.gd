@@ -23,6 +23,9 @@ var blocks: Array = []
 var phase_costs: PackedInt64Array = PackedInt64Array([0, 0, 0])
 var phase_upkeep: PackedFloat64Array = PackedFloat64Array([0, 0, 0])
 var closed_edges: Dictionary = {}
+var canonical_nodes: Dictionary = {}
+var canonical_edges: Dictionary = {}
+var grade_separated_edges: Dictionary = {}
 
 
 func copy():

@@ -127,11 +127,11 @@ static func interchange_preview(region, node_id: int, link_id: int, point: Vecto
 		for project in region.road_projects:
 			if project.target_node_id == node_id and project.kind == RoadProjectData.INTERCHANGE_NODE:
 				return {"ok": false, "reason": "An interchange is already being built here."}
-		var days := _construction_days(45)
+		var node_days := _construction_days(45)
 		var node_point: Vector2 = region.road_nodes[node_id].position_km
 		var city_id: int = region.city_id_at_point(node_point)
 		var owner_id: int = region.city_jurisdiction_ids[city_id] if city_id >= 0 else region.jurisdiction_at_point(node_point)
-		return {"ok": true, "kind": RoadProjectData.INTERCHANGE_NODE, "target_node_id": node_id, "cost": INTERCHANGE_COST, "days": days, "open_day_key": day_key + days, "owner_id": owner_id}
+		return {"ok": true, "kind": RoadProjectData.INTERCHANGE_NODE, "target_node_id": node_id, "cost": INTERCHANGE_COST, "days": node_days, "open_day_key": day_key + node_days, "owner_id": owner_id}
 	var index: int = RoadGraph.link_index(region, link_id)
 	if index < 0 or region.road_links[index].road_class != RoadLinkData.HIGHWAY:
 		return {"ok": false, "reason": "Choose a highway segment or a junction."}
@@ -530,34 +530,34 @@ static func snap_guidance(region, start_id: int, anchors: PackedVector2Array, po
 	if delta.length_squared() < 0.000001:
 		return {"position": point, "reference": Vector2.RIGHT, "has_reference": false, "label": ""}
 	var connection := Vector2.ZERO
-	var reference := Vector2.RIGHT
+	var reference_axis := Vector2.RIGHT
 	if mode == RoadRouteBuilder.MULTIPOINT and anchors.size() >= 2:
 		var last_end_index: int = anchors.size() - 1 if anchors.size() % 2 == 0 else anchors.size() - 2
-		reference = (anchors[last_end_index] - anchors[last_end_index - 1]).normalized()
+		reference_axis = (anchors[last_end_index] - anchors[last_end_index - 1]).normalized()
 	elif mode == RoadRouteBuilder.MULTIPOINT and anchors.size() == 1:
 		connection = road_connection_reference(region, start_id, anchors[0], road_class)
-		reference = connection if connection != Vector2.ZERO else (anchors[0] - region.road_nodes[start_id].position_km).normalized()
+		reference_axis = connection if connection != Vector2.ZERO else (anchors[0] - region.road_nodes[start_id].position_km).normalized()
 	elif not anchors.is_empty():
 		var previous: Vector2 = anchors[-2] if anchors.size() > 1 else region.road_nodes[start_id].position_km
-		reference = (anchors[-1] - previous).normalized()
+		reference_axis = (anchors[-1] - previous).normalized()
 	else:
 		connection = road_connection_reference(region, start_id, point, road_class)
 		if connection != Vector2.ZERO:
-			reference = connection
-	if reference.length_squared() < 0.000001:
-		reference = Vector2.RIGHT
-	var relative: float = reference.angle_to(delta)
-	var direction: Vector2 = reference.rotated(roundf(relative / deg_to_rad(5.0)) * deg_to_rad(5.0)) if snap_angle else delta.normalized()
+			reference_axis = connection
+	if reference_axis.length_squared() < 0.000001:
+		reference_axis = Vector2.RIGHT
+	var relative: float = reference_axis.angle_to(delta)
+	var direction: Vector2 = reference_axis.rotated(roundf(relative / deg_to_rad(5.0)) * deg_to_rad(5.0)) if snap_angle else delta.normalized()
 	var length_km: float = roundf(delta.length() / 0.005) * 0.005 if snap_length else delta.length()
 	var position: Vector2 = origin + direction * length_km
 	var has_reference: bool = not anchors.is_empty() or connection != Vector2.ZERO
-	var display_angle: int = roundi(rad_to_deg(reference.angle_to(direction)) / 5.0) * 5
+	var display_angle: int = roundi(rad_to_deg(reference_axis.angle_to(direction)) / 5.0) * 5
 	var label: String = "Bearing %d°" % (roundi(rad_to_deg(direction.angle()) / 5.0) * 5)
 	if has_reference:
 		label = "%+d°" % display_angle if display_angle != 0 else "0°"
 	if snap_length:
 		label = "%s  ·  %d m" % [label, roundi(length_km * 1000.0)] if snap_angle else "%d m" % roundi(length_km * 1000.0)
-	return {"position": position, "reference": reference, "has_reference": has_reference, "label": label, "length_m": roundi(length_km * 1000.0)}
+	return {"position": position, "reference": reference_axis, "has_reference": has_reference, "label": label, "length_m": roundi(length_km * 1000.0)}
 
 
 static func frozen_multi_curve(region, start_id: int, anchors: PackedVector2Array, road_class: String) -> PackedVector2Array:

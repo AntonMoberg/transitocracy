@@ -17,7 +17,7 @@ const SECONDS_PER_DAY = 86400
 static func new_day(region, flow_profile, unix_seconds: int, previous_state = null):
 	var state = State.new()
 	state.unix_seconds = unix_seconds
-	state.day_key = unix_seconds / SECONDS_PER_DAY
+	state.day_key = floori(float(unix_seconds) / float(SECONDS_PER_DAY))
 	var links: int = region.road_links.size()
 	state.queues.resize(links)
 	state.last_arrivals.resize(links)
@@ -54,7 +54,7 @@ static func new_day(region, flow_profile, unix_seconds: int, previous_state = nu
 	state.profile = _new_profile(region, state)
 	if not region.is_large_scale:
 		_precompute_demand(region, flow_profile, state)
-	state.first_recorded_bin = clampi((unix_seconds % SECONDS_PER_DAY) / 900, 0, 95)
+	state.first_recorded_bin = clampi(floori(float(unix_seconds % SECONDS_PER_DAY) / 900.0), 0, 95)
 	state.next_bin = state.first_recorded_bin + 1
 	state.profile.first_recorded_bin = state.first_recorded_bin
 	state.profile.recorded_bin = state.next_bin
@@ -268,7 +268,7 @@ static func _advance_compact_day(region, flow_profile, state, day_end: int) -> v
 		return
 	FiscalCalculator.apply_due_policies(region, state.unix_seconds)
 	var start_bin: int = clampi((state.unix_seconds - state.day_key * SECONDS_PER_DAY) / 900, 0, 95)
-	var start_hour: int = start_bin / 4
+	var start_hour: int = floori(float(start_bin) / 4.0)
 	var build_started: int = Time.get_ticks_usec()
 	CompactTrafficCalculator.build_hour(region, flow_profile, state, DAY, 24)
 	state.stage_totals_us["build_hour"] = int(state.stage_totals_us.get("build_hour", 0)) + Time.get_ticks_usec() - build_started

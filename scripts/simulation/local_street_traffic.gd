@@ -55,8 +55,8 @@ static func prepare(region, state, previous_state = null, unix_seconds: int = -1
 
 static func advance_to(region, profile, state, unix_seconds: int) -> void:
 	while state.local_clock < unix_seconds:
-		var hour: int = posmod(state.local_clock, 86400) / 3600
-		var finish: int = mini(unix_seconds, (state.local_clock / 3600 + 1) * 3600)
+		var hour: int = floori(float(posmod(state.local_clock, 86400)) / 3600.0)
+		var finish: int = mini(unix_seconds, (floori(float(state.local_clock) / 3600.0) + 1) * 3600)
 		var hours: float = float(finish - state.local_clock) / 3600.0
 		for neighborhood_id in state.local_districts:
 			var neighborhood = region.neighborhoods[neighborhood_id]
@@ -163,7 +163,7 @@ static func _build_weights(neighborhood, record: Dictionary) -> void:
 		var density: int = neighborhood.zone_density[zone]
 		if block_id < neighborhood.block_zoning.size() and neighborhood.block_zoning[block_id] > 0:
 			var code: int = neighborhood.block_zoning[block_id] - 1
-			zone = region_zone_types()[code / 3]
+			zone = region_zone_types()[floori(float(code) / 3.0)]
 			density = code % 3
 		var area: float = block.get("area_ha", 1.0)
 		var weight: float = (float(RegionGenerator.HOUSING_YIELDS.get(zone, [0, 0, 0])[density]) + 0.1) * area

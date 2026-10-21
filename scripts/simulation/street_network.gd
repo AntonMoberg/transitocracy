@@ -38,10 +38,10 @@ static func ensure_node(region, point: Vector2, city_id: int, preferred_id: int 
 	var nearest_id := -1
 	var nearest_distance := 0.001
 	for node_id in Spatial.near_nodes(region, point):
-		var node = region.road_nodes[node_id]
-		var distance: float = node.position_km.distance_to(point)
+		var nearby_node = region.road_nodes[node_id]
+		var distance: float = nearby_node.position_km.distance_to(point)
 		if distance < nearest_distance:
-			nearest_id = node.id
+			nearest_id = nearby_node.id
 			nearest_distance = distance
 	if nearest_id >= 0:
 		return nearest_id
@@ -192,11 +192,15 @@ static func _join_adjacent_districts(region, neighborhood) -> void:
 		var has_local_seam := false
 		for link in region.road_links:
 			if link.road_class in [Roads.COLLECTOR, Roads.LOCAL] and ((current_ids.has(link.from_node_id) and other_ids.has(link.to_node_id)) or (other_ids.has(link.from_node_id) and current_ids.has(link.to_node_id))):
-				installed.append((region.road_nodes[link.from_node_id].position_km + region.road_nodes[link.to_node_id].position_km) * 0.5)
-				has_local_seam = has_local_seam or link.road_class == Roads.LOCAL
-		if installed.size() >= 2 or has_local_seam:
+				if link.road_class == Roads.COLLECTOR:
+					installed.append((region.road_nodes[link.from_node_id].position_km + region.road_nodes[link.to_node_id].position_km) * 0.5)
+				else:
+					has_local_seam = true
+		if installed.size() >= 2:
 			continue
 		var candidates: Array[Dictionary] = []
+		var current_headings: Dictionary = {}
+		var other_headings: Dictionary = {}
 		for local_id in neighborhood.development_plan.core_node_ids:
 			if layout.arterial_nodes.has(local_id):
 				continue
@@ -220,7 +224,17 @@ static func _join_adjacent_districts(region, neighborhood) -> void:
 					seam_distance = minf(seam_distance, point.distance_to(Geometry2D.get_closest_point_to_segment(point, first_point, last_point)))
 				if seam_distance > 0.03 or _crosses_arterial(region, first_point, last_point) or _connector_crosses_blocks(layout, first_point, last_point) or _connector_crosses_blocks(other.street_layout, first_point, last_point):
 					continue
-				candidates.append({"from": first, "to": last, "middle": middle, "score": length + seam_distance * 3.0})
+				if not current_headings.has(local_id):
+					current_headings[local_id] = _collector_heading_at_seam(layout, local_id, seam)
+				if not other_headings.has(other_local_id):
+					other_headings[other_local_id] = _collector_heading_at_seam(other.street_layout, other_local_id, seam)
+				var first_heading: Vector2 = current_headings[local_id]
+				var last_heading: Vector2 = other_headings[other_local_id]
+				var direction: Vector2 = (last_point - first_point) / length
+				var collector_continuation: bool = first_heading != Vector2.ZERO and last_heading != Vector2.ZERO and first_heading.dot(direction) < -0.65 and last_heading.dot(direction) > 0.65
+				if has_local_seam and not collector_continuation:
+					continue
+				candidates.append({"from": first, "to": last, "middle": middle, "score": length + seam_distance * 3.0 - (0.5 if collector_continuation else 0.0)})
 		candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["score"]) < float(b["score"]))
 		for candidate in candidates:
 			var separated := true
@@ -251,8 +265,38 @@ static func _join_adjacent_districts(region, neighborhood) -> void:
 			installed.append(candidate["middle"])
 			if installed.size() >= 2:
 				break
-		if installed.is_empty():
+		if installed.is_empty() and not has_local_seam:
 			_join_local_streets(region, neighborhood, other, seam, used_nodes)
+
+
+static func _collector_heading_at_seam(layout, node_id: int, seam: PackedVector2Array) -> Vector2:
+	var point: Vector2 = layout.nodes[node_id]
+	var seam_distance := INF
+	for sample in seam:
+		seam_distance = minf(seam_distance, point.distance_to(sample))
+	if seam_distance > 0.22:
+		return Vector2.ZERO
+	var best := Vector2.ZERO
+	var best_distance := seam_distance
+	for edge_id in range(layout.edges.size()):
+		if layout.classes[edge_id] != Roads.COLLECTOR:
+			continue
+		var pair: Vector2 = layout.edges[edge_id]
+		var other_id := -1
+		if int(pair.x) == node_id:
+			other_id = int(pair.y)
+		elif int(pair.y) == node_id:
+			other_id = int(pair.x)
+		if other_id < 0:
+			continue
+		var other_point: Vector2 = layout.nodes[other_id]
+		var other_distance := INF
+		for sample in seam:
+			other_distance = minf(other_distance, other_point.distance_to(sample))
+		if other_distance > best_distance + 0.02:
+			best_distance = other_distance
+			best = (other_point - point).normalized()
+	return best
 
 
 static func _join_local_streets(region, neighborhood, other, seam: PackedVector2Array, used_nodes: Dictionary) -> void:

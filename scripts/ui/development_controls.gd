@@ -2,7 +2,7 @@ extends VBoxContainer
 
 signal allocation_requested(neighborhood_id: int, amount: int)
 signal zoning_requested(neighborhood_id: int, shares: Dictionary, density: Dictionary)
-signal style_requested(candidate_id: int, style: String)
+signal design_requested(candidate_id: int, variant: int)
 signal character_requested(candidate_id: int, profile: String)
 
 const Budget = preload("res://scripts/simulation/development_budget.gd")
@@ -77,14 +77,15 @@ func _ready() -> void:
 	zoning_grid.add_child(heading)
 	var style_row := HBoxContainer.new()
 	var style_label := Label.new()
-	style_label.text = "Interior streets"
+	style_label.text = "Street design"
 	style_row.add_child(style_label)
 	style_input = OptionButton.new()
-	style_input.add_item("Grid")
-	style_input.add_item("Organic")
+	style_input.add_item("Connected grid")
+	style_input.add_item("Longer blocks across")
+	style_input.add_item("Longer blocks along")
 	style_input.item_selected.connect(func(index: int) -> void:
 		if not suppress_preview and candidate_id >= 0:
-			style_requested.emit(candidate_id, style_input.get_item_text(index)))
+			design_requested.emit(candidate_id, index))
 	style_row.add_child(style_input)
 	zoning_grid.add_child(style_row)
 	var character_row := HBoxContainer.new()
@@ -146,7 +147,7 @@ func show_plan(region, candidate: Dictionary, reset: bool = true) -> void:
 	candidate_id = candidate["id"]
 	neighborhood_id = candidate["neighborhood_id"]
 	suppress_preview = true
-	style_input.select(1 if candidate["layout"].interior_style == "Organic" else 0)
+	style_input.select(int(candidate.get("design_variant", 0)))
 	style_input.disabled = neighborhood_id >= 0
 	var character_choice: String = region.neighborhoods[neighborhood_id].character_profile if neighborhood_id >= 0 else candidate.get("character_override", "Auto")
 	for index in range(character_input.item_count):

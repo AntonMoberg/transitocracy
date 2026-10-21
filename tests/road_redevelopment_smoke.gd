@@ -57,6 +57,9 @@ func _run() -> void:
 	if item.is_empty() or item["block_ids"].is_empty() or int(impact["land_cost"]) <= 0 or int(impact["site_cost"]) <= 0:
 		errors.append("An arterial through occupied blocks must identify parcels and price acquisition and reconstruction.")
 	else:
+		var direct: PackedInt32Array = RoadLand._affected_blocks(original, RoadLand.clearance_corridor(points, "Arterial"))
+		if item["block_ids"].size() <= direct.size():
+			errors.append("Road work must also redevelop a block depth beside the new route.")
 		var unaffected := -1
 		for block_id in range(original.blocks.size()):
 			if not item["block_ids"].has(block_id) and not original.blocks[block_id].get("demolished", false):

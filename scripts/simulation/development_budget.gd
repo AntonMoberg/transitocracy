@@ -5,6 +5,7 @@ const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const StreetNetwork = preload("res://scripts/simulation/street_network.gd")
+const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
 const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 
 
@@ -136,7 +137,9 @@ static func advance_day(region, day_key: int) -> bool:
 			region.road_geometry_revision += 1
 			changed = true
 		if plan.constructing_phase > 0 and plan.open_day <= day_key:
-			changed = StreetNetwork.open_phase(region, neighborhood, plan.constructing_phase) or changed
+			var opening_phase: int = plan.constructing_phase
+			changed = StreetNetwork.open_phase(region, neighborhood, opening_phase) or changed
+			UrbanGraph.mark_built(region, neighborhood.street_layout, opening_phase)
 		if not plan.active:
 			plan.status = "Cancelled"
 			continue
@@ -168,7 +171,7 @@ static func advance_day(region, day_key: int) -> bool:
 				var point: Vector2 = neighborhood.street_layout.nodes[local_id]
 				for link_index in Spatial.near_links(region, point):
 					var link = region.road_links[link_index]
-					if link.road_class == Roads.ARTERIAL and link.from_node_id < rooted.size() and link.to_node_id < rooted.size() and rooted[link.from_node_id] != 0 and rooted[link.to_node_id] != 0 and RoadPlanner.closest_point(link.points, point).distance_to(point) < 0.02:
+					if link.road_class in [Roads.ARTERIAL, Roads.COLLECTOR] and link.from_node_id < rooted.size() and link.to_node_id < rooted.size() and rooted[link.from_node_id] != 0 and rooted[link.to_node_id] != 0 and RoadPlanner.closest_point(link.points, point).distance_to(point) < 0.03:
 						connected = true
 						break
 				if connected:

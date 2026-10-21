@@ -67,6 +67,7 @@ static func preview(region, points: PackedVector2Array, road_class: String) -> D
 	var developed_ha := 0.0
 	var redevelopment_ha := 0.0
 	var street_cost := 0.0
+	var local_bridge_cost := 0.0
 	for neighborhood in region.neighborhoods:
 		var polygon: PackedVector2Array = region.jurisdictions[neighborhood.jurisdiction_id].polygon_km
 		var area := 0.0
@@ -77,7 +78,9 @@ static func preview(region, points: PackedVector2Array, road_class: String) -> D
 		if area <= 0.000001:
 			continue
 		var hectares: float = area * 100.0
-		var block_ids: PackedInt32Array = _affected_blocks(neighborhood.street_layout, clearance_masks) if neighborhood.street_layout != null else PackedInt32Array()
+		var block_ids: PackedInt32Array = _redevelopment_blocks(neighborhood.street_layout, points, road_class, clearance_masks) if neighborhood.street_layout != null else PackedInt32Array()
+		var bridge_edges: PackedInt32Array = _bridge_edges(neighborhood.street_layout, points, clearance_masks) if road_class == "Highway" and neighborhood.street_layout != null else PackedInt32Array()
+		local_bridge_cost += float(bridge_edges.size()) * 3000000.0
 		for block_id in block_ids:
 			redevelopment_ha += float(neighborhood.street_layout.blocks[block_id].get("area_ha", 0.0))
 		if neighborhood.street_layout != null:
@@ -97,10 +100,10 @@ static func preview(region, points: PackedVector2Array, road_class: String) -> D
 		developed_ha += hectares if block_ids.is_empty() and (neighborhood.households > 0 or neighborhood.jobs > 0) else 0.0
 		home_cost += float(displaced_homes) * maxf(120000.0, neighborhood.assessed_home_value)
 		job_cost += float(displaced_jobs) * JOB_COMPENSATION
-		affected.append({"id": neighborhood.id, "area_ha": hectares, "homes": displaced_homes, "jobs": displaced_jobs, "block_ids": block_ids})
+		affected.append({"id": neighborhood.id, "area_ha": hectares, "homes": displaced_homes, "jobs": displaced_jobs, "block_ids": block_ids, "bridge_edges": bridge_edges})
 	var land_cost: int = roundi(land_ha * LAND_COST_PER_HA)
 	var site_cost: int = roundi((developed_ha + redevelopment_ha) * SITE_COST_PER_HA)
-	return {"land_ha": land_ha, "land_cost": land_cost, "site_cost": site_cost, "street_cost": roundi(street_cost), "home_cost": roundi(home_cost), "job_cost": roundi(job_cost), "neighborhoods": affected, "cost": land_cost + site_cost + roundi(street_cost + home_cost + job_cost)}
+	return {"land_ha": land_ha, "land_cost": land_cost, "site_cost": site_cost, "street_cost": roundi(street_cost), "local_bridge_cost": roundi(local_bridge_cost), "home_cost": roundi(home_cost), "job_cost": roundi(job_cost), "neighborhoods": affected, "cost": land_cost + site_cost + roundi(street_cost + local_bridge_cost + home_cost + job_cost)}
 
 
 static func apply(region, points: PackedVector2Array, road_class: String, project_id: int, impact: Dictionary) -> void:
@@ -108,7 +111,7 @@ static func apply(region, points: PackedVector2Array, road_class: String, projec
 	for item in impact.get("neighborhoods", []):
 		var neighborhood = region.neighborhoods[int(item["id"])]
 		_displace(neighborhood, int(item["homes"]), int(item["jobs"]))
-		_demolish_blocks(neighborhood, item.get("block_ids", PackedInt32Array()), clearance_masks)
+		_demolish_blocks(neighborhood, item.get("block_ids", PackedInt32Array()), clearance_masks, item.get("bridge_edges", PackedInt32Array()))
 	region.road_reservations.append(_reservation(points, road_class, -1, project_id))
 	for neighborhood in region.neighborhoods:
 		if neighborhood.baseline_developable_area_ha <= 0.0:
@@ -137,14 +140,14 @@ static func rebuild_project(region, project) -> void:
 	var masks: Array[PackedVector2Array] = clearance_corridor(project.points, project.road_class)
 	for item in project.redevelopment_impact:
 		var neighborhood = region.neighborhoods[int(item["id"])]
-		if neighborhood.street_layout == null or item.get("block_ids", PackedInt32Array()).is_empty():
+		if neighborhood.street_layout == null or (item.get("block_ids", PackedInt32Array()).is_empty() and item.get("bridge_edges", PackedInt32Array()).is_empty()):
 			continue
 		var parcel_masks: Array[PackedVector2Array] = []
 		for reservation in region.road_reservations:
 			if reservation["bounds"].intersects(neighborhood.street_layout.bounds):
 				parcel_masks.append_array(reservation.get("parcel_masks", reservation["masks"]))
 		_rebuild_blocks(neighborhood, item.get("block_ids", PackedInt32Array()), parcel_masks, project.open_day_key)
-		_rebuild_streets(neighborhood, project.points, project.road_class, masks)
+		_rebuild_streets(neighborhood, project.points, project.road_class, masks, item.get("bridge_edges", PackedInt32Array()))
 
 
 static func mark_open(region, project_id: int, link_id: int) -> void:
@@ -223,6 +226,36 @@ static func _affected_blocks(layout, masks: Array[PackedVector2Array]) -> Packed
 	return affected
 
 
+static func _redevelopment_blocks(layout, points: PackedVector2Array, road_class: String, masks: Array[PackedVector2Array]) -> PackedInt32Array:
+	var affected: PackedInt32Array = _affected_blocks(layout, masks)
+	if layout == null:
+		return affected
+	# Re-parcel one block depth beside the right of way.  Keep all other
+	# neighborhood blocks and streets untouched.
+	var reach: float = width_for(road_class) * 0.5 + (0.12 if road_class == "Highway" else 0.09)
+	var route_bounds := Rect2(points[0], Vector2.ZERO)
+	for point in points:
+		route_bounds = route_bounds.expand(point)
+	route_bounds = route_bounds.grow(reach)
+	for block_id in range(layout.blocks.size()):
+		if affected.has(block_id) or layout.blocks[block_id].get("demolished", false):
+			continue
+		var polygon: PackedVector2Array = layout.blocks[block_id]["polygon"]
+		if not route_bounds.intersects(_bounds(polygon)):
+			continue
+		var near := false
+		for vertex in polygon:
+			for segment in range(1, points.size()):
+				if vertex.distance_to(Geometry2D.get_closest_point_to_segment(vertex, points[segment - 1], points[segment])) <= reach:
+					near = true
+					break
+			if near:
+				break
+		if near:
+			affected.append(block_id)
+	return affected
+
+
 static func _affected_local_edges(layout, masks: Array[PackedVector2Array]) -> PackedInt32Array:
 	var result := PackedInt32Array()
 	for edge_id in range(layout.edges.size()):
@@ -230,6 +263,48 @@ static func _affected_local_edges(layout, masks: Array[PackedVector2Array]) -> P
 			continue
 		if _layout_edge_intersects_masks(layout, edge_id, masks):
 			result.append(edge_id)
+	return result
+
+
+static func _bridge_edges(layout, points: PackedVector2Array, masks: Array[PackedVector2Array]) -> PackedInt32Array:
+	var result := PackedInt32Array()
+	if layout == null:
+		return result
+	var options: Array[Dictionary] = []
+	var collector_stations := PackedFloat32Array()
+	for edge_id in range(layout.edges.size()):
+		if layout.closed_edges.has(edge_id) or layout.classes[edge_id] not in ["Local", "Collector"]:
+			continue
+		var path: PackedVector2Array = layout.edge_paths.get(edge_id, PackedVector2Array())
+		if path.is_empty():
+			var edge: Vector2 = layout.edges[edge_id]
+			path = PackedVector2Array([layout.nodes[int(edge.x)], layout.nodes[int(edge.y)]])
+		for segment in range(1, path.size()):
+			for route_segment in range(1, points.size()):
+				var hit = Geometry2D.segment_intersects_segment(path[segment - 1], path[segment], points[route_segment - 1], points[route_segment])
+				if hit == null:
+					continue
+				var station: float = _route_station(points, hit)
+				if layout.classes[edge_id] == "Collector":
+					collector_stations.append(station)
+				elif _layout_edge_intersects_masks(layout, edge_id, masks) and not _point_inside_masks(path[0], masks) and not _point_inside_masks(path[-1], masks):
+					options.append({"edge_id": edge_id, "station": station})
+				break
+	options.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["station"]) < float(b["station"]))
+	var chosen := PackedFloat32Array()
+	for option in options:
+		var station: float = option["station"]
+		var near_other := false
+		for other in collector_stations:
+			if absf(station - other) < 0.35:
+				near_other = true
+		for other in chosen:
+			if absf(station - other) < 0.55:
+				near_other = true
+		if near_other:
+			continue
+		result.append(int(option["edge_id"]))
+		chosen.append(station)
 	return result
 
 
@@ -244,8 +319,8 @@ static func _layout_edge_intersects_masks(layout, edge_id: int, masks: Array[Pac
 	return false
 
 
-static func _demolish_blocks(neighborhood, affected: PackedInt32Array, masks: Array[PackedVector2Array]) -> void:
-	if affected.is_empty() or neighborhood.street_layout == null:
+static func _demolish_blocks(neighborhood, affected: PackedInt32Array, masks: Array[PackedVector2Array], bridge_edges: PackedInt32Array = PackedInt32Array()) -> void:
+	if (affected.is_empty() and bridge_edges.is_empty()) or neighborhood.street_layout == null:
 		return
 	var layout = neighborhood.street_layout.copy()
 	for block_id in affected:
@@ -258,7 +333,10 @@ static func _demolish_blocks(neighborhood, affected: PackedInt32Array, masks: Ar
 		if block_id < neighborhood.block_zoning.size():
 			neighborhood.block_zoning[block_id] = 0
 	for edge_id in _affected_local_edges(layout, masks):
-		layout.closed_edges[edge_id] = true
+		if not bridge_edges.has(edge_id):
+			layout.closed_edges[edge_id] = true
+		else:
+			layout.grade_separated_edges[edge_id] = "above"
 	neighborhood.street_layout = layout
 
 
@@ -291,6 +369,8 @@ static func _rebuild_blocks(neighborhood, affected: PackedInt32Array, masks: Arr
 			block["nodes"] = PackedInt32Array([access_node])
 			block["area_ha"] = area * 100.0
 			block["seed"] = int(old["seed"]) + layout.blocks.size() * 7919
+			if old.has("canonical_id"):
+				block["canonical_id"] = "%s:rebuilt:%d:%d" % [old["canonical_id"], open_day, layout.blocks.size()]
 			block["demolished"] = false
 			block["redevelopment_day"] = open_day
 			layout.blocks.append(block)
@@ -298,11 +378,15 @@ static func _rebuild_blocks(neighborhood, affected: PackedInt32Array, masks: Arr
 	neighborhood.street_layout = layout
 
 
-static func _rebuild_streets(neighborhood, points: PackedVector2Array, road_class: String, masks: Array[PackedVector2Array]) -> void:
+static func _rebuild_streets(neighborhood, points: PackedVector2Array, road_class: String, masks: Array[PackedVector2Array], bridge_edges: PackedInt32Array = PackedInt32Array()) -> void:
 	if neighborhood.street_layout == null:
 		return
 	var layout = neighborhood.street_layout.copy()
+	for edge_id in bridge_edges:
+		layout.closed_edges.erase(edge_id)
+		layout.grade_separated_edges[edge_id] = "above"
 	var original_edge_count: int = layout.edges.size()
+	var highway_frontiers: Array[Vector2] = []
 	for edge_id in layout.closed_edges:
 		if edge_id >= original_edge_count or layout.classes[edge_id] != "Local":
 			continue
@@ -317,18 +401,49 @@ static func _rebuild_streets(neighborhood, points: PackedVector2Array, road_clas
 			var outward: Vector2 = (endpoint - nearest).normalized()
 			if outward == Vector2.ZERO:
 				continue
-			var frontier: Vector2 = nearest + outward * (width_for(road_class) * 0.5 + CLEARANCE_KM + 0.001)
+			var setback: float = PARCEL_BUFFER_KM + 0.02 if road_class == "Highway" else CLEARANCE_KM + 0.001
+			var frontier: Vector2 = nearest + outward * (width_for(road_class) * 0.5 + setback)
 			if endpoint.distance_to(frontier) > 0.25 or _point_inside_masks(frontier, masks) or not Geography.segment_on_land(layout.polygon, endpoint, frontier):
 				continue
 			if endpoint.distance_to(frontier) > 0.005:
 				var frontier_id: int = layout.nodes.size()
 				layout.nodes.append(frontier)
 				_append_local_edge(layout, node_id, frontier_id, layout.phases[edge_id])
+				if road_class == "Highway":
+					highway_frontiers.append(Vector2(frontier_id, _route_station(points, frontier)))
 				if road_class == "Arterial" and Geography.segment_on_land(layout.polygon, frontier, nearest):
 					var junction_id: int = layout.nodes.size()
 					layout.nodes.append(nearest)
 					_append_local_edge(layout, frontier_id, junction_id, layout.phases[edge_id])
+	if road_class == "Highway":
+		highway_frontiers.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.y < b.y)
+		for index in range(1, highway_frontiers.size()):
+			var first_id: int = int(highway_frontiers[index - 1].x)
+			var last_id: int = int(highway_frontiers[index].x)
+			var first: Vector2 = layout.nodes[first_id]
+			var last: Vector2 = layout.nodes[last_id]
+			if first.distance_to(last) > 0.32 or first.distance_to(last) < 0.02:
+				continue
+			if _segment_intersects_masks(first, last, masks) or not Geography.segment_on_land(layout.polygon, first, last):
+				continue
+			_append_local_edge(layout, first_id, last_id, 1)
 	neighborhood.street_layout = layout
+
+
+static func _route_station(points: PackedVector2Array, point: Vector2) -> float:
+	var best := INF
+	var station := 0.0
+	var result := 0.0
+	for index in range(1, points.size()):
+		var first: Vector2 = points[index - 1]
+		var last: Vector2 = points[index]
+		var trial: Vector2 = Geometry2D.get_closest_point_to_segment(point, first, last)
+		var distance: float = trial.distance_squared_to(point)
+		if distance < best:
+			best = distance
+			result = station + first.distance_to(trial)
+		station += first.distance_to(last)
+	return result
 
 
 static func _append_local_edge(layout, first: int, last: int, phase: int) -> void:
@@ -408,7 +523,7 @@ static func _building_displacement(region, neighborhood, new_masks: Array[Packed
 		var code: int = neighborhood.block_zoning[block_id] - 1
 		if code < 0 or block["park"]:
 			continue
-		var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][code / 3]
+		var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][floori(float(code) / 3.0)]
 		var has_homes: bool = zone in ["Residential", "Mixed"]
 		var has_jobs: bool = zone != "Residential"
 		var density: int = code % 3

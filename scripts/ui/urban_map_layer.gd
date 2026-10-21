@@ -265,18 +265,18 @@ func _build_chunk_mesh(map, neighborhood, first: int, finish: int, clearance_key
 		if block_id >= neighborhood.block_zoning.size() or neighborhood.block_zoning[block_id] == 0:
 			continue
 		var code: int = neighborhood.block_zoning[block_id] - 1
-		var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][code / 3]
+		var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][floori(float(code) / 3.0)]
 		var density: int = code % 3
 		var key: String = "%s:%d:%s:%d:%s" % [clearance_key, block_id, zone, density, neighborhood.character_profile]
 		if not building_cache.has(key):
 			if building_cache.size() > 8192:
 				for old_key in building_cache.keys().slice(0, 1024):
 					building_cache.erase(old_key)
-			var footprints: Array = LayoutGenerator.buildings(block, zone, density, neighborhood.character_profile)
-			var visible := PackedByteArray()
-			for footprint in footprints:
-				visible.append(0 if RoadLand.polygon_intersects_masks(footprint, reserved_masks) else 1)
-			building_cache[key] = {"footprints": footprints, "visible": visible}
+			var generated_footprints: Array = LayoutGenerator.buildings(block, zone, density, neighborhood.character_profile)
+			var generated_visible := PackedByteArray()
+			for footprint in generated_footprints:
+				generated_visible.append(0 if RoadLand.polygon_intersects_masks(footprint, reserved_masks) else 1)
+			building_cache[key] = {"footprints": generated_footprints, "visible": generated_visible}
 		var cached: Dictionary = building_cache[key]
 		var footprints: Array = cached["footprints"]
 		var visible: PackedByteArray = cached["visible"]

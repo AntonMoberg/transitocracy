@@ -8,6 +8,7 @@ const StreetLayoutGenerator = preload("res://scripts/simulation/street_layout_ge
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
 const Streamlines = preload("res://scripts/simulation/street_streamline_tracer.gd")
+const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
 
 
 static func generate(region) -> void:
@@ -77,7 +78,7 @@ static func _build_starting_highways(region) -> void:
 	var access_options: Dictionary = {}
 	for band_index in range(bands.size()):
 		var band: Array = bands[band_index]
-		var target_y: float = region.cities[band[band.size() / 2]]["center_km"].y
+		var target_y: float = region.cities[band[floori(float(band.size()) / 2.0)]]["center_km"].y
 		var stations: Array = []
 		for station in range(ceili((last_x - first_x) / 35.0) + 1):
 			stations.append({"x": lerpf(first_x, last_x, float(station) / float(maxi(1, ceili((last_x - first_x) / 35.0)))), "city": -1, "cross": -1})
@@ -191,14 +192,14 @@ static func _highway_band_costs(region, ordered: Array[int]) -> Array:
 		var row := PackedFloat64Array()
 		row.resize(ordered.size() + 1)
 		for finish in range(start + 1, ordered.size() + 1):
-			var middle_index: int = start + (finish - start) / 2
+			var middle_index: int = start + floori(float(finish - start) / 2.0)
 			var middle: float = ys[middle_index]
 			var feeder: float = middle * float(middle_index - start) - (sums[middle_index] - sums[start])
 			feeder += sums[finish] - sums[middle_index + 1] - middle * float(finish - middle_index - 1)
 			var left := start
 			var right := middle_index
 			while left < right:
-				var probe: int = (left + right) / 2
+				var probe: int = floori(float(left + right) / 2.0)
 				if ys[probe] < middle - 36.0:
 					left = probe + 1
 				else:
@@ -207,7 +208,7 @@ static func _highway_band_costs(region, ordered: Array[int]) -> Array:
 			left = middle_index + 1
 			right = finish
 			while left < right:
-				var probe: int = (left + right) / 2
+				var probe: int = floori(float(left + right) / 2.0)
 				if ys[probe] <= middle + 36.0:
 					left = probe + 1
 				else:
@@ -483,150 +484,7 @@ static func _highway_owner_at(region, point: Vector2) -> int:
 
 
 static func _build_city_arterials(region, city: Dictionary) -> void:
-	var neighborhood_ids: Array[int] = []
-	for neighborhood_id in city["neighborhood_ids"]:
-		if region.neighborhoods[neighborhood_id].initially_developed:
-			neighborhood_ids.append(neighborhood_id)
-	if neighborhood_ids.is_empty():
-		return
-	var city_id: int = city["id"]
-	var area = region.jurisdictions[city["jurisdiction_id"]]
-	var hub_id: int = region.city_hub_node_ids[city_id]
-	var center: Vector2 = region.road_nodes[hub_id].position_km
-	if neighborhood_ids.size() > 4:
-		center = area.center_km
-		city["center_km"] = center
-		region.road_nodes[hub_id].position_km = center
-		preload("res://scripts/simulation/street_spatial_index.gd").index_node(preload("res://scripts/simulation/street_spatial_index.gd").cache(region), region.road_nodes[hub_id])
-	var columns: int = ceili(sqrt(float(neighborhood_ids.size())))
-	var rows: int = ceili(float(neighborhood_ids.size()) / columns)
-	var district_area: float = StreetLayoutGenerator.FRONTAGE_KM * StreetLayoutGenerator.DEPTH_KM * 2.0
-	var aspect: float = 1.35 + float(posmod(hash("%d:district-aspect:%d" % [region.generation_seed, city_id]), 100)) / 100.0 * 0.4
-	var span: float = sqrt(district_area * aspect)
-	var depth: float = district_area / span
-	var axis := Vector2.RIGHT
-	var best_score := -1
-	for attempt in range(12):
-		var trial := Vector2.from_angle(float(attempt) * PI / 12.0 + float(city_id % 7) * 0.1)
-		var normal := Vector2(-trial.y, trial.x)
-		var score := 0
-		for across in [-0.5, 0.5]:
-			for along in [-0.5, 0.5]:
-				if area.contains_point(center + trial * across * columns * span + normal * along * rows * depth):
-					score += 1
-		if score > best_score:
-			best_score = score
-			axis = trial
-	# Keep one base orientation for every later zoning operation in this city.
-	region.cities[city_id]["street_axis"] = axis
-	var normal := Vector2(-axis.y, axis.x)
-	var trunk_column: int = columns / 2
-	var trunk_row: int = rows / 2
-	var arterial_rows: Array[int] = []
-	for row in range(rows + 1):
-		if posmod(row - trunk_row, 2) == 0:
-			arterial_rows.append(row)
-	var shape_rng := RandomNumberGenerator.new()
-	shape_rng.seed = hash("%d:city-streets:%d" % [region.generation_seed, city_id])
-	var column_offsets: Dictionary = {trunk_column: 0.0}
-	for column in range(trunk_column + 1, columns + 2):
-		column_offsets[column] = float(column_offsets[column - 1]) + span * shape_rng.randf_range(0.82, 1.18)
-	for column in range(trunk_column - 1, -2, -1):
-		column_offsets[column] = float(column_offsets[column + 1]) - span * shape_rng.randf_range(0.82, 1.18)
-	var row_offsets: Dictionary = {trunk_row: 0.0}
-	for row in range(trunk_row + 1, rows + 2):
-		row_offsets[row] = float(row_offsets[row - 1]) + depth * shape_rng.randf_range(0.82, 1.18)
-	for row in range(trunk_row - 1, -2, -1):
-		row_offsets[row] = float(row_offsets[row + 1]) - depth * shape_rng.randf_range(0.82, 1.18)
-	var grid: Dictionary = {}
-	var positions: Dictionary = {}
-	var horizontal: Dictionary = {}
-	var vertical: Dictionary = {}
-	var built_horizontal: Dictionary = {}
-	var built_vertical: Dictionary = {}
-	for row in range(-1, rows + 2):
-		for column in range(-1, columns + 2):
-			var point: Vector2 = center + axis * float(column_offsets[column]) + normal * float(row_offsets[row])
-			positions[Vector2i(column, row)] = point
-	var field_positions: Dictionary = {}
-	for row in range(-1, rows + 2):
-		for column in range(-1, columns + 2):
-			field_positions[Vector2i(column + 1, row + 1)] = positions[Vector2i(column, row)]
-	field_positions = Streamlines.trace_grid(field_positions, columns + 2, rows + 2, region.generation_seed, city_id, Vector2.ZERO, false, center, 0.015, -1, {"base_axis": axis, "roads": []})
-	for row in range(-1, rows + 2):
-		for column in range(-1, columns + 2):
-			var point: Vector2 = field_positions[Vector2i(column + 1, row + 1)]
-			if column >= 0 and column <= columns and row >= 0 and row <= rows and column != trunk_column and not arterial_rows.has(row):
-				# Move only collector-grid junctions. Each district keeps simple, shared
-				# straight sides, while the resulting quadrilaterals stay irregular.
-				var corner_rng := RandomNumberGenerator.new()
-				corner_rng.seed = hash("%d:starter-corner:%d:%d:%d" % [region.generation_seed, city_id, column, row])
-				point += axis * span * corner_rng.randf_range(0.07, 0.11) * (-1.0 if corner_rng.randi_range(0, 1) == 0 else 1.0)
-				point += normal * depth * corner_rng.randf_range(0.07, 0.11) * (-1.0 if corner_rng.randi_range(0, 1) == 0 else 1.0)
-			positions[Vector2i(column, row)] = point
-			if column != trunk_column and not arterial_rows.has(row):
-				continue
-			if not region.jurisdictions[0].contains_point(point):
-				continue
-			grid[Vector2i(column, row)] = StreetNetwork.ensure_node(region, point, city_id)
-	for row in range(-1, rows + 2):
-		var corridor_id: int = region.next_road_link_id
-		var station := 0.0
-		for column in range(-1, columns + 1):
-			var first := Vector2i(column, row)
-			var second := Vector2i(column + 1, row)
-			var first_point: Vector2 = positions[first]
-			var second_point: Vector2 = positions[second]
-			var points := PackedVector2Array([first_point, second_point])
-			horizontal[first] = points
-			if not arterial_rows.has(row):
-				continue
-			if not grid.has(first) or not grid.has(second):
-				continue
-			if not StateGeography.segment_on_land(region.jurisdictions[0].polygon_km, first_point, second_point):
-				continue
-			_add_street_arterial(region, grid[first], grid[second], corridor_id, station, points)
-			station += region.road_links[-1].length_km
-			built_horizontal[first] = true
-	for column in range(-1, columns + 2):
-		var corridor_id: int = region.next_road_link_id
-		var station := 0.0
-		for row in range(-1, rows + 1):
-			var first := Vector2i(column, row)
-			var second := Vector2i(column, row + 1)
-			var first_point: Vector2 = positions[first]
-			var second_point: Vector2 = positions[second]
-			var points := PackedVector2Array([first_point, second_point])
-			vertical[first] = points
-			if column != trunk_column:
-				continue
-			if not grid.has(first) or not grid.has(second):
-				continue
-			if not StateGeography.segment_on_land(region.jurisdictions[0].polygon_km, first_point, second_point):
-				continue
-			_add_street_arterial(region, grid[first], grid[second], corridor_id, station, points)
-			station += region.road_links[-1].length_km
-			built_vertical[first] = true
-	for local_id in range(neighborhood_ids.size()):
-		var address := Vector2i(local_id % columns, local_id / columns)
-		if not horizontal.has(address) or not horizontal.has(address + Vector2i.DOWN) or not vertical.has(address) or not vertical.has(address + Vector2i.RIGHT):
-			continue
-		var key: String = "starter:%d:%d" % [city_id, local_id]
-		var boundaries: Array = [horizontal[address], vertical[address + Vector2i.RIGHT], horizontal[address + Vector2i.DOWN], vertical[address]]
-		var arterial_sides := PackedByteArray([int(built_horizontal.has(address)), int(built_vertical.has(address + Vector2i.RIGHT)), int(built_horizontal.has(address + Vector2i.DOWN)), int(built_vertical.has(address))])
-		var layout = StreetLayoutGenerator.generate(region, city_id, horizontal[address], key, [], true, boundaries, arterial_sides)
-		if layout.polygon.size() >= 3:
-			StreetNetwork.attach(region, region.neighborhoods[neighborhood_ids[local_id]], layout, true)
-	if not grid.values().has(hub_id):
-		var nearest_id := -1
-		var nearest_distance := INF
-		for node_id in grid.values():
-			var distance: float = region.road_nodes[node_id].position_km.distance_to(center)
-			if distance < nearest_distance:
-				nearest_distance = distance
-				nearest_id = node_id
-		if nearest_id >= 0:
-			_add_link(region, hub_id, nearest_id, RoadLinkData.ARTERIAL, 1)
+	UrbanGraph.build_starting_city(region, city)
 
 
 static func _add_street_arterial(region, first: int, last: int, corridor_id: int, station: float, points: PackedVector2Array) -> void:

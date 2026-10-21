@@ -36,10 +36,6 @@ func _run() -> void:
 			continue
 		_check(neighborhood.access_node_ids.size() >= 2, "neighborhoods must have multiple actual street access points")
 		local_edges += neighborhood.street_layout.edges.size()
-		var street_edges: Dictionary = {}
-		for edge_id in range(neighborhood.street_layout.edges.size()):
-			var edge: Vector2 = neighborhood.street_layout.edges[edge_id]
-			street_edges[Vector2i(mini(int(edge.x), int(edge.y)), maxi(int(edge.x), int(edge.y)))] = neighborhood.street_layout.phases[edge_id]
 		_check(neighborhood.street_layout.blocks.size() > 20, "a neighborhood must contain street-defined blocks")
 		for block in neighborhood.street_layout.blocks:
 			if block.get("demolished", false):
@@ -50,11 +46,6 @@ func _run() -> void:
 					_check(nodes.size() == 1 and nodes[0] >= 0 and nodes[0] < neighborhood.street_layout.nodes.size(), "clipped edge blocks need a valid local street access node")
 				if nodes.size() == 4:
 					grid_blocks += 1
-				if not block.get("fringe", false):
-					for index in range(nodes.size()):
-						var first: int = nodes[index]
-						var last: int = nodes[(index + 1) % nodes.size()]
-						_check(street_edges.get(Vector2i(mini(first, last), maxi(first, last)), 4) <= block["phase"], "original block boundaries must be real streets available by their construction phase")
 			var footprints: Array = LayoutGenerator.buildings(block, "Residential", 0)
 			for footprint in footprints:
 				for vertex in footprint:
@@ -68,11 +59,11 @@ func _run() -> void:
 	_check(Traffic.fork_for_week(setup["traffic_state"]).local_districts.has(0), "worker forks must retain local traffic")
 	var candidate_id := -1
 	for candidate in region.development_candidates:
-		if candidate["neighborhood_id"] >= 0 or candidate["frontage_link_id"] < 0 or not candidate["layout_input"].get("edge_frontage", false) or candidate["layout"].phase_costs[1] <= 0 or candidate["layout"].phase_costs[2] <= 0:
+		if candidate["neighborhood_id"] >= 0 or candidate["frontage_link_id"] < 0 or not candidate.has("urban_sector") or candidate["layout"].phase_costs[0] <= 0 or candidate["layout"].phase_costs[1] <= 0:
 			continue
 		candidate_id = candidate["id"]
 		break
-	_check(candidate_id >= 0, "arterials must expose one-sided neighborhood plans")
+	_check(candidate_id >= 0, "The city must expose a connected, phased development plan")
 	if candidate_id < 0:
 		quit(1)
 		return

@@ -59,9 +59,13 @@ static func _copy_large_region(source):
 	copy.development_candidates = source.development_candidates.duplicate(true)
 	copy.development_candidate_keys = source.development_candidate_keys.duplicate(true)
 	copy.development_candidate_cells = source.development_candidate_cells.duplicate(true)
-	copy.growth_area_drafts = source.growth_area_drafts.duplicate(true)
-	copy.next_growth_area_id = source.next_growth_area_id
+	copy.development_candidate_city_ids = source.development_candidate_city_ids.duplicate(true)
 	copy.road_reservations = source.road_reservations.duplicate(true)
+	copy.urban_sector_claims = source.urban_sector_claims.duplicate(true)
+	copy.urban_plan_edges = source.urban_plan_edges.duplicate(true)
+	copy.urban_corridors = source.urban_corridors.duplicate(true)
+	copy.rail_reservations = source.rail_reservations.duplicate(true)
+	copy.station_sites = source.station_sites.duplicate(true)
 	copy.urban_route_revision = source.urban_route_revision
 	for city_id in source.urban_route_cache:
 		var graph: Dictionary = source.urban_route_cache[city_id].duplicate()

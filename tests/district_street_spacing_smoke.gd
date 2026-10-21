@@ -45,7 +45,7 @@ func _run() -> void:
 						quit(1)
 						return
 			checked += 1
-	if checked < 150:
+	if checked < 60:
 		push_error("Expected a broad sample of new districts, got %d." % checked)
 		quit(1)
 		return

@@ -101,10 +101,13 @@ var rate_label: Label
 var purpose_selector: OptionButton
 var inspector: RichTextLabel
 var map_mode_selector: OptionButton
-var zoning_tool_selector: OptionButton
-var zoning_angle_snap_toggle: CheckBox
-var growth_policy_controls: HBoxContainer
-var growth_policy_toggle: CheckBox
+var growth_policy_controls: VBoxContainer
+var urban_policy_inputs: Dictionary = {}
+var suppress_urban_policy_input: bool = false
+var review_queue: ItemList
+var review_queue_label: Label
+var review_queue_keys: Array[String] = []
+var review_approve_button: Button
 var road_tool_selector: OptionButton
 var road_draw_selector: OptionButton
 var road_snap_toggle: CheckBox
@@ -115,7 +118,7 @@ var crossing_controls: HBoxContainer
 var road_impact_label: Label
 var road_build_button: Button
 var road_cancel_button: Button
-var zoning_tool_message: String = "Draw a district polygon beside a connected arterial, then review its streets and lots."
+var zoning_tool_message: String = "Amber dots mark suggested districts. Zoom in and click one to review and approve it."
 var toll_forward_input: SpinBox
 var toll_reverse_input: SpinBox
 var toll_label: Label
@@ -124,6 +127,8 @@ var suppress_toll_input: bool = false
 var road_status_label: Label
 var pending_road_preview: Dictionary = {}
 var road_start_node: int = -1
+var planning_start_point: Vector2 = Vector2.ZERO
+var planning_has_start: bool = false
 var road_waypoints: PackedVector2Array = PackedVector2Array()
 var road_last_guide_click: bool = false
 var road_last_click_position: Vector2 = Vector2.ZERO
@@ -297,18 +302,7 @@ func _input(event: InputEvent) -> void:
 		KEY_E:
 			_on_speed_selected(2)
 		KEY_ESCAPE:
-			if map_view != null and map_view.map_mode == "Zoning" and map_view.zoning_tool == "Draw":
-				map_view.clear_growth_polygon()
-			else:
-				_cancel_road_preview()
-		KEY_BACKSPACE:
-			if map_view == null or map_view.map_mode != "Zoning" or map_view.zoning_tool != "Draw":
-				return
-			map_view.undo_growth_corner()
-		KEY_ENTER, KEY_KP_ENTER:
-			if map_view == null or map_view.map_mode != "Zoning" or map_view.zoning_tool != "Draw":
-				return
-			map_view.finish_growth_polygon()
+			_cancel_road_preview()
 		_:
 			return
 	get_viewport().set_input_as_handled()
@@ -457,20 +451,8 @@ func _build_interface() -> void:
 	map_mode_selector.selected = 0
 	map_mode_selector.item_selected.connect(_on_map_mode_selected)
 	road_controls.add_child(map_mode_selector)
-	zoning_tool_selector = OptionButton.new()
-	for tool_name in ["Inspect", "Draw", "Erase", "Edit"]:
-		zoning_tool_selector.add_item(tool_name)
-	zoning_tool_selector.visible = false
-	zoning_tool_selector.item_selected.connect(_on_zoning_tool_selected)
-	road_controls.add_child(zoning_tool_selector)
-	zoning_angle_snap_toggle = CheckBox.new()
-	zoning_angle_snap_toggle.text = "Snap 5°"
-	zoning_angle_snap_toggle.tooltip_text = "Snap free district edges to 5° turns; road and boundary points still take priority"
-	zoning_angle_snap_toggle.toggled.connect(_on_zoning_angle_snap_toggled)
-	zoning_angle_snap_toggle.visible = false
-	road_controls.add_child(zoning_angle_snap_toggle)
 	road_tool_selector = OptionButton.new()
-	for tool_name in ["Inspect", "Arterial", "Highway", "Junction", "Interchange", "Widen", "Demolish"]:
+	for tool_name in ["Inspect", "Arterial", "Highway", "Growth corridor", "Rail corridor", "Station site", "Junction", "Interchange", "Widen", "Demolish"]:
 		road_tool_selector.add_item(tool_name)
 	road_tool_selector.item_selected.connect(_on_road_tool_selected)
 	road_controls.add_child(road_tool_selector)
@@ -576,9 +558,6 @@ func _build_interface() -> void:
 	map_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	map_view.neighborhood_selected.connect(_on_neighborhood_selected)
 	map_view.candidate_selected.connect(_on_candidate_selected)
-	map_view.growth_stroke_finished.connect(_on_growth_stroke_finished)
-	map_view.growth_polygon_finished.connect(_on_growth_polygon_finished)
-	map_view.growth_vertex_moved.connect(_on_growth_vertex_moved)
 	map_view.local_street_selected.connect(_on_local_street_selected)
 	map_view.jurisdiction_selected.connect(_on_map_jurisdiction_selected)
 	map_view.road_node_clicked.connect(_on_road_node_clicked)
@@ -630,16 +609,51 @@ func _build_interface() -> void:
 	development_controls.visible = false
 	development_controls.allocation_requested.connect(_on_development_allocation)
 	development_controls.zoning_requested.connect(_on_development_zoning)
-	development_controls.style_requested.connect(_on_development_style)
+	development_controls.design_requested.connect(_on_development_design)
 	development_controls.character_requested.connect(_on_development_character)
 	inspector_layout.add_child(development_controls)
 	zoning_controls.visibility_changed.connect(func() -> void: development_controls.visible = zoning_controls.visible)
-	growth_policy_controls = HBoxContainer.new()
+	review_queue_label = Label.new()
+	review_queue_label.text = "GROWTH REVIEW · select several to approve"
+	review_queue_label.visible = false
+	inspector_layout.add_child(review_queue_label)
+	review_queue = ItemList.new()
+	review_queue.select_mode = ItemList.SELECT_MULTI
+	review_queue.custom_minimum_size.y = 112
+	review_queue.visible = false
+	review_queue.item_activated.connect(func(index: int) -> void:
+		if index >= 0 and index < review_queue_keys.size() and region != null:
+			var candidate_id: int = int(region.development_candidate_keys.get(review_queue_keys[index], -1))
+			if candidate_id >= 0:
+				_on_candidate_selected(candidate_id))
+	inspector_layout.add_child(review_queue)
+	review_approve_button = Button.new()
+	review_approve_button.text = "Approve selected projects"
+	review_approve_button.visible = false
+	review_approve_button.pressed.connect(_approve_review_selection)
+	inspector_layout.add_child(review_approve_button)
+	growth_policy_controls = VBoxContainer.new()
+	growth_policy_controls.visible = false
 	inspector_layout.add_child(growth_policy_controls)
-	growth_policy_toggle = CheckBox.new()
-	growth_policy_toggle.text = "Delegate city growth"
-	growth_policy_toggle.toggled.connect(_on_growth_policy_toggled)
-	growth_policy_controls.add_child(growth_policy_toggle)
+	for field in ["growth_focus", "block_design", "land_use_focus", "density"]:
+		var row := HBoxContainer.new()
+		growth_policy_controls.add_child(row)
+		var label := Label.new()
+		label.text = {"growth_focus": "Growth", "block_design": "Blocks", "land_use_focus": "Land use", "density": "Density"}[field]
+		label.custom_minimum_size.x = 72
+		row.add_child(label)
+		var input := OptionButton.new()
+		for option in {
+			"growth_focus": ["Balanced", "Near center", "Road corridors"],
+			"block_design": ["Fine grid", "Long across", "Long along"],
+			"land_use_focus": ["Local mix", "Homes", "Jobs", "Mixed use"],
+			"density": ["Low", "Medium", "High"],
+		}[field]:
+			input.add_item(option)
+		input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		input.item_selected.connect(_on_urban_policy_selected.bind(field))
+		row.add_child(input)
+		urban_policy_inputs[field] = input
 	state_tax_controls = HBoxContainer.new()
 	state_tax_controls.add_theme_constant_override("separation", 8)
 	inspector_layout.add_child(state_tax_controls)
@@ -975,8 +989,7 @@ func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
 	if area.kind == "City":
 		lines.append("Development: %s" % region.city_development_state(area.id))
 	if area.kind in ["State", "Region", "County", "City"]:
-		lines.append("Delegated growth: adjacent connected land, one project per city each month when homes reach 80% occupancy or jobs reach 70% use.")
-		lines.append("Allowance: 10% of each city's treasury per month, saved for up to three months; no borrowing.")
+		lines.append("New development awaits approval in the growth review queue. City policies guide its proposed street and land-use plans.")
 	lines.append("")
 	lines.append("Population: %s" % _format_count(totals["population"]))
 	lines.append("Households: %s / %s homes" % [_format_count(totals["households"]), _format_count(totals["housing_capacity"])])
@@ -1063,6 +1076,7 @@ func _apply_generated_region(result: Dictionary) -> void:
 		return
 	next_day_profile = null
 	road_start_node = -1
+	planning_has_start = false
 	road_waypoints.clear()
 	road_last_guide_click = false
 	pending_road_preview.clear()
@@ -1281,9 +1295,9 @@ func _effective_day_rate(target_rate: float) -> float:
 	if week_buffer == null:
 		return minf(target_rate, 86400.0)
 	var status: Dictionary = week_buffer.status()
-	var ready: int = int(status["ready"]) + int(pending_day_result_key == last_dynamics_day_key + 1)
+	var ready_days: int = int(status["ready"]) + int(pending_day_result_key == last_dynamics_day_key + 1)
 	var production_rate: float = maxf(0.75, float(status["rate"]))
-	var safe_days_per_second: float = maxf(0.7, production_rate * 0.95 + maxf(0.0, float(ready - 1)) * 0.35)
+	var safe_days_per_second: float = maxf(0.7, production_rate * 0.95 + maxf(0.0, float(ready_days - 1)) * 0.35)
 	return minf(target_rate, safe_days_per_second * 86400.0)
 
 
@@ -1455,7 +1469,7 @@ func _display_traffic_time(hour: int, fraction: float) -> Vector2:
 	if inspected_hour >= 0 or requested_bin < traffic_state.next_bin or traffic_state.next_bin <= traffic_state.first_recorded_bin:
 		return Vector2(hour, fraction)
 	var last_bin: int = traffic_state.next_bin - 1
-	return Vector2(last_bin / 4, (float(last_bin % 4) + 0.999) / 4.0)
+	return Vector2(floori(float(last_bin) / 4.0), (float(last_bin % 4) + 0.999) / 4.0)
 
 
 func _update_flow_detail() -> void:
@@ -1653,11 +1667,13 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 	zoning_status_label.text = "Road access lost" if int(candidate["frontage_link_id"]) < 0 else "Funding and zoning update daily"
 	development_controls.show_plan(region, candidate, reset_scroll)
 	var lines := PackedStringArray()
-	lines.append("[font_size=22][b]%s[/b][/font_size]" % ("Drawn growth plan" if candidate.has("growth_draft_id") else "Neighborhood candidate"))
+	lines.append("[font_size=22][b]Connected growth proposal[/b][/font_size]")
 	lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(city_id), hectares])
 	lines.append("Distance to city center: %.1f km" % distance)
 	lines.append("Zoning: %s" % ("Approved" if approved else "Awaiting approval"))
 	lines.append("Preview streets: %d segments  •  Full cost: $%d" % [candidate["layout"].edges.size(), candidate["layout"].total_cost()])
+	if candidate.has("design_variant") and not approved:
+		lines.append("Design %d of 3. Compare the street designs in the development panel before approval." % [int(candidate["design_variant"]) + 1])
 	lines.append("Character: %s%s" % [candidate["character_profile"], " (Auto)" if neighborhood_id < 0 and candidate.get("character_override", "Auto") == "Auto" else ""])
 	if neighborhood_id >= 0:
 		var neighborhood = region.neighborhoods[neighborhood_id]
@@ -1698,15 +1714,14 @@ func _on_zoning_pressed() -> void:
 	_apply_candidate_approval(selected_candidate_id, not approved, roundi(development_controls.allocation_input.value), development_controls.shares(), development_controls.densities())
 
 
-func _on_development_style(candidate_id: int, style: String) -> void:
+func _on_development_design(candidate_id: int, variant: int) -> void:
 	if region == null or candidate_id != selected_candidate_id:
 		return
 	if _region_snapshot_busy():
-		deferred_region_edits.append(Callable(self, "_on_development_style").bind(candidate_id, style))
+		deferred_region_edits.append(Callable(self, "_on_development_design").bind(candidate_id, variant))
 		return
-	if not DevelopmentPlanner.set_candidate_style(region, candidate_id, style):
-		zoning_status_label.text = "This street style does not fit the neighbourhood boundary."
-		development_controls.show_plan(region, region.development_candidates[candidate_id], false)
+	if not DevelopmentPlanner.set_candidate_design(region, candidate_id, variant):
+		zoning_status_label.text = "That street design cannot connect to the existing network."
 		return
 	development_controls.show_plan(region, region.development_candidates[candidate_id], false)
 	_show_candidate_inspector(false)
@@ -1781,15 +1796,12 @@ func _on_development_zoning(neighborhood_id: int, shares: Dictionary, density: D
 
 func _on_map_mode_selected(index: int) -> void:
 	map_view.set_map_mode(["Roads", "Trips", "Zoning"][index])
-	zoning_tool_selector.visible = index == 2
-	zoning_angle_snap_toggle.visible = index == 2 and zoning_tool_selector.get_item_text(zoning_tool_selector.selected) == "Draw"
 	road_tool_selector.visible = index == 0
 	road_draw_selector.visible = index == 0 and road_tool_selector.get_item_text(road_tool_selector.selected) in ["Arterial", "Highway"]
 	road_snap_toggle.visible = road_draw_selector.visible
 	road_length_snap_toggle.visible = road_draw_selector.visible
 	road_build_button.visible = index == 0
 	road_cancel_button.visible = index == 0
-	map_view.zoning_tool = zoning_tool_selector.get_item_text(zoning_tool_selector.selected)
 	flow_detail_label.visible = index == 1
 	flow_detail_separator.visible = index == 1
 	_cancel_road_preview()
@@ -1803,93 +1815,10 @@ func _on_map_mode_selected(index: int) -> void:
 		selected_candidate_key = ""
 		zoning_controls.visible = false
 		map_view.set_selected_candidate(-1)
+	if index == 2:
+		zoning_tool_message = "Amber dots mark suggested districts. Zoom in and click one to review and approve it."
 	_refresh_inspector(false)
 	_update_road_status()
-
-
-func _on_zoning_tool_selected(index: int) -> void:
-	map_view.zoning_tool = zoning_tool_selector.get_item_text(index)
-	zoning_angle_snap_toggle.visible = map_view.map_mode == "Zoning" and map_view.zoning_tool == "Draw"
-	map_view.growth_stroke = PackedVector2Array()
-	map_view.clear_growth_polygon()
-	match map_view.zoning_tool:
-		"Draw": zoning_tool_message = "Click corners to draw a district; click the first point or press Enter to close it."
-		"Erase": zoning_tool_message = "Click or drag over a draft to delete it."
-		"Edit": zoning_tool_message = "Select a draft, then drag its outline points; points snap to roads and neighbors."
-		_: zoning_tool_message = "Click a district plan or developed neighborhood to inspect it."
-	_update_road_status()
-	map_view.queue_redraw()
-
-
-func _on_zoning_angle_snap_toggled(enabled: bool) -> void:
-	map_view.set_growth_angle_snap(enabled)
-
-
-func _on_growth_stroke_finished(points: PackedVector2Array, erase: bool) -> void:
-	if region == null:
-		return
-	if _region_snapshot_busy():
-		deferred_region_edits.append(Callable(self, "_on_growth_stroke_finished").bind(points.duplicate(), erase))
-		return
-	var result: Dictionary = DevelopmentPlanner.paint_growth_area(region, points, erase)
-	if not result["ok"]:
-		zoning_tool_message = result["reason"]
-		_update_road_status()
-		return
-	zoning_tool_message = "Draft erased." if erase else "Growth draft ready. Review its streets, cost and zoning, then approve."
-	_update_road_status()
-	_discard_pending_day()
-	var key: String = result["key"]
-	var candidate_id: int = int(region.development_candidate_keys.get(key, -1))
-	if candidate_id >= 0:
-		_on_candidate_selected(candidate_id)
-	else:
-		selected_candidate_id = -1
-		selected_candidate_key = ""
-		map_view.set_selected_candidate(-1)
-		_refresh_inspector(false)
-	map_view.queue_redraw()
-
-
-func _on_growth_polygon_finished(points: PackedVector2Array) -> void:
-	if region == null:
-		return
-	if _region_snapshot_busy():
-		deferred_region_edits.append(Callable(self, "_on_growth_polygon_finished").bind(points.duplicate()))
-		map_view.clear_growth_polygon()
-		return
-	var result: Dictionary = DevelopmentPlanner.create_growth_area(region, points)
-	if not result["ok"]:
-		zoning_tool_message = result["reason"]
-		_update_road_status()
-		return
-	map_view.clear_growth_polygon()
-	zoning_tool_message = "District ready. Review its streets, cost and zoning, then approve."
-	_update_road_status()
-	_discard_pending_day()
-	var candidate_id: int = int(region.development_candidate_keys[result["key"]])
-	_on_candidate_selected(candidate_id)
-	map_view.queue_redraw()
-
-
-func _on_growth_vertex_moved(draft_id: int, vertex_id: int, position: Vector2) -> void:
-	if region == null:
-		return
-	if _region_snapshot_busy():
-		deferred_region_edits.append(Callable(self, "_on_growth_vertex_moved").bind(draft_id, vertex_id, position))
-		return
-	if not DevelopmentPlanner.move_growth_vertex(region, draft_id, vertex_id, position):
-		zoning_tool_message = "That outline does not form a buildable growth area."
-		_update_road_status()
-		return
-	zoning_tool_message = "Outline updated. Review the new street and lot preview."
-	_update_road_status()
-	_discard_pending_day()
-	selected_candidate_key = "growth:%d" % draft_id
-	selected_candidate_id = int(region.development_candidate_keys.get(selected_candidate_key, -1))
-	map_view.set_selected_candidate(selected_candidate_id)
-	_refresh_inspector(false)
-	map_view.queue_redraw()
 
 
 func _scope_city_ids(area_id: int) -> Array[int]:
@@ -1907,37 +1836,36 @@ func _scope_city_ids(area_id: int) -> Array[int]:
 func _refresh_growth_policy_controls() -> void:
 	if growth_policy_controls == null or region == null:
 		return
-	var area = region.jurisdictions[selected_jurisdiction_id]
-	growth_policy_controls.visible = area.kind in ["State", "Region", "County", "City"] and selected_candidate_id < 0
+	var city_id: int = region.city_jurisdiction_ids.find(selected_jurisdiction_id)
+	growth_policy_controls.visible = city_id >= 0 and selected_candidate_id < 0
 	if not growth_policy_controls.visible:
 		return
-	var city_ids: Array[int] = _scope_city_ids(selected_jurisdiction_id)
-	var enabled_count := 0
-	for city_id in city_ids:
-		if bool(region.cities[city_id].get("growth_policy", {}).get("enabled", true)):
-			enabled_count += 1
-	growth_policy_toggle.set_pressed_no_signal(enabled_count == city_ids.size() and not city_ids.is_empty())
-	growth_policy_toggle.text = "Delegate growth · %d/%d cities" % [enabled_count, city_ids.size()]
-	growth_policy_toggle.tooltip_text = "One connected project per city each month, using at most 10% of city treasury."
+	var policy: Dictionary = region.cities[city_id].get("urban_policy", {})
+	suppress_urban_policy_input = true
+	for field in urban_policy_inputs:
+		urban_policy_inputs[field].select(int(policy.get(field, 0)))
+	suppress_urban_policy_input = false
 
 
-func _on_growth_policy_toggled(enabled: bool, scope_id: int = -1) -> void:
-	if region == null:
+func _on_urban_policy_selected(value: int, field: String) -> void:
+	if suppress_urban_policy_input or region == null:
 		return
-	if scope_id < 0:
-		scope_id = selected_jurisdiction_id
+	var city_id: int = region.city_jurisdiction_ids.find(selected_jurisdiction_id)
+	if city_id < 0:
+		return
 	if _region_snapshot_busy():
-		deferred_region_edits.append(Callable(self, "_on_growth_policy_toggled").bind(enabled, scope_id))
+		deferred_region_edits.append(Callable(self, "_on_urban_policy_selected").bind(value, field))
 		return
 	_discard_pending_day()
-	for city_id in _scope_city_ids(scope_id):
-		var city: Dictionary = region.cities[city_id]
-		var policy: Dictionary = city.get("growth_policy", {"allowance": 0, "last_month": -1})
-		policy["enabled"] = enabled
-		city["growth_policy"] = policy
-		region.cities[city_id] = city
-	_refresh_growth_policy_controls()
-	_queue_next_day(last_dynamics_day_key)
+	var city: Dictionary = region.cities[city_id]
+	var policy: Dictionary = city.get("urban_policy", {}).duplicate()
+	policy[field] = value
+	city["urban_policy"] = policy
+	region.cities[city_id] = city
+	DevelopmentPlanner.refresh_candidates(region)
+	_refresh_inspector(false)
+	map_view.queue_redraw()
+
 
 
 func _on_map_jurisdiction_selected(area_id: int) -> void:
@@ -1952,6 +1880,43 @@ func _on_road_tool_selected(index: int) -> void:
 	road_build_button.text = "Demolish" if road_tool_selector.get_item_text(index) == "Demolish" else "Build"
 	_cancel_road_preview()
 	_update_road_status()
+
+
+func _on_planning_point(point: Vector2) -> void:
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_on_planning_point").bind(point))
+		return
+	var city_id: int = region.city_id_at_point(point)
+	if city_id < 0:
+		road_status_label.text = "Place planning guides inside a city."
+		return
+	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
+	if tool_name == "Station site":
+		region.station_sites.append({"city_id": city_id, "point": point})
+		road_status_label.text = "Station site reserved for %s." % region.get_city_name(city_id)
+	elif not planning_has_start:
+		planning_start_point = point
+		planning_has_start = true
+		map_view.set_planning_preview(point, tool_name)
+		_update_road_status()
+		return
+	else:
+		var start_city: int = region.city_id_at_point(planning_start_point)
+		if start_city != city_id or point.distance_to(planning_start_point) < 0.1:
+			road_status_label.text = "Choose a second point at least 100 m away in the same city."
+			return
+		var guide: Dictionary = {"city_id": city_id, "points": PackedVector2Array([planning_start_point, point])}
+		if tool_name == "Growth corridor":
+			region.urban_corridors.append(guide)
+			road_status_label.text = "Growth corridor added for %s." % region.get_city_name(city_id)
+		else:
+			region.rail_reservations.append(guide)
+			road_status_label.text = "Rail corridor reserved for %s." % region.get_city_name(city_id)
+		planning_has_start = false
+		map_view.set_planning_preview(Vector2.INF)
+	DevelopmentPlanner.refresh_candidates(region)
+	_refresh_inspector(false)
+	map_view.queue_redraw()
 
 
 func _on_road_draw_selected(_index: int) -> void:
@@ -1986,6 +1951,9 @@ func _road_class() -> String:
 func _on_road_node_clicked(node_id: int) -> void:
 	map_view.selected_local_street = Vector2i(-1, -1)
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
+	if tool_name in ["Growth corridor", "Rail corridor", "Station site"]:
+		_on_planning_point(region.road_nodes[node_id].position_km)
+		return
 	match tool_name:
 		"Arterial", "Highway":
 			if road_start_node < 0 or not pending_road_preview.is_empty():
@@ -2019,6 +1987,9 @@ func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
 		deferred_region_edits.append(Callable(self, "_on_road_link_clicked").bind(link_id, world_position))
 		return
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
+	if tool_name in ["Growth corridor", "Rail corridor", "Station site"]:
+		_on_planning_point(world_position)
+		return
 	if tool_name != "Junction":
 		map_view.selected_local_street = Vector2i(-1, -1)
 		selected_road_link_id = link_id
@@ -2052,6 +2023,9 @@ func _on_road_empty_clicked(world_position: Vector2) -> void:
 		deferred_region_edits.append(Callable(self, "_on_road_empty_clicked").bind(world_position))
 		return
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
+	if tool_name in ["Growth corridor", "Rail corridor", "Station site"]:
+		_on_planning_point(world_position)
+		return
 	if tool_name == "Junction":
 		var result: Dictionary = RoadPlanner.add_junction(region, world_position)
 		road_status_label.text = "Junction added." if result["ok"] else result["reason"]
@@ -2141,7 +2115,7 @@ func _refresh_crossing_controls() -> void:
 	var impact: Dictionary = pending_road_preview.get("land_impact", {})
 	road_impact_label.text = "Land %.1f ha  •  Construction $%s  •  Structures $%s  •  Acquisition $%s  •  Demolition/site $%s  •  Local streets $%s" % [
 		float(impact.get("land_ha", 0.0)), _format_count(int(pending_road_preview.get("construction_cost", 0))),
-		_format_count(int(pending_road_preview.get("structure_cost", 0))), _format_count(int(impact.get("land_cost", 0))),
+		_format_count(int(pending_road_preview.get("structure_cost", 0)) + int(impact.get("local_bridge_cost", 0))), _format_count(int(impact.get("land_cost", 0))),
 		_format_count(int(impact.get("home_cost", 0)) + int(impact.get("job_cost", 0)) + int(impact.get("site_cost", 0))),
 		_format_count(int(impact.get("street_cost", 0)))]
 
@@ -2151,16 +2125,16 @@ func _on_road_build_pressed() -> void:
 		deferred_region_edits.append(Callable(self, "_on_road_build_pressed"))
 		return
 	if pending_road_preview.get("kind", "") == RoadPlanner.DEMOLISH:
-		var result: Dictionary = RoadPlanner.demolish(region, pending_road_preview["target_link_id"])
-		if not result["ok"]:
-			road_status_label.text = result["reason"]
+		var demolition: Dictionary = RoadPlanner.demolish(region, pending_road_preview["target_link_id"])
+		if not demolition["ok"]:
+			road_status_label.text = demolition["reason"]
 			return
 		selected_road_link_id = -1
 		_refresh_toll_controls()
 		map_view.set_selected_road_link(-1)
 		_cancel_road_preview()
 		_rebuild_after_road_change()
-		road_status_label.text = "Road demolished. %d neighborhood road group%s remain." % [result["components_after"], "s" if result["components_after"] != 1 else ""]
+		road_status_label.text = "Road demolished. %d neighborhood road group%s remain." % [demolition["components_after"], "s" if demolition["components_after"] != 1 else ""]
 		return
 	var result: Dictionary = RoadPlanner.commit(region, pending_road_preview, _current_day_key())
 	if not result["ok"]:
@@ -2174,6 +2148,9 @@ func _on_road_build_pressed() -> void:
 
 func _cancel_road_preview() -> void:
 	road_start_node = -1
+	planning_has_start = false
+	if map_view != null:
+		map_view.set_planning_preview(Vector2.INF)
 	road_waypoints.clear()
 	road_last_guide_click = false
 	pending_road_preview.clear()
@@ -2217,6 +2194,10 @@ func _update_road_status() -> void:
 			road_status_label.text = "Choose an interchange to finish. Esc cancels." if _road_class() == RoadLinkData.HIGHWAY else "Choose a road node, or double click empty land to finish. Esc cancels."
 	elif road_tool_selector.get_item_text(road_tool_selector.selected) == "Demolish":
 		road_status_label.text = "Click an open road to preview demolition."
+	elif road_tool_selector.get_item_text(road_tool_selector.selected) in ["Growth corridor", "Rail corridor"]:
+		road_status_label.text = "Choose the other end of the planning corridor. Esc cancels." if planning_has_start else "Click the first corridor point. This guide shapes future development suggestions."
+	elif road_tool_selector.get_item_text(road_tool_selector.selected) == "Station site":
+		road_status_label.text = "Click a station site. Nearby districts receive higher growth priority."
 	else:
 		road_status_label.text = "Draw roads between nodes  •  Junctions connect arterials  •  Highways need interchanges"
 
@@ -2287,6 +2268,7 @@ func _poll_road_rebuild() -> void:
 
 
 func _refresh_inspector(reset_scroll: bool = true) -> void:
+	_refresh_review_queue()
 	if not selected_candidate_key.is_empty():
 		if selected_candidate_id < 0 or selected_candidate_id >= region.development_candidates.size() or region.development_candidates[selected_candidate_id]["key"] != selected_candidate_key:
 			selected_candidate_id = int(region.development_candidate_keys.get(selected_candidate_key, -1))
@@ -2303,6 +2285,76 @@ func _refresh_inspector(reset_scroll: bool = true) -> void:
 		_show_road_inspector(selected_road_link_id)
 	else:
 		_show_jurisdiction_inspector(reset_scroll)
+
+
+func _refresh_review_queue() -> void:
+	if review_queue == null:
+		return
+	var showing: bool = region != null and map_view.map_mode == "Zoning"
+	review_queue_label.visible = showing
+	review_queue.visible = showing
+	review_approve_button.visible = showing
+	if not showing:
+		return
+	var selected_keys: Dictionary = {}
+	for index in review_queue.get_selected_items():
+		if index < review_queue_keys.size():
+			selected_keys[review_queue_keys[index]] = true
+	review_queue.clear()
+	review_queue_keys.clear()
+	var city_filter: int = region.city_jurisdiction_ids.find(selected_jurisdiction_id)
+	review_queue_label.text = "GROWTH REVIEW · %s" % ("city projects" if city_filter >= 0 else "top 80 state projects; select a city for more")
+	for candidate in region.development_candidates:
+		if int(candidate["neighborhood_id"]) >= 0 or not candidate.has("urban_sector"):
+			continue
+		if city_filter >= 0 and int(candidate["city_id"]) != city_filter:
+			continue
+		if city_filter < 0 and review_queue_keys.size() >= 80:
+			break
+		var key: String = candidate["key"]
+		var city_name: String = region.cities[int(candidate["city_id"])]["name"]
+		review_queue.add_item("%s · %.0f ha · $%s" % [city_name, StateGeography.polygon_area(candidate["polygon"]) * 100.0, _format_count(candidate["layout"].total_cost())])
+		review_queue_keys.append(key)
+		if selected_keys.has(key):
+			review_queue.select(review_queue_keys.size() - 1, false)
+	review_approve_button.disabled = review_queue_keys.is_empty()
+
+
+func _approve_review_selection() -> void:
+	if region == null:
+		return
+	var keys: Array[String] = []
+	for index in review_queue.get_selected_items():
+		if index < review_queue_keys.size():
+			keys.append(review_queue_keys[index])
+	if keys.is_empty():
+		return
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_approve_review_keys").bind(keys))
+		return
+	_approve_review_keys(keys)
+
+
+func _approve_review_keys(keys: Array[String]) -> void:
+	if _region_snapshot_busy():
+		deferred_region_edits.append(Callable(self, "_approve_review_keys").bind(keys))
+		return
+	var approved := 0
+	var last_reason := ""
+	for key in keys:
+		var candidate_id: int = int(region.development_candidate_keys.get(key, -1))
+		if candidate_id < 0:
+			continue
+		var result: Dictionary = DevelopmentPlanner.set_approval(region, candidate_id, true)
+		if result["ok"]:
+			approved += 1
+		else:
+			last_reason = result["reason"]
+	if approved > 0:
+		_discard_pending_day()
+		_rebuild_after_road_change()
+	zoning_tool_message = "%d project%s approved.%s" % [approved, "s" if approved != 1 else "", "  " + last_reason if not last_reason.is_empty() else ""]
+	_refresh_review_queue()
 
 
 func _refresh_toll_controls() -> void:

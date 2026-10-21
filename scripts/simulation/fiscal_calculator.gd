@@ -59,7 +59,7 @@ static func collect_congestion(region, destination_city_id: int, cars: float, ho
 
 static func queue_policy(region, jurisdiction_id: int, property_name: String, value: float, current_unix_seconds: int) -> int:
 	var tax_policy: bool = property_name in ["income_tax_rate", "property_tax_rate", "sales_tax_rate"]
-	var effective_seconds: int = ((current_unix_seconds / 86400) + 1) * 86400 if tax_policy else ((current_unix_seconds / 900) + 1) * 900
+	var effective_seconds: int = (floori(float(current_unix_seconds) / 86400.0) + 1) * 86400 if tax_policy else (floori(float(current_unix_seconds) / 900.0) + 1) * 900
 	for index in range(region.pending_policy_changes.size() - 1, -1, -1):
 		var pending: Dictionary = region.pending_policy_changes[index]
 		if int(pending.get("jurisdiction_id", -1)) == jurisdiction_id and pending["property"] == property_name:
@@ -69,7 +69,7 @@ static func queue_policy(region, jurisdiction_id: int, property_name: String, va
 
 
 static func queue_toll(region, link_id: int, property_name: String, value: float, current_unix_seconds: int) -> int:
-	var effective_seconds: int = ((current_unix_seconds / 900) + 1) * 900
+	var effective_seconds: int = (floori(float(current_unix_seconds) / 900.0) + 1) * 900
 	for index in range(region.pending_policy_changes.size() - 1, -1, -1):
 		var pending: Dictionary = region.pending_policy_changes[index]
 		if int(pending.get("link_id", -1)) == link_id and pending["property"] == property_name:
@@ -84,7 +84,9 @@ static func apply_due_policies(region, unix_seconds: int) -> bool:
 	for policy in region.pending_policy_changes:
 		if int(policy["effective_seconds"]) <= unix_seconds:
 			var property_name: String = str(policy["property"])
-			var policy_value = int(policy["value"]) if property_name in ["congestion_start_hour", "congestion_end_hour"] else float(policy["value"])
+			var policy_value: Variant = float(policy["value"])
+			if property_name in ["congestion_start_hour", "congestion_end_hour"]:
+				policy_value = int(policy["value"])
 			if policy.has("link_id"):
 				for link in region.road_links:
 					if link.id == int(policy["link_id"]):

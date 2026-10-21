@@ -45,7 +45,7 @@ func _run() -> void:
 	_check(road_result.get("ok", false) and is_equal_approx(owner.treasury, -100.0), "Dev Mode must fund a road without debiting its owner.")
 	var candidate_id := -1
 	for candidate in main.region.development_candidates:
-		if candidate["neighborhood_id"] < 0 and candidate["frontage_link_id"] >= 0 and candidate["layout_input"].get("edge_frontage", false):
+		if candidate["neighborhood_id"] < 0 and candidate["frontage_link_id"] >= 0 and candidate.has("urban_sector"):
 			candidate_id = candidate["id"]
 			break
 	_check(candidate_id >= 0, "An arterial frontage candidate must be available for development.")

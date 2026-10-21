@@ -23,12 +23,12 @@ var managed_neighborhood_id: int = -1
 var crossings: Array[Dictionary] = []
 
 
-static func construction_cost(road_class: String) -> float:
-	return CONSTRUCTION_COSTS.get(road_class, 600000.0)
+static func construction_cost(link_class: String) -> float:
+	return CONSTRUCTION_COSTS.get(link_class, 600000.0)
 
 
-static func upkeep(road_class: String) -> float:
-	return UPKEEP_COSTS.get(road_class, 200.0)
+static func upkeep(link_class: String) -> float:
+	return UPKEEP_COSTS.get(link_class, 200.0)
 
 
 func recalculate_length() -> void:

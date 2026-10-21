@@ -183,7 +183,7 @@ static func step_bin(region, flow_profile, state) -> void:
 	var bin_index: int = state.next_bin
 	if bin_index >= BINS_PER_DAY:
 		return
-	var hour: int = bin_index / BINS_PER_HOUR
+	var hour: int = floori(float(bin_index) / float(BINS_PER_HOUR))
 	var absolute_tick: int = state.day_key * BINS_PER_DAY + bin_index
 	if FiscalCalculator.apply_due_policies(region, absolute_tick * 900):
 		state.route_hour = -1
@@ -298,7 +298,7 @@ static func after_network_edit(region, flow_profile, old_state, checkpoint: Dict
 		if not index_by_id.has(old_state.link_ids[old_index]):
 			continue
 		var new_index: int = index_by_id[old_state.link_ids[old_index]]
-		for hour in range((start_bin + 3) / BINS_PER_HOUR):
+		for hour in range(floori(float(start_bin + 3) / float(BINS_PER_HOUR))):
 			state.profile.hourly_volumes[hour][new_index] = checkpoint["hourly_volumes"][hour][old_index]
 			state.profile.hourly_served[hour][new_index] = checkpoint["hourly_served"][hour][old_index]
 			state.profile.hourly_link_times[hour][new_index] = checkpoint["hourly_link_times"][hour][old_index]
@@ -306,7 +306,7 @@ static func after_network_edit(region, flow_profile, old_state, checkpoint: Dict
 			state.profile.quarter_hour_queues[bin_index][new_index] = old_state.profile.quarter_hour_queues[bin_index][old_index]
 			state.profile.quarter_hour_served[bin_index][new_index] = old_state.profile.quarter_hour_served[bin_index][old_index]
 			state.profile.quarter_hour_link_times[bin_index][new_index] = old_state.profile.quarter_hour_link_times[bin_index][old_index]
-	for hour in range(start_bin / BINS_PER_HOUR):
+	for hour in range(floori(float(start_bin) / float(BINS_PER_HOUR))):
 		state.profile.hourly_pair_times[hour] = old_state.profile.hourly_pair_times[hour]
 	state.profile.hourly_peak_ratio = checkpoint["hourly_peak_ratio"].duplicate()
 	var free_costs: PackedVector2Array = RoadGraph.free_flow_costs(region)
@@ -360,7 +360,7 @@ static func _repath_cohort(region, cohort: Dictionary, costs: PackedVector2Array
 	return rerouted
 
 
-static func _add_departures(region, flow_profile, state, bin_index: int, hour: int) -> void:
+static func _add_departures(_region, _flow_profile, state, bin_index: int, _hour: int) -> void:
 	for area_id in state.noncar_sales:
 		_credit(state, bin_index, int(area_id), "sales", float(state.noncar_sales[area_id]) / BINS_PER_HOUR)
 	for template in state.departure_templates:
@@ -467,12 +467,12 @@ static func _accumulate_noncar_sales(region, sales: Dictionary, origin_id: int, 
 static func _enqueue(state, cohort: Dictionary, bin_index: int) -> void:
 	var edge: Vector2i = cohort["path"][cohort["step_index"]]
 	state.queues[edge.x * 2 + edge.y].append(cohort)
-	var current: Vector2 = state.profile.hourly_volumes[bin_index / BINS_PER_HOUR][edge.x]
+	var current: Vector2 = state.profile.hourly_volumes[floori(float(bin_index) / float(BINS_PER_HOUR))][edge.x]
 	if edge.y == 0:
 		current.x += float(cohort["count"])
 	else:
 		current.y += float(cohort["count"])
-	state.profile.hourly_volumes[bin_index / BINS_PER_HOUR][edge.x] = current
+	state.profile.hourly_volumes[floori(float(bin_index) / float(BINS_PER_HOUR))][edge.x] = current
 
 
 static func _serve_lane(region, state, bin_index: int, absolute_tick: int, link_index: int, direction: int, capacity: float, free_minutes: float) -> float:
@@ -499,7 +499,7 @@ static func _serve_lane(region, state, bin_index: int, absolute_tick: int, link_
 			var to_city: int = _node_city(region, link.to_node_id if direction == 0 else link.from_node_id)
 			if from_city != to_city:
 				var city = region.jurisdictions[region.city_jurisdiction_ids[to_city]]
-				if city.is_congestion_hour(bin_index / BINS_PER_HOUR):
+				if city.is_congestion_hour(floori(float(bin_index) / float(BINS_PER_HOUR))):
 					_credit(state, bin_index, city.id, "fee", served * city.congestion_fee)
 			served_total += served
 		if count - served > 0.000001:

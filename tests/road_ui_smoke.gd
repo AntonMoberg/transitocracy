@@ -33,7 +33,14 @@ func _run_checks() -> void:
 		for prior_rect in label_rects:
 			_check(not label_rect.intersects(prior_rect), "%s label must not overlap another jurisdiction label" % area.name)
 		label_rects.append(label_rect)
-	_check(main.road_tool_selector.get_item_text(6) == "Demolish", "road tools must include demolition")
+	var widen_index := -1
+	var demolish_index := -1
+	for tool_index in range(main.road_tool_selector.item_count):
+		if main.road_tool_selector.get_item_text(tool_index) == "Widen":
+			widen_index = tool_index
+		elif main.road_tool_selector.get_item_text(tool_index) == "Demolish":
+			demolish_index = tool_index
+	_check(widen_index >= 0 and demolish_index >= 0, "road tools must include widening and demolition")
 	_check(not main.road_tool_selector.disabled and main.map_view.detail_level == "Neighborhood", "full map must enable detailed road tools")
 	main.road_tool_selector.select(1)
 	main._on_road_tool_selected(1)
@@ -126,13 +133,13 @@ func _run_checks() -> void:
 			midpoint = candidate_midpoint
 			break
 	_check(main.map_view._hit_road_link(main.map_view._world_to_screen(midpoint)) == link.id, "visible road must remain clickable")
-	main.road_tool_selector.select(5)
-	main._on_road_tool_selected(5)
+	main.road_tool_selector.select(widen_index)
+	main._on_road_tool_selected(widen_index)
 	main.map_view.road_link_clicked.emit(link.id, midpoint)
 	_check(main.pending_road_preview.get("kind", "") == "Widen", "widen tool must preview an existing link")
 	main._cancel_road_preview()
-	main.road_tool_selector.select(6)
-	main._on_road_tool_selected(6)
+	main.road_tool_selector.select(demolish_index)
+	main._on_road_tool_selected(demolish_index)
 	main.map_view.road_link_clicked.emit(link.id, midpoint)
 	_check(main.pending_road_preview.get("ok", false) and main.pending_road_preview["components_after"] > 1, "demolition preview must disclose connectivity loss")
 	var owner_balance: float = main.region.jurisdictions[link.owner_jurisdiction_id].treasury

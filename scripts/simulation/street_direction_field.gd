@@ -48,12 +48,12 @@ static func city_context(region, city_id: int, bounds: Rect2) -> Dictionary:
 # Road directions are axial: a street heading east is the same street heading
 # west. Blending doubled angles avoids a false cancellation at 180 degrees.
 static func axis(seed_value: int, city_id: int, point: Vector2, base: Vector2, inherited: Vector2 = Vector2.ZERO, organic: bool = false, radial_center: Vector2 = Vector2.INF, context: Dictionary = {}) -> Vector2:
-	var reference: Vector2 = base.normalized() if base.length_squared() > 0.000001 else Vector2.RIGHT
-	var doubled: Vector2 = _axial(reference) * (2.6 if not organic else 1.1)
+	var reference_axis: Vector2 = base.normalized() if base.length_squared() > 0.000001 else Vector2.RIGHT
+	var doubled: Vector2 = _axial(reference_axis) * (2.6 if not organic else 1.1)
 	if context.has("base_axis"):
-		doubled += _axial(_family_axis(context["base_axis"], reference)) * (1.1 if not organic else 1.3)
+		doubled += _axial(_family_axis(context["base_axis"], reference_axis)) * (1.1 if not organic else 1.3)
 	if inherited.length_squared() > 0.000001:
-		doubled += _axial(_family_axis(inherited, reference)) * (3.0 if not organic else 0.85)
+		doubled += _axial(_family_axis(inherited, reference_axis)) * (3.0 if not organic else 0.85)
 	var nearest_weight := 0.0
 	var nearest_axis := Vector2.ZERO
 	for road in context.get("roads", []):
@@ -65,20 +65,20 @@ static func axis(seed_value: int, city_id: int, point: Vector2, base: Vector2, i
 			nearest_weight = strength
 			nearest_axis = road["axis"]
 	if nearest_weight > 0.0:
-		doubled += _axial(_family_axis(nearest_axis, reference)) * nearest_weight * (2.0 if not organic else 2.4)
+		doubled += _axial(_family_axis(nearest_axis, reference_axis)) * nearest_weight * (2.0 if not organic else 2.4)
 	if organic and radial_center.is_finite() and point.distance_squared_to(radial_center) > 0.04:
-		doubled += _axial(_family_axis(point - radial_center, reference)) * 0.38
+		doubled += _axial(_family_axis(point - radial_center, reference_axis)) * 0.38
 	doubled = doubled.normalized()
 	var phase: float = float(posmod(hash("%d:field:%d" % [seed_value, city_id]), 100000)) * TAU / 100000.0
 	var wave: float = sin(point.x * 2.3 + phase) * 0.55 + sin(point.y * 3.1 - phase * 1.31) * 0.45
 	var angle: float = atan2(doubled.y, doubled.x) * 0.5 + wave * (0.46 if organic else 0.055)
 	var result := Vector2.from_angle(angle)
-	return result if result.dot(reference) >= 0.0 else -result
+	return result if result.dot(reference_axis) >= 0.0 else -result
 
 
-static func _family_axis(candidate: Vector2, reference: Vector2) -> Vector2:
+static func _family_axis(candidate: Vector2, reference_axis: Vector2) -> Vector2:
 	var direction: Vector2 = candidate.normalized()
-	return direction.orthogonal() if absf(direction.dot(reference)) < 0.707 else direction
+	return direction.orthogonal() if absf(direction.dot(reference_axis)) < 0.707 else direction
 
 
 static func _axial(direction: Vector2) -> Vector2:
@@ -117,7 +117,7 @@ static func _regional_direction(point: Vector2, fraction: float, chord: Vector2,
 	var entry: Vector2 = start_tangent.normalized() if start_tangent.length_squared() > 0.01 else chord
 	var exit: Vector2 = end_tangent.normalized() if end_tangent.length_squared() > 0.01 else chord
 	var blend: Vector2 = entry.lerp(exit, clampf(fraction, 0.0, 1.0))
-	var reference: Vector2 = blend.normalized() if blend.length_squared() > 0.01 else chord
+	var reference_axis: Vector2 = blend.normalized() if blend.length_squared() > 0.01 else chord
 	var phase: float = float(posmod(hash("%d:regional-field:%d" % [seed_value, corridor_index]), 100000)) * TAU / 100000.0
 	var turn: float = sin(point.x * 0.018 + phase) * 0.075 + sin(point.y * 0.023 - phase) * 0.03
-	return reference.rotated(turn)
+	return reference_axis.rotated(turn)
