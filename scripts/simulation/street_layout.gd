@@ -9,6 +9,7 @@ var grid_axis: Vector2 = Vector2.ZERO
 var grid_origin: Vector2 = Vector2.ZERO
 var grid_column_spacing_km: float = 0.0
 var grid_row_spacing_km: float = 0.0
+var grid_families: Array[Dictionary] = []
 var polygon: PackedVector2Array = PackedVector2Array()
 var bounds: Rect2 = Rect2()
 var nodes: PackedVector2Array = PackedVector2Array()

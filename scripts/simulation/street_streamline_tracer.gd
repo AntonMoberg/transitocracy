@@ -7,11 +7,11 @@ const DirectionField = preload("res://scripts/simulation/street_direction_field.
 # No candidate perimeter or local row number enters this calculation.
 static func trace_absolute(point: Vector2, axis: Vector2, seed_value: int, city_id: int, organic: bool, radial_center: Vector2, context: Dictionary) -> Vector2:
 	var guide: Vector2 = axis.normalized()
-	var window: float = 0.30 if organic else 0.20
+	var window: float = 0.30 if organic else 0.42
 	var start: Vector2 = point - guide * window
 	var step: Vector2 = _rk4_step(start, guide, window, seed_value, city_id, guide, organic, radial_center, context)
 	var transverse: Vector2 = guide.orthogonal()
-	var offset: float = clampf((step - guide * window).dot(transverse), -0.035 if organic else -0.012, 0.035 if organic else 0.012)
+	var offset: float = clampf((step - guide * window).dot(transverse), -0.035 if organic else -0.032, 0.035 if organic else 0.032)
 	return point + transverse * offset
 
 

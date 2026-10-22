@@ -30,7 +30,7 @@ static func proposals(region) -> Array[Dictionary]:
 			if city_id < 0 or not region.urban_sector_claims.is_empty() and not frontier[city_id].is_empty():
 				continue
 			var plan: Dictionary = CityPlan.guide(region, city_id, point)
-			var sector: Vector2i = UrbanGraph.sector_at(point, plan)
+			var sector: Vector2i = UrbanGraph.sector_at(point, plan, region, city_id)
 			for step in [Vector2i.ZERO, Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
 				frontier[city_id][sector + step] = true
 	var result: Array[Dictionary] = []
@@ -42,6 +42,13 @@ static func proposals(region) -> Array[Dictionary]:
 				continue
 			var generated: Dictionary = UrbanGraph.make_layout(region, city_id, sector)
 			var layout = generated["layout"]
+			var overlaps := false
+			for cell in UrbanGraph.district_cells(region, city_id, sector):
+				if region.urban_block_claims.has(UrbanGraph.block_key(city_id, cell)):
+					overlaps = true
+					break
+			if overlaps:
+				continue
 			var frontage_id: int = int(generated["frontage_id"])
 			if frontage_id < 0 or layout.core_paths.is_empty() or layout.blocks.is_empty():
 				continue

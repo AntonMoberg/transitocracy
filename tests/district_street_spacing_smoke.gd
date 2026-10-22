@@ -5,6 +5,7 @@ const Streets = preload("res://scripts/simulation/street_layout_generator.gd")
 const Field = preload("res://scripts/simulation/street_direction_field.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
+const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 
 
 func _initialize() -> void:
@@ -39,6 +40,21 @@ func _run() -> void:
 					var nearest := INF
 					for edge in layout.edges:
 						nearest = minf(nearest, point.distance_to(Geometry2D.get_closest_point_to_segment(point, layout.nodes[int(edge.x)], layout.nodes[int(edge.y)])))
+					if nearest > 0.12:
+						# Perimeter streets may be omitted when a built arterial
+						# already serves the same strip of the district.
+						var nearby: Dictionary = Spatial.cache(region)["arterials"]
+						var grid := Vector2i(floori(point.x), floori(point.y))
+						var seen: Dictionary = {}
+						for offset_y in range(-1, 2):
+							for offset_x in range(-1, 2):
+								for link_index in nearby.get(grid + Vector2i(offset_x, offset_y), []):
+									if seen.has(link_index):
+										continue
+									seen[link_index] = true
+									var link = region.road_links[link_index]
+									for segment in range(1, link.points.size()):
+										nearest = minf(nearest, point.distance_to(Geometry2D.get_closest_point_to_segment(point, link.points[segment - 1], link.points[segment])))
 					widest_gap = maxf(widest_gap, nearest)
 					if nearest > 0.12:
 						push_error("Seed %d district %s has a %.3f km roadless gap at %s." % [seed_value, candidate["key"], nearest, point])

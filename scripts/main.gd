@@ -575,14 +575,23 @@ func _build_interface() -> void:
 	var inspector_layout := VBoxContainer.new()
 	inspector_layout.add_theme_constant_override("separation", 8)
 	inspector_panel.add_child(inspector_layout)
+	var inspector_controls_scroll := ScrollContainer.new()
+	inspector_controls_scroll.custom_minimum_size.y = 200
+	inspector_controls_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	inspector_controls_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	inspector_layout.add_child(inspector_controls_scroll)
+	var inspector_controls := VBoxContainer.new()
+	inspector_controls.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inspector_controls.add_theme_constant_override("separation", 8)
+	inspector_controls_scroll.add_child(inspector_controls)
 	flow_detail_label = Label.new()
 	flow_detail_label.add_theme_font_size_override("font_size", 14)
 	flow_detail_label.add_theme_color_override("font_color", Color("f5b67c"))
 	flow_detail_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	flow_detail_label.custom_minimum_size.y = 58
-	inspector_layout.add_child(flow_detail_label)
+	inspector_controls.add_child(flow_detail_label)
 	flow_detail_separator = HSeparator.new()
-	inspector_layout.add_child(flow_detail_separator)
+	inspector_controls.add_child(flow_detail_separator)
 	flow_detail_label.visible = false
 	flow_detail_separator.visible = false
 	scope_breadcrumb = RichTextLabel.new()
@@ -590,14 +599,14 @@ func _build_interface() -> void:
 	scope_breadcrumb.scroll_active = false
 	scope_breadcrumb.custom_minimum_size.y = 44
 	scope_breadcrumb.meta_clicked.connect(_on_inspector_meta_clicked)
-	inspector_layout.add_child(scope_breadcrumb)
+	inspector_controls.add_child(scope_breadcrumb)
 	fiscal_label = Label.new()
 	fiscal_label.clip_text = true
 	fiscal_label.add_theme_color_override("font_color", Color("93b9ac"))
-	inspector_layout.add_child(fiscal_label)
+	inspector_controls.add_child(fiscal_label)
 	zoning_controls = HBoxContainer.new()
 	zoning_controls.visible = false
-	inspector_layout.add_child(zoning_controls)
+	inspector_controls.add_child(zoning_controls)
 	zoning_button = Button.new()
 	zoning_button.pressed.connect(_on_zoning_pressed)
 	zoning_controls.add_child(zoning_button)
@@ -611,12 +620,12 @@ func _build_interface() -> void:
 	development_controls.zoning_requested.connect(_on_development_zoning)
 	development_controls.design_requested.connect(_on_development_design)
 	development_controls.character_requested.connect(_on_development_character)
-	inspector_layout.add_child(development_controls)
+	inspector_controls.add_child(development_controls)
 	zoning_controls.visibility_changed.connect(func() -> void: development_controls.visible = zoning_controls.visible)
 	review_queue_label = Label.new()
 	review_queue_label.text = "GROWTH REVIEW · select several to approve"
 	review_queue_label.visible = false
-	inspector_layout.add_child(review_queue_label)
+	inspector_controls.add_child(review_queue_label)
 	review_queue = ItemList.new()
 	review_queue.select_mode = ItemList.SELECT_MULTI
 	review_queue.custom_minimum_size.y = 112
@@ -626,15 +635,15 @@ func _build_interface() -> void:
 			var candidate_id: int = int(region.development_candidate_keys.get(review_queue_keys[index], -1))
 			if candidate_id >= 0:
 				_on_candidate_selected(candidate_id))
-	inspector_layout.add_child(review_queue)
+	inspector_controls.add_child(review_queue)
 	review_approve_button = Button.new()
 	review_approve_button.text = "Approve selected projects"
 	review_approve_button.visible = false
 	review_approve_button.pressed.connect(_approve_review_selection)
-	inspector_layout.add_child(review_approve_button)
+	inspector_controls.add_child(review_approve_button)
 	growth_policy_controls = VBoxContainer.new()
 	growth_policy_controls.visible = false
-	inspector_layout.add_child(growth_policy_controls)
+	inspector_controls.add_child(growth_policy_controls)
 	for field in ["growth_focus", "block_design", "land_use_focus", "density"]:
 		var row := HBoxContainer.new()
 		growth_policy_controls.add_child(row)
@@ -656,7 +665,7 @@ func _build_interface() -> void:
 		urban_policy_inputs[field] = input
 	state_tax_controls = HBoxContainer.new()
 	state_tax_controls.add_theme_constant_override("separation", 8)
-	inspector_layout.add_child(state_tax_controls)
+	inspector_controls.add_child(state_tax_controls)
 	var tax_label := Label.new()
 	tax_label.text = "State income tax"
 	state_tax_controls.add_child(tax_label)
@@ -672,7 +681,7 @@ func _build_interface() -> void:
 	state_tax_controls.add_child(tax_input)
 	jurisdiction_policy_controls = HBoxContainer.new()
 	jurisdiction_policy_controls.add_theme_constant_override("separation", 8)
-	inspector_layout.add_child(jurisdiction_policy_controls)
+	inspector_controls.add_child(jurisdiction_policy_controls)
 	policy_selector = OptionButton.new()
 	policy_selector.custom_minimum_size.x = 175
 	policy_selector.item_selected.connect(_on_policy_selected)
@@ -687,6 +696,7 @@ func _build_interface() -> void:
 	inspector.selection_enabled = true
 	inspector.meta_clicked.connect(_on_inspector_meta_clicked)
 	inspector.autowrap_mode = TextServer.AUTOWRAP_OFF
+	inspector.custom_minimum_size.y = 90
 	inspector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	inspector.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	inspector.add_theme_font_size_override("normal_font_size", 14)

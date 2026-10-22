@@ -36,7 +36,7 @@ func _run() -> void:
 					break
 			if block_id < neighborhood.block_zoning.size() and neighborhood.block_zoning[block_id] > 0:
 				var code: int = neighborhood.block_zoning[block_id] - 1
-				var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][code / 3]
+				var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][floori(float(code) / 3.0)]
 				for footprint in LayoutGenerator.buildings(block, zone, code % 3, neighborhood.character_profile):
 					if RoadLand.polygon_intersects_masks(footprint, masks):
 						errors.append("Generated building footprint lies beneath a highway.")

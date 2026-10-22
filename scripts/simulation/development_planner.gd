@@ -53,6 +53,7 @@ static func refresh_candidates(region) -> void:
 		_register_candidate(region, layout, -1, int(generated["frontage_id"]))
 		var candidate: Dictionary = region.development_candidates[-1]
 		candidate["urban_sector"] = sector
+		candidate["urban_cells"] = UrbanGraph.district_cells(region, city_id, sector)
 		candidate["design_variant"] = variant
 		candidate["design_override"] = selected_designs.has(key)
 		candidate["priority"] = proposal["priority"]
@@ -181,6 +182,8 @@ static func set_approval(region, candidate_id: int, approved: bool, allocation: 
 		StreetNetwork.attach(region, neighborhood, candidate["layout"])
 		if candidate.has("urban_sector"):
 			region.urban_sector_claims[UrbanGraph.sector_key(neighborhood.city_id, candidate["urban_sector"])] = neighborhood.id
+			for cell in candidate.get("urban_cells", []):
+				region.urban_block_claims[UrbanGraph.block_key(neighborhood.city_id, cell)] = neighborhood.id
 			UrbanGraph.register_layout(region, neighborhood.street_layout, neighborhood.id)
 		RoadLand.apply_to_new_neighborhood(region, neighborhood)
 		candidate["neighborhood_id"] = neighborhood.id

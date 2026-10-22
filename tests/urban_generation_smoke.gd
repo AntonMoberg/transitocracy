@@ -17,14 +17,20 @@ func _run() -> void:
 			_fail("Generated %d city state is invalid: %s" % [city_count, generated["errors"]])
 			return
 		var started := 0
+		var irregular := 0
 		for neighborhood in region.neighborhoods:
 			if neighborhood.initially_developed:
 				started += 1
 				if neighborhood.street_layout == null or neighborhood.street_layout.canonical_edges.is_empty():
 					_fail("A starting district has no shared street addresses")
 					return
+				if _corner_count(neighborhood.street_layout.polygon) > 4:
+					irregular += 1
 		if started != 40 or region.urban_sector_claims.size() != 40 or region.urban_plan_edges.is_empty():
 			_fail("Starting cities did not populate the persistent street graph")
+			return
+		if irregular < 20 or region.urban_block_claims.size() < 40 * 24:
+			_fail("%d-city start did not claim varied, connected blocks (%d irregular, %d claimed)" % [city_count, irregular, region.urban_block_claims.size()])
 			return
 		var highways := 0
 		for link in region.road_links:
@@ -39,6 +45,10 @@ func _run() -> void:
 			if region.urban_sector_claims.has(UrbanGraph.sector_key(int(candidate["city_id"]), candidate["urban_sector"])):
 				_fail("A suggested phase overlaps built graph blocks")
 				return
+			for cell in candidate["urban_cells"]:
+				if region.urban_block_claims.has(UrbanGraph.block_key(int(candidate["city_id"]), cell)):
+					_fail("A suggested district overlaps already claimed street blocks")
+					return
 		if city_count == 32:
 			var repeated: Dictionary = Setup.build(42, city_count, 0.1)
 			var replica = repeated["region"]
@@ -59,3 +69,13 @@ func _run() -> void:
 func _fail(message: String) -> void:
 	push_error(message)
 	quit(1)
+
+
+func _corner_count(polygon: PackedVector2Array) -> int:
+	var count := 0
+	for index in range(polygon.size()):
+		var incoming: Vector2 = (polygon[index] - polygon[(index + polygon.size() - 1) % polygon.size()]).normalized()
+		var outgoing: Vector2 = (polygon[(index + 1) % polygon.size()] - polygon[index]).normalized()
+		if absf(incoming.cross(outgoing)) > 0.2:
+			count += 1
+	return count

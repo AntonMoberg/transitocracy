@@ -50,6 +50,11 @@ func _run() -> void:
 		push_error("Graph design could not be approved: %s" % approved)
 		quit(1)
 		return
+	for cell in design["urban_cells"]:
+		if not region.urban_block_claims.has(UrbanGraph.block_key(int(design["city_id"]), cell)):
+			push_error("Approval left a hole in its claimed street blocks")
+			quit(1)
+			return
 	Planner.refresh_candidates(region)
 	if not region.development_candidate_keys.has(first_key):
 		push_error("Approved sector vanished after refresh")
@@ -98,6 +103,14 @@ func _run() -> void:
 		return
 	var first_layout = region.neighborhoods[first_id].street_layout
 	var second_layout = region.neighborhoods[second_id].street_layout
+	for overlap in Geometry2D.intersect_polygons(first_layout.polygon, second_layout.polygon):
+		var signed_area := 0.0
+		for vertex in range(overlap.size()):
+			signed_area += overlap[vertex].cross(overlap[(vertex + 1) % overlap.size()])
+		if absf(signed_area) * 0.5 > 0.000001:
+			push_error("Adjacent district outlines overlap after approval")
+			quit(1)
+			return
 	var first_plan = region.neighborhoods[first_id].development_plan
 	var second_plan = region.neighborhoods[second_id].development_plan
 	var shared_node := false

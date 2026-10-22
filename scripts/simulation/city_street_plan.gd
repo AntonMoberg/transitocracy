@@ -1,12 +1,9 @@
 extends RefCounted
 
-const Streamlines = preload("res://scripts/simulation/street_streamline_tracer.gd")
-const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
-
 # Street families belong to the city, not to a candidate neighborhood.  The
 # coordinates below remain stable when candidates are refreshed or approved in
-# a different order.  A built arterial may rotate a future outer district, but
-# it never changes the origin or spacing of the original city family.
+# a different order. An arterial can establish a separate grid family on
+# undeveloped land, but individual city-grid junctions must never drift.
 static func guide(region, city_id: int, _point: Vector2) -> Dictionary:
 	if city_id < 0 or city_id >= region.cities.size():
 		return {}
@@ -46,21 +43,14 @@ static func base_junction(plan: Dictionary, cell: Vector2i) -> Vector2:
 	return plan.get("origin", Vector2.ZERO) + axis * (float(cell.x) * float(plan.get("column_spacing", 0.18))) + axis.orthogonal() * (float(cell.y) * float(plan.get("row_spacing", 0.09)))
 
 
-# Each junction is traced from an absolute city address. A candidate may
-# request any subset of addresses and approval order cannot move them.
-static func junction(region, city_id: int, cell: Vector2i, plan: Dictionary, organic: bool = false) -> Vector2:
-	if region.city_street_revision != region.road_geometry_revision:
-		region.city_street_junctions.clear()
-		region.city_street_revision = region.road_geometry_revision
-	var key: String = "%d:%d:%d:%d" % [city_id, cell.x, cell.y, int(organic)]
-	if region.city_street_junctions.has(key):
-		return region.city_street_junctions[key]
-	var point: Vector2 = base_junction(plan, cell)
-	var axis: Vector2 = plan.get("axis", Vector2.RIGHT).normalized()
-	var context: Dictionary = DirectionField.city_context(region, city_id, Rect2(point - Vector2(0.015, 0.015), Vector2(0.03, 0.03)))
-	var traced: Vector2 = Streamlines.trace_absolute(point, axis, region.generation_seed, city_id, organic, region.cities[city_id]["center_km"], context)
-	region.city_street_junctions[key] = traced
-	return traced
+# Every regular-grid junction has one absolute city address. In particular, a
+# nearby arterial or a district's frontage cannot bend a row of existing
+# addresses. A separately oriented street family uses its own addresses.
+static func junction(region, city_id: int, cell: Vector2i, plan: Dictionary, _organic: bool = false, _supplied_context: Dictionary = {}) -> Vector2:
+	var permanent_key: String = "%d:%d:%d" % [city_id, cell.x, cell.y]
+	if region.urban_locked_junctions.has(permanent_key):
+		return region.urban_locked_junctions[permanent_key]
+	return base_junction(plan, cell)
 
 
 static func block_key(city_id: int, cell: Vector2i, organic: bool = false) -> String:

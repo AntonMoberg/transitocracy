@@ -3,7 +3,7 @@ extends RefCounted
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 
-const ROAD_INFLUENCE_KM = 0.8
+const ROAD_INFLUENCE_KM = 1.4
 const MAX_ROAD_SEGMENTS = 24
 
 
@@ -38,7 +38,11 @@ static func city_context(region, city_id: int, bounds: Rect2) -> Dictionary:
 					if first.distance_squared_to(last) < 0.0001 or not Rect2(first.min(last), (last - first).abs()).grow(ROAD_INFLUENCE_KM).intersects(bounds):
 						continue
 					var near: Vector2 = Geometry2D.get_closest_point_to_segment(bounds.get_center(), first, last)
-					segments.append({"first": first, "last": last, "axis": (last - first).normalized(), "distance": near.distance_squared_to(bounds.get_center())})
+					var segment_axis: Vector2 = (last - first).normalized()
+					var center_side: float = signf(segment_axis.cross(city["center_km"] - near))
+					if center_side == 0.0:
+						center_side = 1.0
+					segments.append({"first": first, "last": last, "axis": segment_axis, "pivot": (link.points[0] + link.points[-1]) * 0.5, "chord_first": link.points[0], "chord_last": link.points[-1], "center_side": center_side, "distance": near.distance_squared_to(bounds.get_center())})
 	segments.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["distance"]) < float(b["distance"]))
 	if segments.size() > MAX_ROAD_SEGMENTS:
 		segments.resize(MAX_ROAD_SEGMENTS)
@@ -60,12 +64,17 @@ static func axis(seed_value: int, city_id: int, point: Vector2, base: Vector2, i
 		var distance: float = point.distance_to(Geometry2D.get_closest_point_to_segment(point, road["first"], road["last"]))
 		if distance >= ROAD_INFLUENCE_KM:
 			continue
-		var strength: float = pow(1.0 - distance / ROAD_INFLUENCE_KM, 2.0)
+		var near: Vector2 = Geometry2D.get_closest_point_to_segment(point, road["first"], road["last"])
+		var side: float = signf(road["axis"].cross(point - near))
+		var side_weight: float = 1.0 if side != float(road.get("center_side", 1.0)) else 0.28
+		var entry: float = smoothstep(0.035, 0.22, distance)
+		var exit_weight: float = 1.0 - smoothstep(0.95, ROAD_INFLUENCE_KM, distance)
+		var strength: float = entry * exit_weight * side_weight
 		if strength > nearest_weight:
 			nearest_weight = strength
 			nearest_axis = road["axis"]
 	if nearest_weight > 0.0:
-		doubled += _axial(_family_axis(nearest_axis, reference_axis)) * nearest_weight * (2.0 if not organic else 2.4)
+		doubled += _axial(_family_axis(nearest_axis, reference_axis)) * nearest_weight * (4.5 if not organic else 2.4)
 	if organic and radial_center.is_finite() and point.distance_squared_to(radial_center) > 0.04:
 		doubled += _axial(_family_axis(point - radial_center, reference_axis)) * 0.38
 	doubled = doubled.normalized()
@@ -84,6 +93,46 @@ static func _family_axis(candidate: Vector2, reference_axis: Vector2) -> Vector2
 static func _axial(direction: Vector2) -> Vector2:
 	var angle: float = direction.angle() * 2.0
 	return Vector2(cos(angle), sin(angle))
+
+
+# A bounded citywide warp lets a diagonal arterial establish a modest second
+# grid orientation without choosing a fresh origin for each district.
+static func arterial_warp(point: Vector2, base_axis: Vector2, context: Dictionary) -> Vector2:
+	var best_weight := 0.0
+	var best: Dictionary = {}
+	for road in context.get("roads", []):
+		var near: Vector2 = Geometry2D.get_closest_point_to_segment(point, road["first"], road["last"])
+		var distance: float = point.distance_to(near)
+		if distance >= ROAD_INFLUENCE_KM:
+			continue
+		var side: float = signf(road["axis"].cross(point - near))
+		var side_weight: float = 1.0 if side != float(road.get("center_side", 1.0)) else 0.18
+		var weight: float = smoothstep(0.03, 0.22, distance) * (1.0 - smoothstep(0.9, ROAD_INFLUENCE_KM, distance)) * side_weight
+		if weight > best_weight:
+			best_weight = weight
+			best = road
+	if best.is_empty():
+		return Vector2.ZERO
+	# A curved arterial bends nearby unbuilt junctions with it. The offset is
+	# sampled from the actual polyline and capped below half a short block;
+	# each absolute junction receives the same result for both districts.
+	var nearest: Vector2 = Geometry2D.get_closest_point_to_segment(point, best["first"], best["last"])
+	var chord_first: Vector2 = best["chord_first"]
+	var chord_last: Vector2 = best["chord_last"]
+	var curve_follow := Vector2.ZERO
+	if chord_first.distance_squared_to(chord_last) > 0.04:
+		var chord_point: Vector2 = Geometry2D.get_closest_point_to_segment(nearest, chord_first, chord_last)
+		curve_follow = (nearest - chord_point).limit_length(0.055) * best_weight * 0.7
+	var reference_axis: Vector2 = base_axis.normalized()
+	var target: Vector2 = _family_axis(best["axis"], reference_axis)
+	if target.dot(reference_axis) < 0.0:
+		target = -target
+	var turn: float = clampf(reference_axis.angle_to(target) * 0.45, deg_to_rad(-15.0), deg_to_rad(15.0))
+	if absf(turn) < deg_to_rad(5.0):
+		return curve_follow
+	var relative: Vector2 = point - best["pivot"]
+	var displacement: Vector2 = relative.rotated(turn) - relative
+	return displacement.limit_length(0.12) * best_weight * 0.5 + curve_follow
 
 
 # Trace a regional corridor through a much broader field than district
