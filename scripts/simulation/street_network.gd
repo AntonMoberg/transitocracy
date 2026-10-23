@@ -9,6 +9,7 @@ const Geography = preload("res://scripts/simulation/state_geography.gd")
 const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 const Paths = preload("res://scripts/simulation/street_paths.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
+const BorderSeams = preload("res://scripts/simulation/city_border_seams.gd")
 
 
 static func attach(region, neighborhood, layout, completed: bool = false) -> void:
@@ -140,6 +141,28 @@ static func open_phase(region, neighborhood, phase: int) -> bool:
 			region.road_links.append(link)
 			if not plan.core_link_ids.has(path_index):
 				plan.core_link_ids[path_index] = link.id
+	# Local streets that end on an arterial are also traffic portals. Their
+	# junctions must exist in the road graph even though local edges are kept
+	# in the neighborhood's lightweight street layout.
+	for edge_id in range(layout.edges.size()):
+		if layout.classes[edge_id] != Roads.LOCAL or layout.phases[edge_id] > phase:
+			continue
+		var edge: Vector2 = layout.edges[edge_id]
+		for local_id in [int(edge.x), int(edge.y)]:
+			if not layout.arterial_nodes.has(local_id) or plan.core_node_ids.has(local_id):
+				continue
+			var on_arterial := false
+			for link_index in Spatial.near_links(region, layout.nodes[local_id]):
+				var nearby = region.road_links[link_index]
+				if nearby.road_class == Roads.ARTERIAL and Planner.closest_point(nearby.points, layout.nodes[local_id]).distance_to(layout.nodes[local_id]) < 0.002:
+					on_arterial = true
+					break
+			if not on_arterial:
+				continue
+			var node_id: int = ensure_node(region, layout.nodes[local_id], neighborhood.city_id)
+			plan.core_node_ids[local_id] = node_id
+			if not neighborhood.access_node_ids.has(node_id):
+				neighborhood.access_node_ids.append(node_id)
 	if neighborhood.access_node_ids.size() < 2:
 		for edge_id in range(layout.edges.size()):
 			if layout.classes[edge_id] != Roads.COLLECTOR or layout.phases[edge_id] > phase:
@@ -158,6 +181,9 @@ static func open_phase(region, neighborhood, phase: int) -> bool:
 					break
 			if neighborhood.access_node_ids.size() >= 2:
 				break
+	if phase >= 1:
+		var resolve_node: Callable = func(point: Vector2, target_city: int) -> int: return ensure_node(region, point, target_city)
+		BorderSeams.install(region, neighborhood, resolve_node)
 	plan.installed_multiplier = paid_multiplier
 	plan.completed_phase = phase
 	plan.constructing_phase = 0

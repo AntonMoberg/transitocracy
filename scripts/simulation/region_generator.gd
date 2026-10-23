@@ -100,7 +100,17 @@ static func _generate(seed_value: int, city_count: int, neighborhood_count: int,
 
 
 static func _seed_anchor_neighborhoods(region) -> void:
+	# Keep the statewide starting population of districts stable while giving
+	# each settlement a different sized core.
+	var counts: Array[int] = [2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
+	var order: Array[int] = region.starting_city_ids.duplicate()
+	order.sort_custom(func(a: int, b: int) -> bool:
+		return hash("%d:starting-core:%d" % [region.generation_seed, a]) < hash("%d:starting-core:%d" % [region.generation_seed, b])
+	)
+	for index in range(order.size()):
+		region.cities[order[index]]["initial_neighborhood_count"] = counts[index] if index < counts.size() else 4
 	for city_id in region.starting_city_ids:
+		var target: int = int(region.cities[city_id]["initial_neighborhood_count"])
 		var center: Vector2 = region.cities[city_id]["center_km"]
 		var origin: Vector2i = StateGeography.cell_grid_at_point(region.generation_seed, center)
 		var occupied: Dictionary = {}
@@ -110,7 +120,7 @@ static func _seed_anchor_neighborhoods(region) -> void:
 		for radius in range(1, 10):
 			for offset_y in range(-radius, radius + 1):
 				for offset_x in range(-radius, radius + 1):
-					if maxi(absi(offset_x), absi(offset_y)) != radius or added >= 3:
+					if maxi(absi(offset_x), absi(offset_y)) != radius or added >= target - 1:
 						continue
 					var grid := origin + Vector2i(offset_x, offset_y)
 					if occupied.has(grid):
@@ -124,7 +134,7 @@ static func _seed_anchor_neighborhoods(region) -> void:
 					append_neighborhood(region, city_id, polygon, grid, false)
 					occupied[grid] = true
 					added += 1
-			if added >= 3:
+			if added >= target - 1:
 				break
 
 

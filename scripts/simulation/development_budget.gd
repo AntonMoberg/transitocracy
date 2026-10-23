@@ -119,7 +119,7 @@ static func zoning_estimate(neighborhood, shares: Dictionary, density: Dictionar
 	return {"housing": housing, "jobs": jobs, "multiplier": multiplier, "remaining": remaining, "next_cost": next_cost, "top_up": maxi(0, remaining - neighborhood.development_plan.reserved)}
 
 
-static func advance_day(region, day_key: int) -> bool:
+static func advance_day(region, day_key: int, changed_city_ids: Array[int] = []) -> bool:
 	var changed := false
 	var rooted: PackedByteArray = RoadGraph.nodes_connected_to_start(region)
 	for neighborhood in region.neighborhoods:
@@ -136,9 +136,19 @@ static func advance_day(region, day_key: int) -> bool:
 					link.lanes_per_direction = maxi(link.lanes_per_direction, ceili(plan.installed_multiplier))
 			region.road_geometry_revision += 1
 			changed = true
+			if not changed_city_ids.has(neighborhood.city_id):
+				changed_city_ids.append(neighborhood.city_id)
 		if plan.constructing_phase > 0 and plan.open_day <= day_key:
 			var opening_phase: int = plan.constructing_phase
-			changed = StreetNetwork.open_phase(region, neighborhood, opening_phase) or changed
+			var opened: bool = StreetNetwork.open_phase(region, neighborhood, opening_phase)
+			changed = opened or changed
+			if opened:
+				if not changed_city_ids.has(neighborhood.city_id):
+					changed_city_ids.append(neighborhood.city_id)
+				for seam in neighborhood.street_layout.border_seams:
+					for city_id in [seam["cities"].x, seam["cities"].y]:
+						if not changed_city_ids.has(city_id):
+							changed_city_ids.append(city_id)
 			UrbanGraph.mark_built(region, neighborhood.street_layout, opening_phase)
 		if not plan.active:
 			plan.status = "Cancelled"

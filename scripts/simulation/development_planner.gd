@@ -16,9 +16,10 @@ const GraphGrowth = preload("res://scripts/simulation/graph_growth_planner.gd")
 const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
 
 
-static func refresh_candidates(region) -> void:
+static func refresh_candidates(region, changed_city_ids: Array[int] = []) -> void:
 	var selected_designs: Dictionary = {}
 	var selected_characters: Dictionary = {}
+	var previous_candidates: Array = region.development_candidates.duplicate()
 	for candidate in region.development_candidates:
 		if int(candidate["neighborhood_id"]) >= 0:
 			continue
@@ -29,8 +30,12 @@ static func refresh_candidates(region) -> void:
 	region.development_candidate_keys.clear()
 	region.development_candidate_cells.clear()
 	region.development_candidate_city_ids.clear()
+	if not changed_city_ids.is_empty():
+		for candidate in previous_candidates:
+			if not changed_city_ids.has(int(candidate["city_id"])):
+				_index_candidate(region, candidate.duplicate())
 	for neighborhood in region.neighborhoods:
-		if neighborhood.street_layout == null:
+		if neighborhood.street_layout == null or not changed_city_ids.is_empty() and not changed_city_ids.has(neighborhood.city_id):
 			continue
 		var frontage_id := -1
 		if not neighborhood.street_layout.arterial_nodes.is_empty():
@@ -41,7 +46,8 @@ static func refresh_candidates(region) -> void:
 					frontage_id = link.id
 					break
 		_register_candidate(region, neighborhood.street_layout, neighborhood.id, frontage_id)
-	for proposal in GraphGrowth.proposals(region):
+	var proposals: Array[Dictionary] = GraphGrowth.proposals(region, changed_city_ids)
+	for proposal in proposals:
 		var sector: Vector2i = proposal["sector"]
 		var city_id: int = proposal["layout"].city_id
 		var key: String = proposal["layout"].key
@@ -53,7 +59,9 @@ static func refresh_candidates(region) -> void:
 		_register_candidate(region, layout, -1, int(generated["frontage_id"]))
 		var candidate: Dictionary = region.development_candidates[-1]
 		candidate["urban_sector"] = sector
-		candidate["urban_cells"] = UrbanGraph.district_cells(region, city_id, sector)
+		var owned_cells: Array[Vector2i] = UrbanGraph.district_cells(region, city_id, sector).duplicate()
+		owned_cells.append_array(layout.border_cells)
+		candidate["urban_cells"] = owned_cells
 		candidate["design_variant"] = variant
 		candidate["design_override"] = selected_designs.has(key)
 		candidate["priority"] = proposal["priority"]
@@ -98,14 +106,21 @@ static func _register_candidate(region, layout, neighborhood_id: int, frontage_i
 	else:
 		var defaults: Dictionary = RegionGenerator.zone_defaults(region, layout.city_id, grid)
 		character_profile = Character.resolve(region, layout.city_id, area.center_km, layout.interior_style, defaults["shares"], defaults["density"])
-	region.development_candidates.append({"id": candidate_id, "key": layout.key, "city_id": layout.city_id, "grid": grid, "polygon": layout.polygon, "center_km": area.center_km, "frontage_link_id": frontage_id, "neighborhood_id": neighborhood_id, "layout": layout, "character_override": Character.AUTO, "character_profile": character_profile})
-	region.development_candidate_keys[layout.key] = candidate_id
-	if not region.development_candidate_city_ids.has(layout.city_id):
-		region.development_candidate_city_ids[layout.city_id] = []
-	region.development_candidate_city_ids[layout.city_id].append(candidate_id)
+	_index_candidate(region, {"id": candidate_id, "key": layout.key, "city_id": layout.city_id, "grid": grid, "polygon": layout.polygon, "center_km": area.center_km, "frontage_link_id": frontage_id, "neighborhood_id": neighborhood_id, "layout": layout, "character_override": Character.AUTO, "character_profile": character_profile})
+
+
+static func _index_candidate(region, candidate: Dictionary) -> void:
+	var candidate_id: int = region.development_candidates.size()
+	candidate["id"] = candidate_id
+	region.development_candidates.append(candidate)
+	region.development_candidate_keys[candidate["key"]] = candidate_id
+	var city_id: int = int(candidate["city_id"])
+	if not region.development_candidate_city_ids.has(city_id):
+		region.development_candidate_city_ids[city_id] = []
+	region.development_candidate_city_ids[city_id].append(candidate_id)
 	var low := Vector2(INF, INF)
 	var high := Vector2(-INF, -INF)
-	for point in layout.polygon:
+	for point in candidate["polygon"]:
 		var axial: Vector2 = Geography.cell_axial_coordinates(point)
 		low = low.min(axial)
 		high = high.max(axial)

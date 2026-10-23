@@ -21,6 +21,8 @@ var corridor_id: int = -1
 var corridor_start_km: float = 0.0
 var managed_neighborhood_id: int = -1
 var crossings: Array[Dictionary] = []
+var border_city_ids: Vector2i = Vector2i(-1, -1)
+var border_seam_key: String = ""
 
 
 static func construction_cost(link_class: String) -> float:

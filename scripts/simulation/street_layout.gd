@@ -27,6 +27,8 @@ var closed_edges: Dictionary = {}
 var canonical_nodes: Dictionary = {}
 var canonical_edges: Dictionary = {}
 var grade_separated_edges: Dictionary = {}
+var border_seams: Array[Dictionary] = []
+var border_cells: Array[Vector2i] = []
 
 
 func copy():

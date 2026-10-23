@@ -19,10 +19,14 @@ static func advance_day(region, day_key: int, previous_flow, previous_state) -> 
 	var timings: Dictionary = {}
 	region.current_day_key = day_key
 	FiscalCalculator.apply_due_policies(region, day_key * 86400)
-	var roads_changed: bool = RoadPlanner.advance_day(region, day_key)
-	roads_changed = DevelopmentBudget.advance_day(region, day_key) or roads_changed
+	var project_roads_changed: bool = RoadPlanner.advance_day(region, day_key)
+	var changed_city_ids: Array[int] = []
+	var roads_changed: bool = DevelopmentBudget.advance_day(region, day_key, changed_city_ids) or project_roads_changed
 	if roads_changed:
-		DevelopmentPlanner.refresh_candidates(region)
+		var refresh_city_ids: Array[int] = []
+		if not project_roads_changed:
+			refresh_city_ids = changed_city_ids
+		DevelopmentPlanner.refresh_candidates(region, refresh_city_ids)
 		region.city_od_candidates.clear()
 		AccessibilityCalculator.recalculate(region)
 	elif previous_flow != null and previous_state != null:

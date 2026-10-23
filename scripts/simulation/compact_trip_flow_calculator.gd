@@ -13,6 +13,31 @@ const WEEKDAY_SOCIAL_VISITS_PER_PERSON = 0.18
 const WEEKEND_SOCIAL_VISITS_PER_PERSON = 0.32
 
 
+static func extend_for_empty_districts(previous, region):
+	var profile = FlowProfile.new()
+	profile.is_compact = true
+	profile.compact_region = region
+	profile.active_day_key = previous.active_day_key
+	profile.active_weekend = previous.active_weekend
+	profile.daily_commuters = previous.daily_commuters
+	profile.compact_city_od = previous.compact_city_od.duplicate()
+	profile.compact_region_od = previous.compact_region_od.duplicate()
+	profile.compact_curves = previous.compact_curves.duplicate()
+	profile.peak_net_trips_by_purpose = previous.peak_net_trips_by_purpose.duplicate()
+	profile.hourly_trips = previous.hourly_trips
+	profile.hourly_work_trips = previous.hourly_work_trips
+	profile.hourly_shopping_trips = previous.hourly_shopping_trips
+	profile.hourly_social_trips = previous.hourly_social_trips
+	for purpose in [FlowProfile.WORK, FlowProfile.COMMERCIAL, FlowProfile.SOCIAL]:
+		var origin: PackedFloat32Array = previous.compact_origin_daily[purpose].duplicate()
+		var destination: PackedFloat32Array = previous.compact_destination_daily[purpose].duplicate()
+		origin.resize(region.neighborhoods.size())
+		destination.resize(region.neighborhoods.size())
+		profile.compact_origin_daily[purpose] = origin
+		profile.compact_destination_daily[purpose] = destination
+	return profile
+
+
 static func build(region):
 	var stage_started: int = Time.get_ticks_usec()
 	var profile = FlowProfile.new()

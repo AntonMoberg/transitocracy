@@ -68,7 +68,7 @@ static func initialize_development(region) -> void:
 		neighborhood.people_per_household = float(neighborhood.population) / maxf(1.0, float(neighborhood.households))
 		neighborhood.baseline_monthly_rent = neighborhood.monthly_rent
 		var local_id: int = region.cities[neighborhood.city_id]["neighborhood_ids"].find(neighborhood.id)
-		neighborhood.initially_developed = region.starting_city_ids.has(neighborhood.city_id) and local_id < 4
+		neighborhood.initially_developed = region.starting_city_ids.has(neighborhood.city_id) and local_id < int(region.cities[neighborhood.city_id].get("initial_neighborhood_count", 4))
 		neighborhood.development_approved = neighborhood.initially_developed
 		neighborhood.development_state = "Established" if neighborhood.initially_developed else "Dormant"
 		if not neighborhood.initially_developed:

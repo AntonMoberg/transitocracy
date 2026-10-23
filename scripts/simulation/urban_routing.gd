@@ -31,13 +31,23 @@ static func prepare(region, costs: PackedVector2Array = PackedVector2Array()) ->
 		graph["ids"].append(node.id)
 	for link_index in range(region.road_links.size()):
 		var link = region.road_links[link_index]
-		var city_id: int = region.road_nodes[link.from_node_id].city_id
-		if city_id < 0 or link.road_class == Roads.HIGHWAY or region.road_nodes[link.to_node_id].city_id != city_id:
+		if link.road_class == Roads.HIGHWAY:
 			continue
-		var graph: Dictionary = graphs[city_id]
-		graph["edges"].append(Vector2(graph["lookup"][link.from_node_id], graph["lookup"][link.to_node_id]))
-		graph["links"].append(link_index)
-		graph["costs"].append(link.length_km * 60.0 / RoadGraph.free_speed_kmh(link.road_class) if costs.is_empty() else (costs[link_index].x + costs[link_index].y) * 0.5)
+		var members: Array[int] = []
+		for city_id in [region.road_nodes[link.from_node_id].city_id, region.road_nodes[link.to_node_id].city_id, link.border_city_ids.x, link.border_city_ids.y]:
+			if city_id >= 0 and not members.has(city_id):
+				members.append(city_id)
+		for city_id in members:
+			if not graphs.has(city_id):
+				graphs[city_id] = {"lookup": {}, "ids": PackedInt32Array(), "edges": PackedVector2Array(), "links": PackedInt32Array(), "costs": PackedFloat32Array(), "trees": {}}
+			var graph: Dictionary = graphs[city_id]
+			for node_id in [link.from_node_id, link.to_node_id]:
+				if not graph["lookup"].has(node_id):
+					graph["lookup"][node_id] = graph["ids"].size()
+					graph["ids"].append(node_id)
+			graph["edges"].append(Vector2(graph["lookup"][link.from_node_id], graph["lookup"][link.to_node_id]))
+			graph["links"].append(link_index)
+			graph["costs"].append(link.length_km * 60.0 / RoadGraph.free_speed_kmh(link.road_class) if costs.is_empty() else (costs[link_index].x + costs[link_index].y) * 0.5)
 	for city_id in graphs:
 		var graph: Dictionary = graphs[city_id]
 		graph["adjacency"] = Paths.adjacency(graph["ids"].size(), graph["edges"])
@@ -105,6 +115,13 @@ static func hub_route(region, neighborhood_id: int) -> Dictionary:
 
 
 static func assign_local(region, profile, hour: int, volumes: PackedVector2Array) -> void:
+	# District approval can briefly outpace the rebuilt demand profile. Keep a
+	# mode switch from indexing neighborhoods absent from that older profile.
+	for purpose in Purposes:
+		if not profile.compact_origin_daily.has(purpose) or not profile.compact_destination_daily.has(purpose) or not profile.compact_city_od.has(purpose):
+			return
+		if profile.compact_origin_daily[purpose].size() < region.neighborhoods.size() or profile.compact_destination_daily[purpose].size() < region.neighborhoods.size() or profile.compact_city_od[purpose].size() < region.cities.size():
+			return
 	prepare(region)
 	for city in region.cities:
 		var ids: Array = city["neighborhood_ids"]

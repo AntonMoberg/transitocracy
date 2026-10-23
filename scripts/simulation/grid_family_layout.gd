@@ -599,7 +599,7 @@ static func _add_lattice(layout, part: PackedVector2Array, chart: Dictionary, va
 			var piece_index := 0
 			for clipped in Geometry2D.intersect_polygons(quad, part):
 				piece_index += 1
-				if clipped.size() < 3 or Geography.polygon_area(clipped) < MIN_BLOCK_AREA_KM2 or Geometry2D.triangulate_polygon(clipped).is_empty():
+				if clipped.size() < 3 or Geography.polygon_area(clipped) < MIN_BLOCK_AREA_KM2 or LayoutGenerator.triangulate(clipped).is_empty():
 					continue
 				var vertices := PackedInt32Array()
 				for point in clipped:
@@ -689,7 +689,7 @@ static func _point_on_arterial(point: Vector2, road_context: Dictionary) -> bool
 
 
 static func _road_already_covers(first: Vector2, last: Vector2, road_context: Dictionary) -> bool:
-	return LayoutGenerator._near_field_arterial(first, last, road_context, 0.055)
+	return LayoutGenerator._near_field_arterial(first, last, road_context, 0.075)
 
 
 static func _on_chart_divider(first: Vector2, last: Vector2, chart: Dictionary) -> bool:

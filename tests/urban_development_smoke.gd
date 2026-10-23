@@ -50,12 +50,13 @@ func _run() -> void:
 			for footprint in footprints:
 				for vertex in footprint:
 					_check(preload("res://scripts/simulation/jurisdiction_data.gd").polygon_contains_point(vertex, block["polygon"]), "buildings must stay inside their blocks")
-	_check(developed == 40 and local_edges > 4000, "ten starting cities must retain four developed neighborhoods with dense local networks")
+	_check(developed == 40 and local_edges > 4000, "ten starting cities must retain forty developed neighborhoods with dense local networks")
 	_check(grid_blocks > 1000, "starting neighborhoods must keep predominantly square or rectangular street blocks")
 	var original_layout = region.neighborhoods[0].street_layout
 	var repeat: Dictionary = Setup.build(1729, 256, 0.1)
 	_check(repeat["region"].neighborhoods[0].street_layout.nodes == original_layout.nodes, "street generation must reproduce the same seed")
-	_check(UrbanRouting.route(region, 0, region.cities[0]["neighborhood_ids"][3])["minutes"] < RoadGraph.UNREACHABLE_MINUTES, "same-city travel must follow actual connected streets")
+	var city_zero_ids: Array = region.cities[0]["neighborhood_ids"]
+	_check(UrbanRouting.route(region, 0, city_zero_ids[city_zero_ids.size() - 1])["minutes"] < RoadGraph.UNREACHABLE_MINUTES, "same-city travel must follow actual connected streets")
 	_check(Traffic.fork_for_week(setup["traffic_state"]).local_districts.has(0), "worker forks must retain local traffic")
 	var candidate_id := -1
 	for candidate in region.development_candidates:

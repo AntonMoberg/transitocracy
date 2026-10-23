@@ -45,6 +45,7 @@ var compact_hour_buffer
 var compact_hour_prepared_count: int = 0
 var active_snapshot_buffers: Array = []
 var deferred_region_edits: Array[Callable] = []
+var deferred_mode_index: int = -1
 var pending_day_key: int = -1
 var pending_day_source_mode: int = -1
 var pending_day_result: Dictionary = {}
@@ -187,6 +188,10 @@ func _process(delta: float) -> void:
 		_poll_week_worker()
 	if _region_snapshot_busy():
 		return
+	if deferred_mode_index >= 0:
+		var requested_mode: int = deferred_mode_index
+		deferred_mode_index = -1
+		_on_mode_selected(requested_mode)
 	if not deferred_region_edits.is_empty():
 		var edits: Array[Callable] = deferred_region_edits.duplicate()
 		deferred_region_edits.clear()
@@ -765,6 +770,12 @@ func _on_speed_selected(index: int) -> void:
 
 
 func _on_mode_selected(index: int) -> void:
+	# A new district changes the neighborhood count immediately, while its
+	# matching demand and traffic profiles arrive from the rebuild worker.
+	if region != null and _region_snapshot_busy():
+		deferred_mode_index = index
+		mode_selector.select(simulation_mode)
+		return
 	if index < 0 or index > MultiScaleTraffic.DAY:
 		return
 	if index >= MultiScaleTraffic.HOUR and region != null and selected_jurisdiction_id >= 0:
@@ -1069,6 +1080,7 @@ func _poll_generation() -> void:
 func _apply_generated_region(result: Dictionary) -> void:
 	_discard_pending_day()
 	deferred_region_edits.clear()
+	deferred_mode_index = -1
 	region = result["region"]
 	region.dev_mode = dev_mode_enabled
 	flow_profile = result["flow"]
@@ -1768,7 +1780,7 @@ func _apply_candidate_approval(candidate_id: int, approved: bool, allocation: in
 	_discard_pending_day()
 	_refresh_region_summary()
 	if result["new_neighborhood"]:
-		_rebuild_after_road_change()
+		_rebuild_after_road_change([int(candidate["city_id"])], true)
 	else:
 		_invalidate_traffic_forecast()
 		_queue_next_day(last_dynamics_day_key)
@@ -2212,12 +2224,12 @@ func _update_road_status() -> void:
 		road_status_label.text = "Draw roads between nodes  •  Junctions connect arterials  •  Highways need interchanges"
 
 
-func _rebuild_after_road_change() -> void:
+func _rebuild_after_road_change(changed_city_ids: Array[int] = [], new_district_only: bool = false) -> void:
 	_discard_pending_day()
 	map_view.set_hour_carry_summary({})
 	if region.is_large_scale:
 		var worker := Thread.new()
-		var task := Callable(RoadRebuild, "build").bind(region, traffic_state, calendar_clock.unix_seconds)
+		var task := Callable(RoadRebuild, "build").bind(region, traffic_state, calendar_clock.unix_seconds, changed_city_ids, flow_profile, new_district_only)
 		if worker.start(task, Thread.PRIORITY_NORMAL) == OK:
 			road_rebuild_thread = worker
 			discard_road_rebuild = false
@@ -2227,7 +2239,7 @@ func _rebuild_after_road_change() -> void:
 			return
 		push_warning("Could not start road rebuild worker; calculating on the main thread.")
 	var previous_state = traffic_state
-	DevelopmentPlanner.refresh_candidates(region)
+	DevelopmentPlanner.refresh_candidates(region, changed_city_ids)
 	region.city_od_candidates.clear()
 	AccessibilityCalculator.recalculate(region)
 	flow_profile = TripFlowCalculator.build(region)
@@ -2351,6 +2363,8 @@ func _approve_review_keys(keys: Array[String]) -> void:
 		return
 	var approved := 0
 	var last_reason := ""
+	var changed_city_ids: Array[int] = []
+	var new_district_only := true
 	for key in keys:
 		var candidate_id: int = int(region.development_candidate_keys.get(key, -1))
 		if candidate_id < 0:
@@ -2358,11 +2372,15 @@ func _approve_review_keys(keys: Array[String]) -> void:
 		var result: Dictionary = DevelopmentPlanner.set_approval(region, candidate_id, true)
 		if result["ok"]:
 			approved += 1
+			new_district_only = new_district_only and bool(result["new_neighborhood"])
+			var city_id: int = int(region.development_candidates[candidate_id]["city_id"])
+			if not changed_city_ids.has(city_id):
+				changed_city_ids.append(city_id)
 		else:
 			last_reason = result["reason"]
 	if approved > 0:
 		_discard_pending_day()
-		_rebuild_after_road_change()
+		_rebuild_after_road_change(changed_city_ids, new_district_only)
 	zoning_tool_message = "%d project%s approved.%s" % [approved, "s" if approved != 1 else "", "  " + last_reason if not last_reason.is_empty() else ""]
 	_refresh_review_queue()
 

@@ -66,6 +66,10 @@ static func _copy_large_region(source):
 	copy.urban_plan_edges = source.urban_plan_edges.duplicate(true)
 	copy.urban_locked_junctions = source.urban_locked_junctions.duplicate(true)
 	copy.urban_grid_domains = source.urban_grid_domains.duplicate(true)
+	copy.urban_sector_merges = source.urban_sector_merges.duplicate(true)
+	copy.urban_sector_merge_members = source.urban_sector_merge_members.duplicate(true)
+	copy.urban_district_cells = source.urban_district_cells.duplicate(true)
+	copy.city_border_seams = source.city_border_seams.duplicate(true)
 	copy.urban_corridors = source.urban_corridors.duplicate(true)
 	copy.rail_reservations = source.rail_reservations.duplicate(true)
 	copy.station_sites = source.station_sites.duplicate(true)
@@ -182,6 +186,8 @@ static func _copy_large_region(source):
 		link.corridor_start_km = original.corridor_start_km
 		link.managed_neighborhood_id = original.managed_neighborhood_id
 		link.crossings = original.crossings.duplicate(true)
+		link.border_city_ids = original.border_city_ids
+		link.border_seam_key = original.border_seam_key
 		copy.road_links.append(link)
 	copy.road_projects = []
 	for original in source.road_projects:
@@ -196,13 +202,15 @@ static func release_retired_data(payload: Dictionary) -> void:
 static func advance_day(region, day_key: int, previous_flow, previous_traffic, previous_state = null) -> Dictionary:
 	region.current_day_key = day_key
 	FiscalCalculator.apply_due_policies(region, day_key * 86400)
-	var roads_changed: bool = RoadPlanner.advance_day(region, day_key)
-	roads_changed = DevelopmentBudget.advance_day(region, day_key) or roads_changed
-	if roads_changed:
-		DevelopmentPlanner.refresh_candidates(region)
+	var project_roads_changed: bool = RoadPlanner.advance_day(region, day_key)
+	var changed_city_ids: Array[int] = []
+	var roads_changed: bool = DevelopmentBudget.advance_day(region, day_key, changed_city_ids) or project_roads_changed
 	roads_changed = DevelopmentPlanner.advance_growth_policies(region, day_key) or roads_changed
 	if roads_changed:
-		DevelopmentPlanner.refresh_candidates(region)
+		var refresh_city_ids: Array[int] = []
+		if not project_roads_changed:
+			refresh_city_ids = changed_city_ids
+		DevelopmentPlanner.refresh_candidates(region, refresh_city_ids)
 		AccessibilityCalculator.recalculate(region)
 	elif previous_flow != null and previous_traffic != null and previous_state != null and previous_state.next_bin >= 96:
 		var weighted_times: Array[PackedFloat32Array] = RoadTrafficCalculator.generalized_travel_times(region, previous_flow, previous_traffic)

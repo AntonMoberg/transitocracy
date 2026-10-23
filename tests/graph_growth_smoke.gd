@@ -23,8 +23,16 @@ func _run() -> void:
 		return
 	var choice := -1
 	for candidate in region.development_candidates:
-		if int(candidate["neighborhood_id"]) < 0 and candidate.has("urban_sector"):
-			choice = int(candidate["id"])
+		if int(candidate["neighborhood_id"]) >= 0 or not candidate.has("urban_sector"):
+			continue
+		for other in region.development_candidates:
+			if int(other["neighborhood_id"]) >= 0 or not other.has("urban_sector") or int(other["city_id"]) != int(candidate["city_id"]):
+				continue
+			var offset: Vector2i = other["urban_sector"] - candidate["urban_sector"]
+			if absi(offset.x) + absi(offset.y) == 1:
+				choice = int(candidate["id"])
+				break
+		if choice >= 0:
 			break
 	if choice < 0:
 		push_error("No graph growth proposal")

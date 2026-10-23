@@ -380,6 +380,8 @@ static func _split_link(region, link_id: int, new_node_id: int, point: Vector2) 
 	region.road_links[-1].corridor_id = old_link.corridor_id if old_link.corridor_id >= 0 else old_link.id
 	region.road_links[-1].corridor_start_km = old_link.corridor_start_km + old_link.length_km
 	region.road_links[-1].managed_neighborhood_id = old_link.managed_neighborhood_id
+	region.road_links[-1].border_city_ids = old_link.border_city_ids
+	region.road_links[-1].border_seam_key = old_link.border_seam_key
 
 
 static func _append_link(region, from_id: int, to_id: int, road_class: String, lanes: int, points: PackedVector2Array, owner_id: int) -> void:
