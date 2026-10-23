@@ -4,14 +4,14 @@ const Geography = preload("res://scripts/simulation/state_geography.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
 
 
-static func buildings(block: Dictionary, zone: String, density: int, character: String = Character.FINE_GRAIN) -> Array:
+static func buildings(block: Dictionary, zone: String, density: int, character: String = Character.FINE_GRAIN, terrain = null) -> Array:
 	var result: Array = []
-	for parcel in parcels(block, zone, density, character):
+	for parcel in parcels(block, zone, density, character, terrain):
 		result.append_array(parcel["buildings"])
 	return result
 
 
-static func parcels(block: Dictionary, zone: String, density: int, character: String = Character.FINE_GRAIN) -> Array[Dictionary]:
+static func parcels(block: Dictionary, zone: String, density: int, character: String = Character.FINE_GRAIN, terrain = null) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	if block["park"]:
 		return result
@@ -92,7 +92,7 @@ static func parcels(block: Dictionary, zone: String, density: int, character: St
 						origin + axis * rect.position.x + normal * rect.end.y,
 					])
 					for footprint in Geometry2D.intersect_polygons(lot, envelope):
-						if footprint.size() >= 3 and Geography.polygon_area(footprint) >= 0.000012:
+						if footprint.size() >= 3 and Geography.polygon_area(footprint) >= 0.000012 and (terrain == null or terrain.footprint_buildable(footprint)):
 							footprints.append(footprint)
 			result.append({"polygon": lot, "buildings": footprints})
 	return result

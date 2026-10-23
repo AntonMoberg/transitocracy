@@ -10,6 +10,7 @@ const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 const Paths = preload("res://scripts/simulation/street_paths.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
 const BorderSeams = preload("res://scripts/simulation/city_border_seams.gd")
+const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
 
 
 static func attach(region, neighborhood, layout, completed: bool = false) -> void:
@@ -138,6 +139,8 @@ static func open_phase(region, neighborhood, phase: int) -> bool:
 			link.owner_jurisdiction_id = region.city_jurisdiction_ids[neighborhood.city_id]
 			link.managed_neighborhood_id = neighborhood.id
 			link.recalculate_length()
+			if region.terrain != null:
+				link.terrain_spans = RoadTerrain.spans(region, link.points, road_class)
 			region.road_links.append(link)
 			if not plan.core_link_ids.has(path_index):
 				plan.core_link_ids[path_index] = link.id

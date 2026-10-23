@@ -2,6 +2,7 @@ extends RefCounted
 
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
+const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
 
 const PIECE_KM = 0.5
 const FRONTAGE_REACH_KM = 0.36
@@ -64,9 +65,10 @@ static func plan(region, layout) -> void:
 						continue
 					joined[key] = true
 					var costed: bool = not region.city_border_seams.has(key)
-					layout.border_seams.append({"key": key, "cities": Vector2i(first_id, maxi(city_id, other_id)), "from": start, "to": finish, "anchor": -1, "costed": costed})
+					var terrain_cost: int = int(RoadTerrain.preview(region, PackedVector2Array([start, finish]), Roads.COLLECTOR, true).get("cost", 0)) if region.terrain != null else 0
+					layout.border_seams.append({"key": key, "cities": Vector2i(first_id, maxi(city_id, other_id)), "from": start, "to": finish, "anchor": -1, "costed": costed, "terrain_cost": terrain_cost})
 					if costed:
-						layout.phase_costs[0] += roundi(PIECE_KM * Roads.construction_cost(Roads.COLLECTOR))
+						layout.phase_costs[0] += roundi(PIECE_KM * Roads.construction_cost(Roads.COLLECTOR)) + terrain_cost
 						layout.phase_upkeep[0] += PIECE_KM * Roads.upkeep(Roads.COLLECTOR)
 	if layout.border_seams.is_empty():
 		return
@@ -92,7 +94,7 @@ static func finalize(region, layout) -> void:
 			seam["anchor"] = -1
 			retained.append(seam)
 		elif seam["costed"]:
-			layout.phase_costs[0] -= roundi(PIECE_KM * Roads.construction_cost(Roads.COLLECTOR))
+			layout.phase_costs[0] -= roundi(PIECE_KM * Roads.construction_cost(Roads.COLLECTOR)) + int(seam.get("terrain_cost", 0))
 			layout.phase_upkeep[0] -= PIECE_KM * Roads.upkeep(Roads.COLLECTOR)
 	layout.border_seams = retained
 	if not retained.is_empty():
@@ -172,7 +174,7 @@ static func _assign_anchor(region, layout) -> void:
 		# A border frontage without a street approach cannot be activated.
 		for seam in layout.border_seams:
 			if seam["costed"]:
-				layout.phase_costs[0] -= roundi(PIECE_KM * Roads.construction_cost(Roads.COLLECTOR))
+				layout.phase_costs[0] -= roundi(PIECE_KM * Roads.construction_cost(Roads.COLLECTOR)) + int(seam.get("terrain_cost", 0))
 				layout.phase_upkeep[0] -= PIECE_KM * Roads.upkeep(Roads.COLLECTOR)
 		layout.border_seams.clear()
 		return
@@ -203,7 +205,7 @@ static func install(region, neighborhood, ensure_node: Callable) -> void:
 		var key: String = seam["key"]
 		if region.city_border_seams.has(key):
 			if seam["costed"] and plan.constructing_phase == 1:
-				var refund: int = roundi(PIECE_KM * Roads.construction_cost(Roads.COLLECTOR) * plan.capacity_multiplier)
+				var refund: int = roundi((PIECE_KM * Roads.construction_cost(Roads.COLLECTOR) + float(seam.get("terrain_cost", 0))) * plan.capacity_multiplier)
 				plan.spent = maxi(0, plan.spent - refund)
 				if not region.dev_mode:
 					plan.reserved += refund
@@ -223,6 +225,8 @@ static func install(region, neighborhood, ensure_node: Callable) -> void:
 		link.border_city_ids = seam["cities"]
 		link.border_seam_key = key
 		link.recalculate_length()
+		if region.terrain != null:
+			link.terrain_spans = RoadTerrain.spans(region, link.points, link.road_class)
 		region.road_links.append(link)
 		region.city_border_seams[key] = link.id
 	for seam in layout.border_seams:

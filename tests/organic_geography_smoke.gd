@@ -57,7 +57,8 @@ func _run() -> void:
 					var neighborhood = region.neighborhoods[neighborhood_id]
 					var district = region.jurisdictions[neighborhood.jurisdiction_id]
 					_check(district.polygon_km.size() >= 3 and district.contains_point(neighborhood.position_km), "neighborhoods need selectable polygon boundaries")
-					_check(region.jurisdiction_at_point(neighborhood.position_km) == district.id, "neighborhood ownership must follow parcel borders")
+					var expected_owner: int = district.id if neighborhood.street_layout != null else region.city_jurisdiction_ids[neighborhood.city_id]
+					_check(region.jurisdiction_at_point(neighborhood.position_km) == expected_owner, "undeveloped parcels belong to their city until street layouts are installed")
 					_check(is_equal_approx(neighborhood.land_area_ha, StateGeography._area(district.polygon_km) * 100.0), "neighborhood land area must include its entire boundary")
 					_check(neighborhood.developable_area_ha > 0.0 and neighborhood.developable_area_ha <= minf(130.0, neighborhood.land_area_ha), "larger administrative boundaries must not inflate developable housing and job capacity")
 			_check(neighborhood_counts.size() >= 2, "anchor and dormant cities must have different neighborhood counts")

@@ -11,6 +11,7 @@ const StreetNetwork = preload("res://scripts/simulation/street_network.gd")
 const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
 const GridFamily = preload("res://scripts/simulation/grid_family_layout.gd")
 const BorderSeams = preload("res://scripts/simulation/city_border_seams.gd")
+const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
 
 # Absolute city addresses own junctions and blocks. Seeded shared seams
 # divide them into connected districts; all designs keep the same perimeter
@@ -103,7 +104,7 @@ static func build_starting_city(region, city: Dictionary) -> void:
 		var generated: Dictionary = make_layout(region, city_id, sector)
 		var layout = generated["layout"]
 		if generated["frontage_id"] < 0 or layout.core_paths.is_empty() or layout.blocks.is_empty():
-			push_warning("Could not create starting street graph for city %d sector %s" % [city_id, sector])
+			push_warning("Could not create starting street graph for city %d sector %s (frontage=%d, paths=%d, blocks=%d)" % [city_id, sector, generated["frontage_id"], layout.core_paths.size(), layout.blocks.size()])
 			continue
 		region.urban_sector_claims[sector_key(city_id, sector)] = neighborhood_ids[index]
 		for cell in district_cells(region, city_id, sector):
@@ -191,6 +192,8 @@ static func _add_start_arterial(region, city_id: int, first_id: int, last_id: in
 	link.corridor_start_km = start_km
 	link.owner_jurisdiction_id = region.city_jurisdiction_ids[city_id]
 	link.recalculate_length()
+	if region.terrain != null:
+		link.terrain_spans = RoadTerrain.spans(region, link.points, link.road_class)
 	region.road_links.append(link)
 	return link.length_km
 
@@ -457,24 +460,27 @@ static func make_layout(region, city_id: int, sector: Vector2i, variant: int = 0
 			return {"layout": layout, "frontage_id": -1}
 		var chart_nodes: Dictionary = clipped["node_ids"]
 		var chart_boundary: Dictionary = clipped["boundary_nodes"]
-		var chart_access: Dictionary = _find_access(region, layout, chart_nodes, chart_boundary)
+		var chart_access: Dictionary = _find_access(region, layout, chart_nodes, chart_boundary, 0.4 if region.cities[city_id].get("urban_start_sectors", []).has(sector) else 0.25)
 		var chart_frontage_id: int = int(chart_access.get("link_id", -1))
 		if chart_frontage_id < 0:
 			return {"layout": layout, "frontage_id": -1}
 		for local_id in chart_access.get("node_ids", []):
 			layout.arterial_nodes.append(local_id)
+		_connect_access_to_collectors(layout, int(chart_access["near_id"]))
 		if chart_access.has("connector_point"):
 			var anchor_id: int = layout.nodes.size()
 			layout.nodes.append(chart_access["connector_point"])
 			layout.arterial_nodes.append(anchor_id)
 			StreetLayoutOps._append_edge(layout, anchor_id, int(chart_access["near_id"]), Roads.COLLECTOR, 1)
 		_connect_local_arterials(region, layout, road_context)
-		_remove_city_border_edges(region, layout)
+		_prune_redundant_edges(region, layout)
+		_connect_access_to_collectors(layout, int(chart_access["near_id"]))
 		StreetLayoutOps._build_core_paths(layout)
 		StreetLayoutOps._mark_canonical_edges(layout)
 		BorderSeams.plan(region, layout)
 		BorderSeams.finalize(region, layout)
 		_reserve_border_connector_blocks(layout)
+		_apply_terrain(region, layout)
 		return {"layout": layout, "frontage_id": chart_frontage_id}
 	var selected: Dictionary = {}
 	var addresses: Dictionary = {}
@@ -522,6 +528,14 @@ static func make_layout(region, city_id: int, sector: Vector2i, variant: int = 0
 				continue
 			var first_id: int = node_ids[first]
 			var last_id: int = node_ids[last]
+			if not boundary and not collector and region.terrain != null:
+				var street_a: Vector2 = layout.nodes[first_id]
+				var street_b: Vector2 = layout.nodes[last_id]
+				var street_mid: Vector2 = (street_a + street_b) * 0.5
+				var land_slope: float = region.terrain.slope_at(street_mid)
+				var street_grade: float = absf(region.terrain.elevation_at(street_a) - region.terrain.elevation_at(street_b)) / maxf(1.0, street_a.distance_to(street_b) * 1000.0)
+				if region.terrain.water_at(street_mid) or (land_slope > 0.25 and street_grade > 0.22):
+					continue
 			if _covered_by_access_road(region, layout.nodes[first_id], layout.nodes[last_id]) or StreetLayoutOps._near_field_arterial(layout.nodes[first_id], layout.nodes[last_id], road_context, 0.075):
 				continue
 			var road_class: String = Roads.COLLECTOR if collector else Roads.LOCAL
@@ -569,24 +583,125 @@ static func make_layout(region, city_id: int, sector: Vector2i, variant: int = 0
 		if _near_layout_outline(layout.nodes[local_id], layout.polygon, 0.003):
 			node_ids[local_id] = local_id
 			boundary_nodes[local_id] = true
-	var access: Dictionary = _find_access(region, layout, node_ids, boundary_nodes)
+	var access: Dictionary = _find_access(region, layout, node_ids, boundary_nodes, 0.4 if region.cities[city_id].get("urban_start_sectors", []).has(sector) else 0.25)
 	var frontage_id: int = int(access.get("link_id", -1))
 	if frontage_id < 0:
 		return {"layout": layout, "frontage_id": -1}
 	for local_id in access.get("node_ids", []):
 		layout.arterial_nodes.append(local_id)
+	_connect_access_to_collectors(layout, int(access["near_id"]))
 	if access.has("connector_point"):
 		var anchor_id: int = layout.nodes.size()
 		layout.nodes.append(access["connector_point"])
 		layout.arterial_nodes.append(anchor_id)
 		StreetLayoutOps._append_edge(layout, anchor_id, int(access["near_id"]), Roads.COLLECTOR, 1)
 	_connect_local_arterials(region, layout, road_context)
+	_prune_redundant_edges(region, layout)
+	_connect_access_to_collectors(layout, int(access["near_id"]))
 	StreetLayoutOps._build_core_paths(layout)
 	StreetLayoutOps._mark_canonical_edges(layout)
 	BorderSeams.plan(region, layout)
 	BorderSeams.finalize(region, layout)
 	_reserve_border_connector_blocks(layout)
+	_apply_terrain(region, layout)
 	return {"layout": layout, "frontage_id": frontage_id}
+
+
+static func _apply_terrain(region, layout) -> void:
+	if region.terrain == null:
+		return
+	var terrain = region.terrain
+	var total_slope := 0.0
+	var sampled := 0
+	for block_id in range(layout.blocks.size()):
+		var block: Dictionary = layout.blocks[block_id]
+		var polygon: PackedVector2Array = block["polygon"]
+		if polygon.size() < 3:
+			continue
+		var center := Vector2.ZERO
+		for vertex in polygon:
+			center += vertex
+		center /= float(polygon.size())
+		total_slope += terrain.slope_at(center)
+		sampled += 1
+		if terrain.buildable_fraction(polygon, 3) < 0.35:
+			block["park"] = true
+			layout.blocks[block_id] = block
+	if sampled > 0 and total_slope / float(sampled) >= 0.10:
+		layout.interior_style = "Hillside"
+	for path in layout.core_paths:
+		var terrain_impact: Dictionary = RoadTerrain.preview(region, path["points"], Roads.COLLECTOR, true)
+		if terrain_impact.get("ok", false):
+			layout.phase_costs[int(path["phase"]) - 1] += int(terrain_impact["cost"])
+
+
+static func _connect_access_to_collectors(layout, access_node: int) -> void:
+	# The closest point on an arterial can be a local-only grid junction. One
+	# existing street path must join the phase-one collector graph before the
+	# district opens, even when the arterial itself needs no new connector.
+	var backbone: Dictionary = {}
+	var neighbors: Dictionary = {}
+	for edge_id in range(layout.edges.size()):
+		var edge: Vector2 = layout.edges[edge_id]
+		var first: int = int(edge.x)
+		var last: int = int(edge.y)
+		if layout.classes[edge_id] == Roads.COLLECTOR:
+			backbone[first] = true
+			backbone[last] = true
+		elif layout.classes[edge_id] == Roads.LOCAL:
+			if not neighbors.has(first):
+				neighbors[first] = []
+			if not neighbors.has(last):
+				neighbors[last] = []
+			neighbors[first].append({"to": last, "edge": edge_id})
+			neighbors[last].append({"to": first, "edge": edge_id})
+	if backbone.has(access_node) or backbone.is_empty():
+		return
+	var queue: Array[int] = [access_node]
+	var previous: Dictionary = {access_node: {}}
+	var cursor := 0
+	var target := -1
+	while cursor < queue.size():
+		var current: int = queue[cursor]
+		cursor += 1
+		if backbone.has(current):
+			target = current
+			break
+		for next in neighbors.get(current, []):
+			var neighbor: int = next["to"]
+			if previous.has(neighbor):
+				continue
+			previous[neighbor] = {"from": current, "edge": next["edge"]}
+			queue.append(neighbor)
+	if target < 0:
+		var closest := -1
+		var nearest := 0.6
+		for node_id in backbone:
+			var distance: float = layout.nodes[access_node].distance_to(layout.nodes[node_id])
+			if distance >= nearest:
+				continue
+			var inside := true
+			for fraction in [0.25, 0.5, 0.75]:
+				if not Geometry2D.is_point_in_polygon(layout.nodes[access_node].lerp(layout.nodes[node_id], fraction), layout.polygon):
+					inside = false
+			if inside:
+				closest = node_id
+				nearest = distance
+		if closest >= 0:
+			StreetLayoutOps._append_edge(layout, access_node, closest, Roads.COLLECTOR, 1)
+		return
+	while target >= 0 and target != access_node:
+		var step: Dictionary = previous[target]
+		var edge_id: int = step["edge"]
+		var length: float = layout.lengths[edge_id]
+		var old_phase: int = layout.phases[edge_id] - 1
+		layout.phase_costs[old_phase] -= roundi(length * Roads.construction_cost(Roads.LOCAL))
+		layout.phase_upkeep[old_phase] -= length * Roads.upkeep(Roads.LOCAL)
+		layout.classes[edge_id] = Roads.COLLECTOR
+		layout.phases[edge_id] = 1
+		layout.phase_costs[0] += roundi(length * Roads.construction_cost(Roads.COLLECTOR))
+		layout.phase_upkeep[0] += length * Roads.upkeep(Roads.COLLECTOR)
+		target = step["from"]
 
 
 static func _connect_local_arterials(region, layout, road_context: Dictionary) -> void:
@@ -1047,8 +1162,9 @@ static func _extend_grid_to_city_border(region, city_id: int, plan: Dictionary, 
 			StreetLayoutOps._append_block_polygon(layout, piece, PackedInt32Array([access_id]), 2, hash("%d:border-fringe:%d:%d:%d" % [region.generation_seed, city_id, cell.x, cell.y]), false, true)
 
 
-static func _remove_city_border_edges(region, layout) -> void:
+static func _prune_redundant_edges(region, layout) -> void:
 	var neighbors: Array[int] = _border_neighbors(region, layout.city_id, layout.bounds)
+	var full_context: Dictionary = DirectionField.city_context(region, layout.city_id, layout.bounds)
 	var kept_edges := PackedVector2Array()
 	var kept_classes := PackedStringArray()
 	var kept_phases := PackedInt32Array()
@@ -1058,7 +1174,8 @@ static func _remove_city_border_edges(region, layout) -> void:
 		var edge: Vector2 = layout.edges[index]
 		var first: Vector2 = layout.nodes[int(edge.x)]
 		var last: Vector2 = layout.nodes[int(edge.y)]
-		if _on_shared_city_border(region, layout.city_id, first, last, neighbors):
+		var redundant_local: bool = layout.classes[index] == Roads.LOCAL and StreetLayoutOps._near_field_arterial(first, last, full_context, 0.075)
+		if _on_shared_city_border(region, layout.city_id, first, last, neighbors) or redundant_local:
 			if layout.classes[index] != Roads.ARTERIAL:
 				layout.phase_costs[layout.phases[index] - 1] -= roundi(layout.lengths[index] * Roads.construction_cost(layout.classes[index]))
 				layout.phase_upkeep[layout.phases[index] - 1] -= layout.lengths[index] * Roads.upkeep(layout.classes[index])
@@ -1121,14 +1238,20 @@ static func _cell_edge_key(first: Vector2i, last: Vector2i) -> String:
 	return "%d:%d|%d:%d" % [first.x, first.y, last.x, last.y]
 
 
-static func _find_access(region, layout, node_ids: Dictionary, boundary_nodes: Dictionary) -> Dictionary:
-	var best_distance := 0.40
+static func _find_access(region, layout, node_ids: Dictionary, boundary_nodes: Dictionary, reach_km: float = 0.25) -> Dictionary:
+	var best_distance: float = reach_km + 0.01
 	var best_link_id := -1
 	var best_point := Vector2.ZERO
 	var best_node := -1
 	var exact_nodes: Array[int] = []
+	var street_nodes: Dictionary = {}
+	for edge in layout.edges:
+		street_nodes[int(edge.x)] = true
+		street_nodes[int(edge.y)] = true
 	for address in boundary_nodes:
 		var local_id: int = node_ids[address]
+		if not street_nodes.has(local_id):
+			continue
 		var point: Vector2 = layout.nodes[local_id]
 		for link_index in Spatial.near_links(region, point):
 			var link = region.road_links[link_index]
@@ -1136,9 +1259,9 @@ static func _find_access(region, layout, node_ids: Dictionary, boundary_nodes: D
 				continue
 			var projected: Vector2 = RoadPlanner.closest_point(link.points, point)
 			var distance: float = point.distance_to(projected)
-			if distance > 0.25 and link.border_city_ids.x < 0:
+			if distance > reach_km and link.border_city_ids.x < 0:
 				continue
-			if distance < 0.018:
+			if distance < 0.002:
 				exact_nodes.append(local_id)
 			if distance < best_distance:
 				best_distance = distance
@@ -1148,7 +1271,7 @@ static func _find_access(region, layout, node_ids: Dictionary, boundary_nodes: D
 	if best_link_id < 0:
 		return {}
 	var result: Dictionary = {"link_id": best_link_id, "node_ids": exact_nodes, "near_id": best_node}
-	if best_distance >= 0.018:
+	if best_distance >= 0.002:
 		result["connector_point"] = best_point
 	elif exact_nodes.is_empty():
 		result["node_ids"] = [best_node]

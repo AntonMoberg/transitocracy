@@ -155,6 +155,8 @@ static func append_neighborhood(region, city_id: int, polygon: PackedVector2Arra
 	neighborhood.cell_grid = grid
 	neighborhood.land_area_ha = StateGeography.polygon_area(polygon) * 100.0
 	neighborhood.developable_area_ha = minf(105.0, neighborhood.land_area_ha)
+	if region.terrain != null:
+		neighborhood.developable_area_ha *= region.terrain.buildable_fraction(polygon)
 	var defaults: Dictionary = zone_defaults(region, city_id, grid)
 	neighborhood.zone_shares = defaults["shares"]
 	neighborhood.zone_density = defaults["density"]

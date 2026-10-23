@@ -152,6 +152,12 @@ static func proposals(region, city_filter: Array[int] = []) -> Array[Dictionary]
 			var frontage_id: int = int(generated["frontage_id"])
 			if frontage_id < 0 or layout.core_paths.is_empty() or layout.blocks.is_empty():
 				continue
+			var developable_blocks := 0
+			for block in layout.blocks:
+				if not block["park"]:
+					developable_blocks += 1
+			if developable_blocks < 4:
+				continue
 			var link_index: int = RoadGraph.link_index(region, frontage_id)
 			if link_index < 0 or rooted[region.road_links[link_index].from_node_id] == 0 or rooted[region.road_links[link_index].to_node_id] == 0:
 				continue

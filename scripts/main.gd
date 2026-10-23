@@ -262,7 +262,7 @@ func _process(delta: float) -> void:
 		calendar_clock.visual_offset_seconds = 0.0
 	last_advance_us = Time.get_ticks_usec() - advance_started
 	game_rate_seconds += traffic_state.unix_seconds - game_start
-	if traffic_state.unix_seconds != game_start and map_view.map_mode == "Roads" and map_view.road_traffic_mode == RegionMap.ROAD_LIVE:
+	if traffic_state.unix_seconds != game_start and map_view.map_mode in ["Roads", "Terrain"] and map_view.show_traffic_overlay and map_view.road_traffic_mode == RegionMap.ROAD_LIVE:
 		var now_msec: int = Time.get_ticks_msec()
 		if now_msec - last_live_road_redraw_msec >= ANIMATED_MAP_REDRAW_INTERVAL_MS:
 			map_view.queue_redraw()
@@ -453,6 +453,7 @@ func _build_interface() -> void:
 	map_mode_selector.add_item("Roads")
 	map_mode_selector.add_item("Trips")
 	map_mode_selector.add_item("Zoning")
+	map_mode_selector.add_item("Terrain")
 	map_mode_selector.selected = 0
 	map_mode_selector.item_selected.connect(_on_map_mode_selected)
 	road_controls.add_child(map_mode_selector)
@@ -1817,7 +1818,7 @@ func _on_development_zoning(neighborhood_id: int, shares: Dictionary, density: D
 
 
 func _on_map_mode_selected(index: int) -> void:
-	map_view.set_map_mode(["Roads", "Trips", "Zoning"][index])
+	map_view.set_map_mode(["Roads", "Trips", "Zoning", "Terrain"][index])
 	road_tool_selector.visible = index == 0
 	road_draw_selector.visible = index == 0 and road_tool_selector.get_item_text(road_tool_selector.selected) in ["Arterial", "Highway"]
 	road_snap_toggle.visible = road_draw_selector.visible
@@ -2204,6 +2205,13 @@ func _update_road_status() -> void:
 		var funding_text: String = "Dev Mode funds" if region.dev_mode else "%s pays" % region.jurisdictions[owner_id].name
 		road_status_label.text = "$%s  •  %s  •  Opens %d/%d/%d  •  %d days%s" % [
 			_format_count(pending_road_preview["cost"]), funding_text, opening["year"], opening["month"], opening["day"], pending_road_preview["days"], "  •  Insufficient funds" if road_build_button.disabled else ""]
+		var terrain_impact: Dictionary = pending_road_preview.get("terrain_impact", {})
+		if float(terrain_impact.get("bridge_km", 0.0)) > 0.0:
+			road_status_label.text += "  •  %.1f km bridge" % float(terrain_impact["bridge_km"])
+		if float(terrain_impact.get("tunnel_km", 0.0)) > 0.0:
+			road_status_label.text += "  •  %.1f km tunnel" % float(terrain_impact["tunnel_km"])
+		if float(terrain_impact.get("earthwork_km", 0.0)) > 0.0:
+			road_status_label.text += "  •  %.1f km grading" % float(terrain_impact["earthwork_km"])
 	elif road_start_node >= 0:
 		if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT:
 			if _road_class() == RoadLinkData.HIGHWAY:

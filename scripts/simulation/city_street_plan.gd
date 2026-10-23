@@ -50,7 +50,18 @@ static func junction(region, city_id: int, cell: Vector2i, plan: Dictionary, _or
 	var permanent_key: String = "%d:%d:%d" % [city_id, cell.x, cell.y]
 	if region.urban_locked_junctions.has(permanent_key):
 		return region.urban_locked_junctions[permanent_key]
-	return base_junction(plan, cell)
+	var point: Vector2 = base_junction(plan, cell)
+	if region.terrain == null:
+		return point
+	var gradient: Vector2 = region.terrain.gradient_at(point)
+	var strength: float = smoothstep(0.05, 0.18, gradient.length())
+	if strength <= 0.0:
+		return point
+	# One world-space warp is used by every district sharing this address. Its
+	# long wavelength bends rows gently and leaves their intersections intact.
+	var contour: Vector2 = gradient.normalized().orthogonal()
+	var wave: float = sin(point.x * 2.1 + point.y * 0.64) * 0.65 + sin(point.y * 1.7 - point.x * 0.46) * 0.35
+	return point + contour * (0.05 * strength * wave)
 
 
 static func block_key(city_id: int, cell: Vector2i, organic: bool = false) -> String:

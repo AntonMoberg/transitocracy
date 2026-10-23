@@ -20,6 +20,7 @@ static func _copy_large_region(source):
 	# a neighborhood, so worker snapshots need their own copies of those lists.
 	var copy = RegionData.new()
 	copy.generation_seed = source.generation_seed
+	copy.terrain = source.terrain
 	copy.dev_mode = source.dev_mode
 	copy.starting_city_ids = source.starting_city_ids.duplicate()
 	copy.neighborhood_development_connected = source.neighborhood_development_connected.duplicate()
@@ -178,6 +179,7 @@ static func _copy_large_region(source):
 		link.corridor_start_km = original.corridor_start_km
 		link.managed_neighborhood_id = original.managed_neighborhood_id
 		link.crossings = original.crossings.duplicate(true)
+		link.terrain_spans = original.terrain_spans.duplicate(true)
 		link.border_city_ids = original.border_city_ids
 		link.border_seam_key = original.border_seam_key
 		copy.road_links.append(link)
@@ -196,7 +198,7 @@ static func _copy_value(value):
 		TYPE_OBJECT:
 			if value == null or value.get_script() == null:
 				return value
-			if value.get_script() == preload("res://scripts/simulation/street_layout.gd"):
+			if value.get_script() in [preload("res://scripts/simulation/street_layout.gd"), preload("res://scripts/simulation/terrain_data.gd")]:
 				return value
 			var copy = value.get_script().new()
 			for property in value.get_property_list():

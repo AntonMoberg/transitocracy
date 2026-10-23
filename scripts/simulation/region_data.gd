@@ -9,6 +9,7 @@ const ZONE_TYPES = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 const DENSITY_NAMES = ["Low", "Medium", "High"]
 
 var generation_seed: int = 0
+var terrain = null
 var dev_mode: bool = false
 var starting_city_ids: Array[int] = []
 var neighborhood_development_connected: PackedByteArray = PackedByteArray()

@@ -25,7 +25,7 @@ func _run() -> void:
 				continue
 			var context: Dictionary = Field.city_context(region, int(candidate["city_id"]), layout.bounds)
 			for edge_id in range(layout.edges.size()):
-				if layout.classes[edge_id] == Roads.ARTERIAL:
+				if layout.classes[edge_id] != Roads.LOCAL:
 					continue
 				var edge: Vector2 = layout.edges[edge_id]
 				if StreetLayoutOps._near_field_arterial(layout.nodes[int(edge.x)], layout.nodes[int(edge.y)], context, 0.075):
@@ -36,6 +36,8 @@ func _run() -> void:
 				for y in range(ceili(layout.bounds.size.y / 0.08)):
 					var point: Vector2 = layout.bounds.position + Vector2(x + 0.5, y + 0.5) * 0.08
 					if not Geometry2D.is_point_in_polygon(point, layout.polygon):
+						continue
+					if region.terrain != null and not region.terrain.buildable_at(point):
 						continue
 					var nearest := INF
 					for edge in layout.edges:

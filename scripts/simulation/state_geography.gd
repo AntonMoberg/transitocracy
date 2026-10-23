@@ -1,6 +1,7 @@
 extends RefCounted
 
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
+const TerrainGenerator = preload("res://scripts/simulation/terrain_generator.gd")
 const STATE_LAND_AREA_KM2 = 400000.0
 const CELL_SIZE_KM = 1.6
 const TRIANGLE_ROW_HEIGHT = 0.8660254
@@ -8,12 +9,14 @@ const TRIANGLE_ROW_HEIGHT = 0.8660254
 
 static func generate(region, rng: RandomNumberGenerator) -> void:
 	var state = region.jurisdictions[0]
-	state.polygon_km = _generate_outline(region.generation_seed)
+	var shape: Dictionary = _generate_outline(region.generation_seed)
+	state.polygon_km = shape["polygon"]
 	_update_bounds(state)
+	region.terrain = TerrainGenerator.generate(region.generation_seed, state.polygon_km, state.bounds_km, shape["coastline"])
 	_partition(region, state, rng)
 	for city in region.cities:
 		var area = region.jurisdictions[city["jurisdiction_id"]]
-		var center: Vector2 = _settlement_point(area, rng)
+		var center: Vector2 = _settlement_point(area, rng, region.terrain)
 		city["center_km"] = center
 		for neighborhood_id in city["neighborhood_ids"]:
 			var neighborhood = region.neighborhoods[neighborhood_id]
@@ -45,6 +48,8 @@ static func generate(region, rng: RandomNumberGenerator) -> void:
 			neighborhood.cell_grid = grid
 			neighborhood.land_area_ha = _area(district.polygon_km) * 100.0
 			neighborhood.developable_area_ha = minf(neighborhood.developable_area_ha, neighborhood.land_area_ha)
+			if region.terrain != null:
+				neighborhood.developable_area_ha *= region.terrain.buildable_fraction(seed_polygon)
 	region.starting_city_ids.append(0)
 	while region.starting_city_ids.size() < mini(10, region.cities.size()):
 		var best_id := -1
@@ -52,12 +57,21 @@ static func generate(region, rng: RandomNumberGenerator) -> void:
 		for city in region.cities:
 			if region.starting_city_ids.has(city["id"]):
 				continue
+			if region.terrain != null and not region.terrain.buildable_at(city["center_km"]):
+				continue
 			var distance := INF
 			for starting_id in region.starting_city_ids:
 				distance = minf(distance, city["center_km"].distance_squared_to(region.cities[starting_id]["center_km"]))
 			if distance > best_distance:
 				best_distance = distance
 				best_id = city["id"]
+		if best_id < 0:
+			for city in region.cities:
+				if not region.starting_city_ids.has(city["id"]):
+					best_id = city["id"]
+					break
+		if best_id < 0:
+			break
 		region.starting_city_ids.append(best_id)
 
 
@@ -80,7 +94,7 @@ static func initialize_development(region) -> void:
 			neighborhood.monthly_rent = 0
 
 
-static func _generate_outline(seed_value: int) -> PackedVector2Array:
+static func _generate_outline(seed_value: int) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value * 7919 + 104729
 	var outline := PackedVector2Array()
@@ -101,15 +115,21 @@ static func _generate_outline(seed_value: int) -> PackedVector2Array:
 	for bay_index in range(bay_count):
 		var center: float = 0.08 + 0.80 * (float(bay_index) + rng.randf_range(0.3, 0.7)) / float(bay_count)
 		bays.append(Vector3(center, rng.randf_range(0.035, 0.075), rng.randf_range(0.24, 0.39)))
-	var sample_count: int = rng.randi_range(120, 160)
+	var coves: Array[Vector3] = []
+	for cove_index in range(rng.randi_range(6, 10)):
+		coves.append(Vector3(rng.randf_range(0.04, 0.90), rng.randf_range(0.008, 0.022), rng.randf_range(-0.014, 0.022)))
+	var sample_count: int = rng.randi_range(190, 230)
 	var phase: float = rng.randf_range(0.0, TAU)
 	var amplitude: float = rng.randf_range(0.025, 0.07)
+	var coast_start: int = outline.size() - 1
 	for sample_index in range(sample_count, -1, -1):
 		var position: float = 0.94 * float(sample_index) / float(sample_count)
 		var coastline: float = 0.87 + sin(phase + position * 7.0) * amplitude
 		coastline += sin(phase * 1.7 + position * 63.0) * 0.014 + sin(phase * 2.3 + position * 137.0) * 0.007 + rng.randf_range(-0.004, 0.004)
 		for bay in bays:
 			coastline -= bay.z * exp(-0.5 * pow((position - bay.x) / bay.y, 2.0))
+		for cove in coves:
+			coastline += cove.z * exp(-0.5 * pow((position - cove.x) / cove.y, 2.0))
 		outline.append(Vector2(position, clampf(coastline, 0.40, 0.97)))
 	var reflect_vertical: bool = rng.randf() < 0.5
 	var reflect_horizontal: bool = rng.randf() < 0.5
@@ -126,7 +146,10 @@ static func _generate_outline(seed_value: int) -> PackedVector2Array:
 	var vertical_scale: float = STATE_LAND_AREA_KM2 / (area * horizontal_scale)
 	for vertex in range(outline.size()):
 		outline[vertex] = (outline[vertex] - bounds.position) * Vector2(horizontal_scale, vertical_scale)
-	return outline
+	var coastline := PackedVector2Array()
+	for index in range(coast_start, outline.size()):
+		coastline.append(outline[index])
+	return {"polygon": outline, "coastline": coastline}
 
 
 static func _append_shore(outline: PackedVector2Array, endpoint: Vector2, rng: RandomNumberGenerator) -> void:
@@ -405,7 +428,7 @@ static func _update_bounds(area) -> void:
 	area.center_km = center
 
 
-static func _settlement_point(area, rng: RandomNumberGenerator) -> Vector2:
+static func _settlement_point(area, rng: RandomNumberGenerator, terrain = null) -> Vector2:
 	var triangles: PackedInt32Array = Geometry2D.triangulate_polygon(area.polygon_km)
 	if triangles.is_empty():
 		return area.center_km
@@ -423,7 +446,8 @@ static func _settlement_point(area, rng: RandomNumberGenerator) -> Vector2:
 	var minimum_offset: float = minf(3.0, sqrt(total_area) * 0.12)
 	var best_point: Vector2 = area.center_km
 	var best_clearance := -1.0
-	for attempt in range(16):
+	var best_score := -INF
+	for attempt in range(32):
 		var pick: float = rng.randf() * total_area
 		var triangle_slot := 0
 		while triangle_slot < cumulative.size() - 1 and pick > cumulative[triangle_slot]:
@@ -438,10 +462,17 @@ static func _settlement_point(area, rng: RandomNumberGenerator) -> Vector2:
 		var clearance := INF
 		for vertex in range(area.polygon_km.size()):
 			clearance = minf(clearance, point.distance_to(Geometry2D.get_closest_point_to_segment(point, area.polygon_km[vertex], area.polygon_km[(vertex + 1) % area.polygon_km.size()])))
-		if point.distance_to(area.center_km) >= minimum_offset * 0.4 and clearance > best_clearance:
+		var terrain_score: float = 0.0
+		if terrain != null:
+			terrain_score = -300.0 if terrain.water_at(point) else -terrain.slope_at(point) * 65.0 - maxf(0.0, terrain.elevation_at(point) - 500.0) * 0.006
+			if clearance < minimum_clearance or point.distance_to(area.center_km) < minimum_offset * 0.4:
+				terrain_score -= 100.0
+		var score: float = minf(clearance, 5.0) + terrain_score
+		if point.distance_to(area.center_km) >= minimum_offset * 0.4 and score > best_score:
+			best_score = score
 			best_clearance = clearance
 			best_point = point
-		if clearance >= minimum_clearance and point.distance_to(area.center_km) >= minimum_offset:
+		if terrain == null and clearance >= minimum_clearance and point.distance_to(area.center_km) >= minimum_offset:
 			return point
 	return best_point
 

@@ -6,6 +6,7 @@ const RoadProjectData = preload("res://scripts/simulation/road_project_data.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
+const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
 const StreetSpatial = preload("res://scripts/simulation/street_spatial_index.gd")
 
 const INTERCHANGE_COST = 10000000
@@ -55,16 +56,19 @@ static func link_preview(region, from_id: int, to_id: int, road_class: String, w
 	if length < 0.1:
 		return {"ok": false, "reason": "Road is too short."}
 	var lanes := 2 if road_class == RoadLinkData.HIGHWAY else 1
+	var terrain_impact: Dictionary = RoadTerrain.preview(region, points, road_class)
+	if not terrain_impact["ok"]:
+		return terrain_impact
 	var construction_cost := roundi(length * lanes * (1800000.0 if road_class == RoadLinkData.HIGHWAY else 600000.0))
 	var crossings: Array[Dictionary] = _crossings_for_route(region, points, road_class, crossing_choices)
 	var structure_cost := 0
 	for crossing in crossings:
 		structure_cost += 3000000 if crossing["above"] else 5000000
-	var land_impact: Dictionary = RoadLand.preview(region, points, road_class)
-	var cost: int = construction_cost + structure_cost + int(land_impact["cost"])
+	var land_impact: Dictionary = RoadLand.preview(region, points, road_class, terrain_impact["surface_paths"])
+	var cost: int = construction_cost + structure_cost + int(terrain_impact["cost"]) + int(land_impact["cost"])
 	var base_days := maxi(45, ceili(20.0 + 4.0 * length)) if road_class == RoadLinkData.HIGHWAY else maxi(14, ceili(7.0 + 2.0 * length))
 	var days := _construction_days(base_days)
-	return {"ok": true, "kind": RoadProjectData.NEW_LINK, "from": from_id, "to": to_id, "end_position": end_position, "draw_mode": draw_mode, "road_class": road_class, "lanes": lanes, "waypoints": waypoints.duplicate(), "points": points, "length_km": length, "construction_cost": construction_cost, "structure_cost": structure_cost, "land_impact": land_impact, "crossings": crossings, "cost": cost, "days": days, "open_day_key": day_key + days, "owner_id": region.road_owner_for_points(points, road_class)}
+	return {"ok": true, "kind": RoadProjectData.NEW_LINK, "from": from_id, "to": to_id, "end_position": end_position, "draw_mode": draw_mode, "road_class": road_class, "lanes": lanes, "waypoints": waypoints.duplicate(), "points": points, "length_km": length, "construction_cost": construction_cost, "structure_cost": structure_cost, "terrain_impact": terrain_impact, "land_impact": land_impact, "crossings": crossings, "cost": cost, "days": days, "open_day_key": day_key + days, "owner_id": region.road_owner_for_points(points, road_class)}
 
 
 static func widen_preview(region, link_id: int, day_key: int) -> Dictionary:
@@ -189,6 +193,8 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 			project.lanes_per_direction = preview["lanes"]
 			project.points = preview["points"]
 			project.crossings = preview.get("crossings", []).duplicate(true)
+			project.terrain_spans = preview["terrain_impact"]["spans"].duplicate(true)
+			project.terrain_surface_paths = preview["terrain_impact"]["surface_paths"].duplicate(true)
 			project.redevelopment_impact = preview["land_impact"]["neighborhoods"].duplicate(true)
 		RoadProjectData.WIDEN, RoadProjectData.INTERCHANGE_EXIT:
 			project.target_link_id = preview["target_link_id"]
@@ -208,6 +214,8 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 static func add_junction(region, point: Vector2, split_link_id: int = -1) -> Dictionary:
 	if not _inside_map(point, region):
 		return {"ok": false, "reason": "Place junctions inside the region."}
+	if region.terrain != null and region.terrain.water_at(point):
+		return {"ok": false, "reason": "Place junctions on dry land."}
 	if split_link_id >= 0:
 		var index: int = RoadGraph.link_index(region, split_link_id)
 		if index < 0 or region.road_links[index].road_class not in [RoadLinkData.ARTERIAL, RoadLinkData.COLLECTOR]:
@@ -253,6 +261,7 @@ static func advance_day(region, day_key: int) -> bool:
 			RoadProjectData.NEW_LINK:
 				_append_link(region, project.from_node_id, project.to_node_id, project.road_class, project.lanes_per_direction, project.points, project.owner_jurisdiction_id)
 				region.road_links[-1].crossings = project.crossings.duplicate(true)
+				region.road_links[-1].terrain_spans = project.terrain_spans.duplicate(true)
 				RoadLand.mark_open(region, project.id, region.road_links[-1].id)
 				RoadLand.rebuild_project(region, project)
 				if project.road_class == RoadLinkData.ARTERIAL:
@@ -371,9 +380,11 @@ static func _split_link(region, link_id: int, new_node_id: int, point: Vector2) 
 		else:
 			moved_crossings.append(crossing)
 	old_link.crossings = kept_crossings
+	old_link.terrain_spans = RoadTerrain.spans(region, first, old_link.road_class)
 	old_link.recalculate_length()
 	_append_link(region, new_node_id, old_to, old_link.road_class, old_link.lanes_per_direction, second, old_link.owner_jurisdiction_id)
 	region.road_links[-1].crossings = moved_crossings
+	region.road_links[-1].terrain_spans = RoadTerrain.spans(region, second, old_link.road_class)
 	RoadLand.split_link_reservation(region, link_id, region.road_links[-1].id, first, second)
 	region.road_links[-1].toll_forward = old_link.toll_forward
 	region.road_links[-1].toll_reverse = old_link.toll_reverse

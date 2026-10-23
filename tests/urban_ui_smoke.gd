@@ -112,6 +112,19 @@ func _run() -> void:
 	await process_frame
 	if map.size.y < 250.0 or main.inspector.size.y < 70.0:
 		errors.append("Development controls must leave the map and inspector usable at 1024 × 700: map %s, inspector %s." % [map.size, main.inspector.size])
+	main._on_map_mode_selected(3)
+	await process_frame
+	await process_frame
+	if map.map_mode != "Terrain" or map.urban_layer.last_building_count != 0:
+		errors.append("Terrain view must show topography without building footprints.")
+	if map.traffic_toggle_button.disabled:
+		errors.append("Traffic overlay must be available in Terrain view.")
+	map.traffic_toggle_button.button_pressed = false
+	if map.show_traffic_overlay:
+		errors.append("Traffic toggle must turn off congestion coloring.")
+	main._on_map_mode_selected(0)
+	if map.traffic_toggle_button.disabled:
+		errors.append("Traffic overlay must remain available in Roads view.")
 	if not errors.is_empty():
 		push_error("; ".join(errors))
 	else:

@@ -7,6 +7,7 @@ const StreetNetwork = preload("res://scripts/simulation/street_network.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
 const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
+const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
 
 
 static func generate(region) -> void:
@@ -354,6 +355,10 @@ static func _corridor_sites(region, stations: Array, target_y: float, band: Arra
 		var row_parents := PackedInt32Array()
 		for point in row:
 			var intrinsic: float = absf(point.y - target_y) * 0.04 + absf(point.y - local_y) * 1.2 + (absf(point.y - city_y) * 1.5 if city_id >= 0 else 0.0)
+			if region.terrain != null:
+				intrinsic += region.terrain.slope_at(point) * 260.0
+				if region.terrain.water_at(point):
+					intrinsic += 300.0
 			var best_cost := intrinsic
 			var best_parent := -1
 			if station_index > 0:
@@ -364,6 +369,10 @@ static func _corridor_sites(region, stations: Array, target_y: float, band: Arra
 						continue
 					var change: float = absf(point.y - before.y)
 					var cost: float = costs[station_index - 1][previous_index] + intrinsic + change * 0.25 + change * change / maxf(20.0, point.x - before.x) * 0.4
+					if region.terrain != null:
+						for fraction in [0.25, 0.5, 0.75]:
+							var sample: Vector2 = before.lerp(point, fraction)
+							cost += region.terrain.slope_at(sample) * 55.0 + (120.0 if region.terrain.water_at(sample) else 0.0)
 					if cost < best_cost:
 						best_cost = cost
 						best_parent = previous_index
@@ -398,6 +407,8 @@ static func _land_spine_site(region, target: Vector2, normal: Vector2, fallback:
 			if not Geometry2D.is_point_in_polygon(trial, land) or RoadRouteBuilder.clearance_to_coast(land, trial) < 2.0 or not _outside_starter_districts(region, trial, 1.5):
 				continue
 			var score: float = trial.distance_to(target) + trial.distance_to(fallback) * 0.05
+			if region.terrain != null:
+				score += region.terrain.slope_at(trial) * 80.0 + (200.0 if region.terrain.water_at(trial) else 0.0)
 			if score < best_score:
 				best = trial
 				best_score = score
@@ -444,6 +455,10 @@ static func _arterial_connector_node(region, city_id: int, point: Vector2, candi
 			continue
 		if not StateGeography.segment_on_land(region.jurisdictions[0].polygon_km, from_point, point):
 			score += 200.0
+		if region.terrain != null:
+			for fraction in [0.2, 0.4, 0.6, 0.8]:
+				var sample: Vector2 = from_point.lerp(point, fraction)
+				score += region.terrain.slope_at(sample) * 35.0 + (50.0 if region.terrain.water_at(sample) else 0.0)
 		if _connector_crosses_starter(region, from_point, point):
 			score += 1000.0
 		if score >= best_score:
@@ -512,6 +527,8 @@ static func _add_link(region, from_id: int, to_id: int, road_class: String, lane
 	link.road_class = road_class
 	link.lanes_per_direction = lanes
 	link.points = RoadRouteBuilder.build(region, from_id, to_id, road_class, PackedVector2Array(), from_tangent, to_tangent, land_certified)
+	if region.terrain != null and link.points.size() >= 2:
+		link.terrain_spans = RoadTerrain.spans(region, link.points, road_class)
 	link.recalculate_length()
 	link.owner_jurisdiction_id = region.road_owner_for_points(link.points, road_class)
 	region.road_links.append(link)
