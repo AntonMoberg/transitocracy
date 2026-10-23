@@ -8,6 +8,7 @@ const PIXELS = 128
 static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: float) -> Dictionary:
 	var image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var terrain_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
+	var satellite_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var slope_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var contour_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var tile_rect := Rect2(origin, Vector2.ONE * step_km * PIXELS)
@@ -28,17 +29,22 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 	if not boundary_crosses and not any_land:
 		image.fill(Color.TRANSPARENT)
 		terrain_image.fill(Color.TRANSPARENT)
+		satellite_image.fill(Color.TRANSPARENT)
 		slope_image.fill(Color.TRANSPARENT)
 		contour_image.fill(Color.TRANSPARENT)
-		return {"color": image, "terrain": terrain_image, "slope": slope_image, "contours": contour_image}
+		return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
 	var has_land_cover: bool = terrain.has_method("land_cover_at")
-	var stride := PIXELS + 2
+	var has_ground_detail: bool = terrain.has_method("ground_detail_at")
+	# Padding lets hillshade compare broad slopes with local gullies
+	# without a visible change at tile edges.
+	var padding := 6
+	var stride := PIXELS + padding * 2
 	var heights := PackedFloat32Array()
 	heights.resize(stride * stride)
 	var contour_interval_m: float = 100.0 if step_km >= 0.25 else (50.0 if step_km >= 0.03125 else 25.0)
 	for y in range(stride):
 		for x in range(stride):
-			var point: Vector2 = origin + Vector2(float(x) - 0.5, float(y) - 0.5) * step_km
+			var point: Vector2 = origin + Vector2(float(x - padding) + 0.5, float(y - padding) + 0.5) * step_km
 			heights[y * stride + x] = terrain.visual_elevation_at(point)
 	for y in range(PIXELS):
 		for x in range(PIXELS):
@@ -46,43 +52,67 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 			if (boundary_crosses or not all_land) and not Geometry2D.is_point_in_polygon(point, land):
 				image.set_pixel(x, y, Color.TRANSPARENT)
 				terrain_image.set_pixel(x, y, Color.TRANSPARENT)
+				satellite_image.set_pixel(x, y, Color.TRANSPARENT)
 				slope_image.set_pixel(x, y, Color.TRANSPARENT)
 				contour_image.set_pixel(x, y, Color.TRANSPARENT)
 				continue
-			var index: int = (y + 1) * stride + x + 1
+			var index: int = (y + padding) * stride + x + padding
 			var elevation: float = heights[index]
 			var west: float = heights[index - 1]
 			var east: float = heights[index + 1]
 			var north: float = heights[index - stride]
 			var south: float = heights[index + stride]
 			var gradient := Vector2(east - west, south - north) / (step_km * 2000.0)
+			var detail_radius := 2
+			var detail_gradient := Vector2(heights[index + detail_radius] - heights[index - detail_radius], heights[index + detail_radius * stride] - heights[index - detail_radius * stride]) / (step_km * 2000.0 * float(detail_radius))
+			var map_radius := 3
+			var map_gradient := Vector2(heights[index + map_radius] - heights[index - map_radius], heights[index + map_radius * stride] - heights[index - map_radius * stride]) / (step_km * 2000.0 * float(map_radius))
+			var broad_gradient := Vector2(heights[index + padding] - heights[index - padding], heights[index + padding * stride] - heights[index - padding * stride]) / (step_km * 2000.0 * float(padding))
 			var cover: Vector3 = terrain.land_cover_at(point, elevation, gradient) if has_land_cover else Vector3.ZERO
-			image.set_pixel(x, y, land_color(elevation, gradient, cover))
-			terrain_image.set_pixel(x, y, terrain_color(elevation, gradient, cover))
+			var ground_detail: float = terrain.ground_detail_at(point) if has_ground_detail else 0.0
+			var fine_detail: float = terrain.ground_detail_at(point * 8.0) if has_ground_detail else 0.0
+			image.set_pixel(x, y, land_color(elevation, map_gradient, cover, ground_detail))
+			terrain_image.set_pixel(x, y, terrain_color(elevation, detail_gradient, cover, ground_detail, broad_gradient))
+			satellite_image.set_pixel(x, y, satellite_color(elevation, gradient, cover, ground_detail, fine_detail))
 			slope_image.set_pixel(x, y, slope_color(gradient))
 			contour_image.set_pixel(x, y, contour_color(elevation, gradient, step_km, contour_interval_m))
-	return {"color": image, "terrain": terrain_image, "slope": slope_image, "contours": contour_image}
+	return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
 
 
-static func land_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO) -> Color:
-	var light: float = clampf(0.5 - (gradient.x + gradient.y) * 3.1, 0.29, 0.76)
-	var base: Color = Color("526c5c").lerp(Color("9a9384"), smoothstep(120.0, 850.0, elevation))
-	base = base.lerp(Color("bbb4a6"), smoothstep(850.0, 1450.0, elevation) * 0.6)
-	base = base.lerp(Color("3e6553"), cover.x * 0.45)
-	base = base.lerp(Color("8b846c"), cover.y * 0.28)
-	base = base.lerp(Color("a7a198"), cover.z * 0.5)
-	return base * (0.75 + light * 0.42)
+static func land_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, _ground_detail: float = 0.0) -> Color:
+	var base: Color = _base_color(elevation, cover)
+	var ruggedness: float = smoothstep(0.03, 0.20, gradient.length()) * smoothstep(180.0, 600.0, elevation)
+	var facet: float = floorf(ruggedness * 5.0 + 0.5) / 5.0
+	var woodland: float = smoothstep(0.13, 0.55, cover.x)
+	var highland_color: Color = Color("cec9bf").lerp(Color("a8cfb5"), woodland)
+	return base.lerp(highland_color, facet * 0.58)
 
 
-static func terrain_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO) -> Color:
-	var base: Color = Color("c7e9d6").lerp(Color("b7d6b9"), smoothstep(220.0, 800.0, elevation))
-	base = base.lerp(Color("c9bfb0"), smoothstep(650.0, 1500.0, elevation) * 0.78)
-	base = base.lerp(Color("e7e6df"), smoothstep(1350.0, 1900.0, elevation))
-	base = base.lerp(Color("83b8a1"), cover.x * 0.63)
-	base = base.lerp(Color("dfd8b8"), cover.y * 0.52)
-	base = base.lerp(Color("b9afa4"), cover.z * 0.72)
-	var light: float = clampf(1.0 - (gradient.x + gradient.y) * 2.4, 0.55, 1.18)
-	return base * light
+static func terrain_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, ground_detail: float = 0.0, broad_gradient: Vector2 = Vector2.INF) -> Color:
+	var macro_gradient: Vector2 = broad_gradient if broad_gradient.is_finite() else gradient
+	var base: Color = land_color(elevation, macro_gradient, cover, ground_detail)
+	base = base.lerp(Color("d8d4c9"), cover.z * 0.25)
+	var broad_light: float = clampf(1.0 - (macro_gradient.x + macro_gradient.y) * 0.9, 0.72, 1.16)
+	var detail_gradient: Vector2 = gradient - macro_gradient
+	var detail_light: float = clampf(1.0 - (detail_gradient.x + detail_gradient.y) * 1.5, 0.83, 1.17)
+	var hill_detail: float = smoothstep(0.035, 0.15, gradient.length())
+	return base * broad_light * detail_light * (1.0 + ground_detail * 0.05 * hill_detail)
+
+
+static func satellite_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, ground_detail: float = 0.0, fine_detail: float = 0.0) -> Color:
+	var base: Color = Color("829576").lerp(Color("a6a08e"), smoothstep(220.0, 1200.0, elevation))
+	base = base.lerp(Color("d2cdc1"), smoothstep(1300.0, 1900.0, elevation))
+	base = base.lerp(Color("426c4d"), cover.x * 0.82)
+	base = base.lerp(Color("b7a87d"), cover.y * 0.76)
+	base = base.lerp(Color("a8a39b"), cover.z * 0.82)
+	var light: float = clampf(1.0 - (gradient.x + gradient.y) * 1.6, 0.76, 1.18)
+	return base * light * (1.0 + ground_detail * 0.13 + fine_detail * 0.11)
+
+
+static func _base_color(elevation: float, cover: Vector3) -> Color:
+	var base: Color = Color("f1eee6").lerp(Color("e9e4db"), smoothstep(750.0, 1600.0, elevation) * 0.75)
+	var woodland: float = smoothstep(0.13, 0.55, cover.x)
+	return base.lerp(Color("c9ecda"), woodland * 0.92)
 
 
 static func slope_color(gradient: Vector2) -> Color:

@@ -83,7 +83,7 @@ func draw(map) -> void:
 		var screen_bounds := Rect2(map._world_to_screen(layout.bounds.position), layout.bounds.size * map._map_scale() * map.zoom)
 		if not screen_bounds.intersects(viewport):
 			continue
-		if meters >= BUILDING_DETAIL_PPM and map.map_mode != "Terrain":
+		if meters >= BUILDING_DETAIL_PPM:
 			var block_started: int = Time.get_ticks_usec()
 			pending_buildings = _draw_blocks(map, neighborhood, viewport, meters, building_deadline_us) or pending_buildings
 			last_block_draw_us += Time.get_ticks_usec() - block_started
@@ -113,7 +113,7 @@ func draw(map) -> void:
 			if layout.classes[edge_id] != Roads.LOCAL:
 				continue
 			var color := Color("6f7f80")
-			if not record.is_empty() and map.map_mode in ["Roads", "Terrain"] and map.show_traffic_overlay:
+			if not record.is_empty() and map.show_traffic_overlay:
 				var rate: Vector2 = LocalTraffic.edge_rate(record, edge_id)
 				var queue: Vector2 = record["queues"][edge_id]
 				color = map._congestion_color(maxf(rate.x, rate.y) / record["capacity"] + (queue.x + queue.y) / 100.0).lerp(Color("84928b"), 0.5)

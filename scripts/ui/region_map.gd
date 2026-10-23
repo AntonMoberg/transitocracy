@@ -117,14 +117,23 @@ var jurisdiction_layout_key: String = ""
 var jurisdiction_label_rects: Dictionary = {}
 var last_drawn_neighborhood_borders: int = 0
 var terrain_texture: ImageTexture
-var terrain_map_texture: ImageTexture
+var terrain_relief_texture: ImageTexture
+var satellite_texture: ImageTexture
 var terrain_slope_texture: ImageTexture
 var terrain_contour_texture: ImageTexture
 var terrain_texture_source = null
+var base_map_style := "Map"
+var show_terrain_overlay := false
 var show_slope_overlay := false
 var show_contours := false
 var show_traffic_overlay := true
+var show_transit_overlay := false
+var base_map_selector: OptionButton
+var terrain_toggle_button: Button
+var slope_toggle_button: Button
+var contour_toggle_button: Button
 var traffic_toggle_button: Button
+var transit_toggle_button: Button
 var terrain_detail_tiles: Dictionary = {}
 var terrain_detail_queue: Array[Vector3i] = []
 var terrain_detail_requested: Dictionary = {}
@@ -159,29 +168,54 @@ func _ready() -> void:
 			button.tooltip_text = "Zoom in" if label == "+" else "Zoom out"
 			button.pressed.connect(func() -> void: _zoom_at(size * 0.5, factor))
 		navigation.add_child(button)
-	var slope_button := Button.new()
-	slope_button.text = "Slope"
-	slope_button.tooltip_text = "Show steep land that limits development"
-	slope_button.toggle_mode = true
-	slope_button.focus_mode = Control.FOCUS_NONE
-	slope_button.toggled.connect(func(enabled: bool) -> void:
+	base_map_selector = OptionButton.new()
+	base_map_selector.add_item("Map")
+	base_map_selector.add_item("Satellite")
+	base_map_selector.selected = 0
+	base_map_selector.tooltip_text = "Choose a simple map or a natural-color satellite-style view"
+	base_map_selector.focus_mode = Control.FOCUS_NONE
+	base_map_selector.item_selected.connect(func(index: int) -> void:
+		set_base_map_style("Satellite" if index == 1 else "Map")
+	)
+	navigation.add_child(base_map_selector)
+	var layers := HBoxContainer.new()
+	layers.name = "MapLayers"
+	layers.position = Vector2(12, 44)
+	layers.add_theme_constant_override("separation", 4)
+	add_child(layers)
+	terrain_toggle_button = Button.new()
+	terrain_toggle_button.text = "Terrain"
+	terrain_toggle_button.tooltip_text = "Show shaded terrain relief over the map colors"
+	terrain_toggle_button.toggle_mode = true
+	terrain_toggle_button.focus_mode = Control.FOCUS_NONE
+	terrain_toggle_button.toggled.connect(func(enabled: bool) -> void:
+		show_terrain_overlay = enabled
+		queue_redraw()
+	)
+	layers.add_child(terrain_toggle_button)
+	slope_toggle_button = Button.new()
+	slope_toggle_button.text = "Slope"
+	slope_toggle_button.tooltip_text = "Show steep land that limits development"
+	slope_toggle_button.toggle_mode = true
+	slope_toggle_button.focus_mode = Control.FOCUS_NONE
+	slope_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_slope_overlay = enabled
 		queue_redraw()
 	)
-	navigation.add_child(slope_button)
-	var contour_button := Button.new()
-	contour_button.text = "Contours"
-	contour_button.tooltip_text = "Show faint terrain elevation lines"
-	contour_button.toggle_mode = true
-	contour_button.focus_mode = Control.FOCUS_NONE
-	contour_button.toggled.connect(func(enabled: bool) -> void:
+	layers.add_child(slope_toggle_button)
+	contour_toggle_button = Button.new()
+	contour_toggle_button.text = "Contours"
+	contour_toggle_button.tooltip_text = "Show faint terrain elevation lines"
+	contour_toggle_button.toggle_mode = true
+	contour_toggle_button.focus_mode = Control.FOCUS_NONE
+	contour_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_contours = enabled
 		queue_redraw()
 	)
-	navigation.add_child(contour_button)
+	layers.add_child(contour_toggle_button)
 	traffic_toggle_button = Button.new()
 	traffic_toggle_button.text = "Traffic"
-	traffic_toggle_button.tooltip_text = "Color roads by traffic flow and congestion in Roads or Terrain view"
+	traffic_toggle_button.tooltip_text = "Color roads by traffic flow and congestion"
 	traffic_toggle_button.toggle_mode = true
 	traffic_toggle_button.button_pressed = true
 	traffic_toggle_button.focus_mode = Control.FOCUS_NONE
@@ -189,7 +223,17 @@ func _ready() -> void:
 		show_traffic_overlay = enabled
 		queue_redraw()
 	)
-	navigation.add_child(traffic_toggle_button)
+	layers.add_child(traffic_toggle_button)
+	transit_toggle_button = Button.new()
+	transit_toggle_button.text = "Transit"
+	transit_toggle_button.tooltip_text = "Show planned rail corridors and station sites"
+	transit_toggle_button.toggle_mode = true
+	transit_toggle_button.focus_mode = Control.FOCUS_NONE
+	transit_toggle_button.toggled.connect(func(enabled: bool) -> void:
+		show_transit_overlay = enabled
+		queue_redraw()
+	)
+	layers.add_child(transit_toggle_button)
 
 
 func set_region(new_region) -> void:
@@ -205,7 +249,8 @@ func set_region(new_region) -> void:
 		terrain_texture_source = new_region.terrain if new_region != null else null
 		terrain_texture = _make_terrain_texture(new_region) if new_region != null else null
 		if new_region == null:
-			terrain_map_texture = null
+			terrain_relief_texture = null
+			satellite_texture = null
 			terrain_slope_texture = null
 			terrain_contour_texture = null
 	district_fill_meshes.clear()
@@ -255,6 +300,7 @@ func _process(_delta: float) -> void:
 		terrain_detail_tiles[key] = {
 			"color": ImageTexture.create_from_image(result["color"]),
 			"terrain": ImageTexture.create_from_image(result["terrain"]),
+			"satellite": ImageTexture.create_from_image(result["satellite"]),
 			"slope": ImageTexture.create_from_image(result["slope"]),
 			"contours": ImageTexture.create_from_image(result["contours"]),
 		}
@@ -318,8 +364,26 @@ func set_traffic_profile(new_profile) -> void:
 
 func set_map_mode(mode: String) -> void:
 	map_mode = mode
-	if traffic_toggle_button != null:
-		traffic_toggle_button.disabled = mode not in ["Roads", "Terrain"]
+	queue_redraw()
+
+
+func set_base_map_style(style: String) -> void:
+	base_map_style = style
+	if base_map_selector != null:
+		base_map_selector.select(1 if style == "Satellite" else 0)
+	if terrain_toggle_button != null:
+		terrain_toggle_button.disabled = style == "Satellite"
+	if slope_toggle_button != null:
+		slope_toggle_button.disabled = style == "Satellite"
+	if contour_toggle_button != null:
+		contour_toggle_button.disabled = style == "Satellite"
+	queue_redraw()
+
+
+func set_transit_overlay(enabled: bool) -> void:
+	show_transit_overlay = enabled
+	if transit_toggle_button != null:
+		transit_toggle_button.set_pressed_no_signal(enabled)
 	queue_redraw()
 
 
@@ -377,7 +441,7 @@ func set_time(hour: int, fraction: float, request_redraw: bool = true) -> void:
 		return
 	selected_hour = next_hour
 	hour_fraction = next_fraction
-	if request_redraw and (map_mode == "Trips" or map_mode in ["Roads", "Terrain"] and show_traffic_overlay and road_traffic_mode == ROAD_HISTORY):
+	if request_redraw and (map_mode == "Trips" or show_traffic_overlay and road_traffic_mode == ROAD_HISTORY):
 		queue_redraw()
 
 
@@ -386,7 +450,7 @@ func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
 		return
 	recorded_bin = bin_index
 	first_recorded_bin = first_bin
-	if map_mode in ["Roads", "Terrain"] and show_traffic_overlay and road_traffic_mode == ROAD_HISTORY:
+	if show_traffic_overlay and road_traffic_mode == ROAD_HISTORY:
 		queue_redraw()
 
 
@@ -397,7 +461,7 @@ func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: fl
 	road_history_previous_hour = previous_hour
 	road_history_current_hour = current_hour
 	road_history_fraction = next_fraction
-	if map_mode in ["Roads", "Terrain"] and show_traffic_overlay and road_traffic_mode == ROAD_HOUR:
+	if show_traffic_overlay and road_traffic_mode == ROAD_HOUR:
 		queue_redraw()
 
 
@@ -436,7 +500,7 @@ func set_day_road_fraction(fraction: float) -> void:
 	if is_equal_approx(day_road_fraction, next_fraction):
 		return
 	day_road_fraction = next_fraction
-	if map_mode in ["Roads", "Terrain"] and show_traffic_overlay and road_traffic_mode == ROAD_DAY:
+	if show_traffic_overlay and road_traffic_mode == ROAD_DAY:
 		queue_redraw()
 
 
@@ -583,7 +647,7 @@ func _draw_aggregate_roads() -> void:
 			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
-		if map_mode in ["Roads", "Terrain"] and show_traffic_overlay:
+		if show_traffic_overlay:
 			var road_load: Vector3 = _road_load_ratio(index, link)
 			forward_color = _congestion_color(road_load.x) if road_load.z > 0.0 else Color("647687")
 			reverse_color = _congestion_color(road_load.y) if road_load.z > 0.0 else Color("647687")
@@ -694,7 +758,7 @@ func _hit_aggregate_node(screen_position: Vector2) -> int:
 
 func _draw() -> void:
 	var draw_started: int = Time.get_ticks_usec()
-	draw_rect(Rect2(Vector2.ZERO, size), Color("102632"))
+	draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
 	if region == null:
 		last_draw_us = Time.get_ticks_usec() - draw_started
 		return
@@ -708,11 +772,13 @@ func _draw() -> void:
 	_draw_roads()
 	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
 	_draw_grade_crossings()
+	if show_transit_overlay:
+		_draw_transit_overlay()
 	if map_mode == "Zoning":
 		_draw_zoning_candidates()
 	if map_mode == "Trips":
 		_draw_hourly_flows()
-	if map_mode not in ["Zoning", "Terrain"]:
+	if map_mode != "Zoning":
 		_draw_neighborhoods()
 	last_draw_stages_us["neighborhoods"] = Time.get_ticks_usec() - draw_started
 	_draw_jurisdiction_labels()
@@ -724,8 +790,6 @@ func _draw() -> void:
 		_draw_road_legend()
 	elif map_mode == "Trips":
 		_draw_legend()
-	elif map_mode == "Terrain":
-		_draw_terrain_legend()
 	else:
 		_draw_zoning_legend()
 	_draw_map_scale()
@@ -862,7 +926,7 @@ func _draw_roads() -> void:
 			continue
 		var forward_color := Color("3f88b0")
 		var reverse_color := forward_color
-		if map_mode in ["Roads", "Terrain"] and show_traffic_overlay:
+		if show_traffic_overlay:
 			var road_load: Vector3 = _road_load_ratio(link_index, link)
 			forward_color = _congestion_color(road_load.x) if road_load.z > 0.0 else Color("647687")
 			reverse_color = _congestion_color(road_load.y) if road_load.z > 0.0 else Color("647687")
@@ -1478,15 +1542,6 @@ func _draw_road_corridors() -> void:
 		var line: PackedVector2Array = _screen_polyline(corridor["points"])
 		if line.size() >= 2 and _screen_visible((line[0] + line[-1]) * 0.5, line[0].distance_to(line[-1]) * 0.5 + 20.0):
 			_draw_dashed_polyline(line, Color("ecc679", 0.9), 2.0)
-	for corridor in region.rail_reservations:
-		var line: PackedVector2Array = _screen_polyline(corridor["points"])
-		if line.size() >= 2 and _screen_visible((line[0] + line[-1]) * 0.5, line[0].distance_to(line[-1]) * 0.5 + 20.0):
-			_draw_dashed_polyline(line, Color("9fc7f0", 0.9), 2.0)
-	for station in region.station_sites:
-		var marker: Vector2 = _world_to_screen(station["point"])
-		if _screen_visible(marker, 12.0):
-			draw_circle(marker, 6.0, Color("9fc7f0"))
-			draw_circle(marker, 2.0, Color("1c2d3d"))
 	if _pixels_per_meter() < 0.025:
 		return
 	for reservation in region.road_reservations:
@@ -1496,6 +1551,20 @@ func _draw_road_corridors() -> void:
 		for mask in reservation["masks"]:
 			if mask.size() >= 3:
 				draw_colored_polygon(_screen_polyline(mask), Color("24343b", 0.98))
+
+
+func _draw_transit_overlay() -> void:
+	for corridor in region.rail_reservations:
+		var line: PackedVector2Array = _screen_polyline(corridor["points"])
+		if line.size() >= 2 and _screen_visible((line[0] + line[-1]) * 0.5, line[0].distance_to(line[-1]) * 0.5 + 20.0):
+			_draw_dashed_polyline(line, Color("364f73", 0.9), 4.0)
+			_draw_dashed_polyline(line, Color("a9d0f2"), 2.0)
+	for station in region.station_sites:
+		var marker: Vector2 = _world_to_screen(station["point"])
+		if _screen_visible(marker, 12.0):
+			draw_circle(marker, 7.0, Color("364f73"))
+			draw_circle(marker, 4.5, Color("a9d0f2"))
+			draw_circle(marker, 1.5, Color("253c55"))
 
 
 func _draw_grade_crossings() -> void:
@@ -1548,16 +1617,6 @@ func _draw_road_legend() -> void:
 		draw_string(font, base + Vector2(0, -39), "Traffic overlay off · Use the Traffic button to show flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	draw_string(font, base + Vector2(0, 4), "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
-
-
-func _draw_terrain_legend() -> void:
-	var font := get_theme_default_font()
-	var base := Vector2(18.0, size.y - 16.0)
-	draw_rect(Rect2(base - Vector2(9, 69), Vector2(390, 90)), Color(0.04, 0.09, 0.16, 0.90))
-	draw_string(font, base + Vector2(0, -50), "TERRAIN", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
-	var contour_text: String = "Contours on · closer lines mean steeper land" if show_contours else "Contours off · use the Contours button"
-	draw_string(font, base + Vector2(0, -25), contour_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, base + Vector2(0, -3), "Traffic overlay on" if show_traffic_overlay else "Traffic overlay off", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 
 
 func _draw_zoning_legend() -> void:
@@ -1661,29 +1720,23 @@ func _visible_zoning_candidate_at(point: Vector2) -> int:
 func _draw_boundaries() -> void:
 	var state_polygon: PackedVector2Array = _screen_polyline(region.jurisdictions[0].polygon_km)
 	if state_polygon.size() >= 3:
-		draw_colored_polygon(state_polygon, Color("c7e9d6") if map_mode == "Terrain" else Color("263b40"))
+		draw_colored_polygon(state_polygon, Color("829576") if base_map_style == "Satellite" else Color("c7e9d6"))
 		if terrain_texture != null:
 			var bounds: Rect2 = region.terrain.bounds
-			var base_texture: ImageTexture = terrain_map_texture if map_mode == "Terrain" else terrain_texture
+			var base_texture: ImageTexture = satellite_texture if base_map_style == "Satellite" else (terrain_relief_texture if show_terrain_overlay else terrain_texture)
 			draw_texture_rect(base_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * zoom), false)
-			if show_slope_overlay and terrain_slope_texture != null:
+			if base_map_style == "Map" and show_slope_overlay and terrain_slope_texture != null:
 				draw_texture_rect(terrain_slope_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * zoom), false)
-			if show_contours and terrain_contour_texture != null:
+			if base_map_style == "Map" and show_contours and terrain_contour_texture != null:
 				draw_texture_rect(terrain_contour_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * zoom), false)
 			_draw_terrain_detail()
-		if map_mode != "Terrain":
-			for region_index in range(region.region_ids.size()):
-				var area = region.jurisdictions[region.region_ids[region_index]]
-				var tint := Color("304648", 0.16).lerp(Color("26363e", 0.16), float(region_index % 4) / 3.0)
-				draw_colored_polygon(_screen_polyline(area.polygon_km), tint)
 		_draw_terrain_water()
 		_draw_polygon_border(region.jurisdictions[0], Color("9eaca2"), 3.0)
 	if selected_jurisdiction_id >= 0:
 		var selected = region.jurisdictions[selected_jurisdiction_id]
 		if selected.kind in ["Region", "County", "City", "Neighborhood"]:
 			draw_colored_polygon(_screen_polyline(selected.polygon_km), Color("e5d69a", 0.055))
-	if map_mode != "Terrain":
-		_draw_neighborhood_boundaries()
+	_draw_neighborhood_boundaries()
 	# Draw the smaller divisions first so the broader borders stay legible where they coincide.
 	for kind in ["City", "County", "Region"]:
 		if region.is_large_scale and zoom < 2.0 and kind == "City":
@@ -1708,7 +1761,11 @@ func _draw_terrain_detail() -> void:
 	var pixels_per_km: float = _map_scale() * zoom
 	var level := -1
 	if pixels_per_km >= 1.0:
-		var target_texel_pixels: float = 2.5 if map_mode == "Terrain" else 4.0
+		var target_texel_pixels := 4.0
+		if base_map_style == "Satellite" or show_terrain_overlay:
+			target_texel_pixels = 2.5
+		if base_map_style == "Map" and show_terrain_overlay and pixels_per_km < 20.0:
+			target_texel_pixels = 1.5
 		for index in range(TERRAIN_DETAIL_STEPS.size()):
 			level = index
 			if pixels_per_km * TERRAIN_DETAIL_STEPS[index] <= target_texel_pixels:
@@ -1779,10 +1836,11 @@ func _draw_cached_terrain_level(terrain, level: int, visible_world: Rect2, pixel
 			var tile: Dictionary = terrain_detail_tiles[key]
 			var origin: Vector2 = terrain.bounds.position + Vector2(x, y) * tile_km
 			var screen_rect := Rect2(_world_to_screen(origin), Vector2.ONE * tile_km * pixels_per_km)
-			draw_texture_rect(tile["terrain" if map_mode == "Terrain" else "color"], screen_rect, false)
-			if show_slope_overlay:
+			var texture_key: String = "satellite" if base_map_style == "Satellite" else ("terrain" if show_terrain_overlay else "color")
+			draw_texture_rect(tile[texture_key], screen_rect, false)
+			if base_map_style == "Map" and show_slope_overlay:
 				draw_texture_rect(tile["slope"], screen_rect, false)
-			if show_contours:
+			if base_map_style == "Map" and show_contours:
 				draw_texture_rect(tile["contours"], screen_rect, false)
 
 
@@ -1792,6 +1850,7 @@ func _make_terrain_texture(source) -> ImageTexture:
 	var terrain = source.terrain
 	var image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	var terrain_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
+	var satellite_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	var slope_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	var contour_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	var land: PackedVector2Array = source.jurisdictions[0].polygon_km
@@ -1801,6 +1860,7 @@ func _make_terrain_texture(source) -> ImageTexture:
 			if not Geometry2D.is_point_in_polygon(point, land):
 				image.set_pixel(x, y, Color.TRANSPARENT)
 				terrain_image.set_pixel(x, y, Color.TRANSPARENT)
+				satellite_image.set_pixel(x, y, Color.TRANSPARENT)
 				slope_image.set_pixel(x, y, Color.TRANSPARENT)
 				contour_image.set_pixel(x, y, Color.TRANSPARENT)
 				continue
@@ -1813,15 +1873,18 @@ func _make_terrain_texture(source) -> ImageTexture:
 			var cover: Vector3 = terrain.land_cover_at(point, elevation, gradient)
 			image.set_pixel(x, y, TerrainDetailTile.land_color(elevation, gradient, cover))
 			terrain_image.set_pixel(x, y, TerrainDetailTile.terrain_color(elevation, gradient, cover))
+			satellite_image.set_pixel(x, y, TerrainDetailTile.satellite_color(elevation, gradient, cover, terrain.ground_detail_at(point), terrain.ground_detail_at(point * 8.0)))
 			slope_image.set_pixel(x, y, TerrainDetailTile.slope_color(gradient))
 			contour_image.set_pixel(x, y, TerrainDetailTile.contour_color(elevation, gradient, terrain.GRID_KM, 500.0))
 	image.generate_mipmaps()
 	terrain_image.generate_mipmaps()
+	satellite_image.generate_mipmaps()
 	slope_image.generate_mipmaps()
 	contour_image.generate_mipmaps()
 	terrain_slope_texture = ImageTexture.create_from_image(slope_image)
 	terrain_contour_texture = ImageTexture.create_from_image(contour_image)
-	terrain_map_texture = ImageTexture.create_from_image(terrain_image)
+	terrain_relief_texture = ImageTexture.create_from_image(terrain_image)
+	satellite_texture = ImageTexture.create_from_image(satellite_image)
 	return ImageTexture.create_from_image(image)
 
 
@@ -1839,7 +1902,7 @@ func _draw_terrain_water() -> void:
 		var polygon := PackedVector2Array()
 		for point in lake["polygon"]:
 			polygon.append(_world_to_screen(point))
-		draw_colored_polygon(polygon, Color("79cde2") if map_mode == "Terrain" else Color("356b78"))
+		draw_colored_polygon(polygon, Color("477d8c") if base_map_style == "Satellite" else Color("79cde2"))
 	for river in terrain.rivers:
 		if _map_scale() * zoom < 2.0 and float(river["width_km"]) < 0.12:
 			continue
@@ -1849,12 +1912,18 @@ func _draw_terrain_water() -> void:
 		if not Rect2(visible_a, Vector2.ZERO).expand(visible_b).intersects(Rect2(Vector2.ZERO, size)):
 			continue
 		var line: PackedVector2Array = river["points"]
+		var widths: PackedFloat32Array = river.get("widths_km", PackedFloat32Array())
+		var water_color: Color = Color("4b8290") if base_map_style == "Satellite" else Color("6cc2dc")
 		for i in range(1, line.size()):
 			var a: Vector2 = _world_to_screen(line[i - 1])
 			var b: Vector2 = _world_to_screen(line[i])
 			if not Rect2(a, Vector2.ZERO).expand(b).grow(10.0).intersects(Rect2(Vector2.ZERO, size)):
 				continue
-			draw_line(a, b, Color("6cc2dc") if map_mode == "Terrain" else Color("467f8b"), maxf(1.3, float(river["width_km"]) * _map_scale() * zoom), true)
+			var width_km: float = (widths[i - 1] + widths[i]) * 0.5 if widths.size() == line.size() else float(river["width_km"])
+			var screen_width: float = maxf(1.0, width_km * _map_scale() * zoom)
+			draw_line(a, b, water_color, screen_width, true)
+			if screen_width >= 3.0:
+				draw_circle(b, screen_width * 0.5, water_color, true, -1.0, true)
 
 
 func _neighborhood_borders_visible(city) -> bool:

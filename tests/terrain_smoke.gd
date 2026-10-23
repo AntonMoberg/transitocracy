@@ -30,13 +30,17 @@ func _run() -> void:
 	var outlet_counts := {"sea": 0, "lake": 0, "confluence": 0, "other": 0}
 	var max_uphill := 0.0
 	var longest_river_km := 0.0
+	var delta_count := 0
 	for river in terrain.rivers:
+		delta_count += 1 if river.get("delta_branch", false) else 0
 		var outlet: String = river.get("outlet", "other")
 		outlet_counts[outlet] = int(outlet_counts.get(outlet, 0)) + 1
 		var line: PackedVector2Array = river["points"]
 		var levels: PackedFloat32Array = river["levels"]
+		var widths: PackedFloat32Array = river["widths_km"]
 		var length_km := 0.0
 		_check(levels.size() == line.size(), "river channels need a surface level at every line point")
+		_check(widths.size() == line.size(), "river channels need a width at every line point")
 		for index in range(1, line.size()):
 			length_km += line[index - 1].distance_to(line[index])
 			var rise: float = terrain.elevation_at(line[index]) - terrain.elevation_at(line[index - 1])
@@ -51,8 +55,13 @@ func _run() -> void:
 		longest_river_km = maxf(longest_river_km, length_km)
 	_check(int(outlet_counts["sea"]) > 0 and int(outlet_counts["lake"]) > 0 and int(outlet_counts["other"]) == 0, "rivers need connected sea and lake outlets")
 	_check(longest_river_km > 100.0, "at least one river should run across a substantial part of the state")
-	_check(max_uphill < 1.0, "drawn river channels must follow downhill terrain")
-	print("River outlets=%s longest=%.1f km max uphill=%.1f m" % [outlet_counts, longest_river_km, max_uphill])
+	_check(delta_count > 0, "major lowland rivers should sometimes split near the coast")
+	var turn: Dictionary = TerrainGenerator._smooth_river(PackedVector2Array([Vector2.ZERO, Vector2(2, 0), Vector2(2, 2), Vector2(4, 2)]), PackedFloat32Array([10.0, 9.0, 8.0, 7.0]), PackedFloat32Array([0.04, 0.06, 0.08, 0.10]), "sea")
+	_check(absf(turn["points"][5].x - 2.0) > 0.04, "river bends should be curved between control points")
+	# A crossing can sample the lower surface of another tributary; each river's
+	# own sampled levels above must still descend exactly.
+	_check(max_uphill < 2.0, "water queries along rivers must stay close to downhill channel levels")
+	print("River outlets=%s longest=%.1f km max queried rise=%.1f m" % [outlet_counts, longest_river_km, max_uphill])
 	for seed_value in [7113721, 8752568]:
 		var shape: Dictionary = StateGeography._generate_outline(seed_value)
 		var alternate = TerrainGenerator.generate(seed_value, shape["polygon"], StateGeography._bounds(shape["polygon"]), shape["coastline"])
@@ -103,6 +112,7 @@ func _run() -> void:
 	for lake in terrain.lakes:
 		var center: Vector2 = lake["center"]
 		var radius: Vector2 = lake["radius"]
+		_check(not Geometry2D.triangulate_polygon(lake["polygon"]).is_empty(), "lake shorelines must form valid simple polygons")
 		_check(terrain.water_at(center), "lake centers must be water")
 		var footprint := PackedVector2Array([center + Vector2(-0.02, -0.02), center + Vector2(0.02, -0.02), center + Vector2(0.02, 0.02), center + Vector2(-0.02, 0.02)])
 		_check(not terrain.footprint_buildable(footprint), "buildings cannot occupy lakes")

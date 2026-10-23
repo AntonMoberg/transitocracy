@@ -112,17 +112,35 @@ func _run() -> void:
 	await process_frame
 	if map.size.y < 250.0 or main.inspector.size.y < 70.0:
 		errors.append("Development controls must leave the map and inspector usable at 1024 × 700: map %s, inspector %s." % [map.size, main.inspector.size])
-	main._on_map_mode_selected(3)
+	main._on_map_mode_selected(0)
+	if main.map_mode_selector.item_count != 3:
+		errors.append("Roads, Trips, and Zoning must be the only map modes.")
+	map.terrain_toggle_button.button_pressed = true
 	await process_frame
 	await process_frame
-	if map.map_mode != "Terrain" or map.urban_layer.last_building_count != 0:
-		errors.append("Terrain view must show topography without building footprints.")
+	if map.map_mode != "Roads" or not map.show_terrain_overlay:
+		errors.append("Terrain toggle must add relief without changing map mode.")
+	if map.urban_layer.last_building_count == 0:
+		errors.append("Terrain relief must preserve visible building footprints.")
 	if map.traffic_toggle_button.disabled:
-		errors.append("Traffic overlay must be available in Terrain view.")
+		errors.append("Traffic overlay must remain available with terrain relief.")
+	map.set_base_map_style("Satellite")
+	await process_frame
+	await process_frame
+	if map.urban_layer.last_building_count == 0 or map.map_mode != "Roads":
+		errors.append("Satellite style must preserve road mode and visible building footprints.")
+	if not map.terrain_toggle_button.disabled or map.traffic_toggle_button.disabled or map.transit_toggle_button.disabled:
+		errors.append("Satellite style must offer Traffic and Transit layers without Terrain.")
+	map.transit_toggle_button.button_pressed = true
+	if not map.show_transit_overlay:
+		errors.append("Transit layer must be switchable over Satellite.")
+	map.set_base_map_style("Map")
 	map.traffic_toggle_button.button_pressed = false
 	if map.show_traffic_overlay:
 		errors.append("Traffic toggle must turn off congestion coloring.")
-	main._on_map_mode_selected(0)
+	map.terrain_toggle_button.button_pressed = false
+	if map.show_terrain_overlay:
+		errors.append("Terrain toggle must restore the flat map colors.")
 	if map.traffic_toggle_button.disabled:
 		errors.append("Traffic overlay must remain available in Roads view.")
 	if not errors.is_empty():

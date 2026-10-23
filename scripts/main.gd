@@ -262,7 +262,7 @@ func _process(delta: float) -> void:
 		calendar_clock.visual_offset_seconds = 0.0
 	last_advance_us = Time.get_ticks_usec() - advance_started
 	game_rate_seconds += traffic_state.unix_seconds - game_start
-	if traffic_state.unix_seconds != game_start and map_view.map_mode in ["Roads", "Terrain"] and map_view.show_traffic_overlay and map_view.road_traffic_mode == RegionMap.ROAD_LIVE:
+	if traffic_state.unix_seconds != game_start and map_view.show_traffic_overlay and map_view.road_traffic_mode == RegionMap.ROAD_LIVE:
 		var now_msec: int = Time.get_ticks_msec()
 		if now_msec - last_live_road_redraw_msec >= ANIMATED_MAP_REDRAW_INTERVAL_MS:
 			map_view.queue_redraw()
@@ -453,7 +453,6 @@ func _build_interface() -> void:
 	map_mode_selector.add_item("Roads")
 	map_mode_selector.add_item("Trips")
 	map_mode_selector.add_item("Zoning")
-	map_mode_selector.add_item("Terrain")
 	map_mode_selector.selected = 0
 	map_mode_selector.item_selected.connect(_on_map_mode_selected)
 	road_controls.add_child(map_mode_selector)
@@ -1818,7 +1817,7 @@ func _on_development_zoning(neighborhood_id: int, shares: Dictionary, density: D
 
 
 func _on_map_mode_selected(index: int) -> void:
-	map_view.set_map_mode(["Roads", "Trips", "Zoning", "Terrain"][index])
+	map_view.set_map_mode(["Roads", "Trips", "Zoning"][index])
 	road_tool_selector.visible = index == 0
 	road_draw_selector.visible = index == 0 and road_tool_selector.get_item_text(road_tool_selector.selected) in ["Arterial", "Highway"]
 	road_snap_toggle.visible = road_draw_selector.visible
@@ -1916,6 +1915,7 @@ func _on_planning_point(point: Vector2) -> void:
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
 	if tool_name == "Station site":
 		region.station_sites.append({"city_id": city_id, "point": point})
+		map_view.set_transit_overlay(true)
 		road_status_label.text = "Station site reserved for %s." % region.get_city_name(city_id)
 	elif not planning_has_start:
 		planning_start_point = point
@@ -1934,6 +1934,7 @@ func _on_planning_point(point: Vector2) -> void:
 			road_status_label.text = "Growth corridor added for %s." % region.get_city_name(city_id)
 		else:
 			region.rail_reservations.append(guide)
+			map_view.set_transit_overlay(true)
 			road_status_label.text = "Rail corridor reserved for %s." % region.get_city_name(city_id)
 		planning_has_start = false
 		map_view.set_planning_preview(Vector2.INF)

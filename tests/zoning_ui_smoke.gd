@@ -52,6 +52,9 @@ func _run() -> void:
 	if main.region.urban_corridors.size() != 1 or main.region.rail_reservations.size() != 1 or main.region.station_sites.size() != 1:
 		_fail("Road planning tools did not record growth, rail, and station guides.")
 		return
+	if not main.map_view.show_transit_overlay:
+		_fail("Placing planned transit must reveal its map layer.")
+		return
 	main.map_mode_selector.select(2)
 	main._on_map_mode_selected(2)
 	candidate_id = int(main.region.development_candidate_keys.get(candidate_key, -1))
@@ -80,7 +83,7 @@ func _run() -> void:
 	map._gui_input(press)
 	map._gui_input(release)
 	if main.selected_candidate_id != candidate_id or not main.zoning_controls.visible or main.zoning_button.disabled:
-		_fail("Clicking the suggested district did not open its approval plan.")
+		_fail("Clicking the suggested district did not open its approval plan (selected %d, expected %d, panel %s, disabled %s)." % [main.selected_candidate_id, candidate_id, main.zoning_controls.visible, main.zoning_button.disabled])
 		return
 	var original_polygon: PackedVector2Array = candidate["polygon"].duplicate()
 	main.development_controls.style_input.select(1)

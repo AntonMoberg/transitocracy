@@ -1,7 +1,7 @@
 extends RefCounted
 
 const TerrainData = preload("res://scripts/simulation/terrain_data.gd")
-const RIVER_CATCHMENT_CELLS = 54.0
+const RIVER_CATCHMENT_CELLS = 32.0
 
 
 static func generate(seed_value: int, outline: PackedVector2Array, bounds: Rect2, coastline: PackedVector2Array):
@@ -16,10 +16,12 @@ static func generate(seed_value: int, outline: PackedVector2Array, bounds: Rect2
 	var ridges := _noise(seed_value + 307, 0.00018, 2)
 	var ridge_warp := _noise(seed_value + 389, 0.000035, 2)
 	terrain.detail_noise = _noise(seed_value + 541, 0.00075, 2)
-	terrain.visual_relief_noise = _noise(seed_value + 613, 0.0006, 3)
-	terrain.visual_detail_noise = _noise(seed_value + 719, 0.0018, 2)
+	terrain.visual_relief_noise = _noise(seed_value + 613, 0.00045, 3)
+	terrain.visual_detail_noise = _noise(seed_value + 719, 0.0010, 3)
+	terrain.visual_gully_noise = _noise(seed_value + 761, 0.00085, 3)
 	terrain.climate_noise = _noise(seed_value + 823, 0.000035, 2)
-	terrain.vegetation_noise = _noise(seed_value + 947, 0.00015, 2)
+	terrain.vegetation_noise = _noise(seed_value + 947, 0.000075, 2)
+	terrain.ground_noise = _noise(seed_value + 991, 0.00055, 3)
 	var count: int = terrain.width * terrain.height
 	terrain.elevations.resize(count)
 	var coast_distances := PackedFloat32Array()
@@ -47,22 +49,22 @@ static func generate(seed_value: int, outline: PackedVector2Array, bounds: Rect2
 	terrain.index_lakes()
 	_carve_lake_basins(terrain)
 	_make_drainage(terrain, outline, coast_distances)
+	_make_delta_branches(terrain, outline)
 	terrain.index_rivers()
 	return terrain
 
 
 static func _smooth_elevations(terrain) -> void:
-	for _pass_index in range(1):
-		var original: PackedFloat32Array = terrain.elevations.duplicate()
-		for y in range(1, terrain.height - 1):
-			for x in range(1, terrain.width - 1):
-				var id: int = y * terrain.width + x
-				var total: float = original[id] * 4.0
-				for step in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-					total += original[(y + step.y) * terrain.width + x + step.x] * 2.0
-				for step in [Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
-					total += original[(y + step.y) * terrain.width + x + step.x]
-				terrain.elevations[id] = total / 16.0
+	var original: PackedFloat32Array = terrain.elevations.duplicate()
+	for y in range(1, terrain.height - 1):
+		for x in range(1, terrain.width - 1):
+			var id: int = y * terrain.width + x
+			var total: float = original[id] * 4.0
+			for step in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				total += original[(y + step.y) * terrain.width + x + step.x] * 2.0
+			for step in [Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(1, 1)]:
+				total += original[(y + step.y) * terrain.width + x + step.x]
+			terrain.elevations[id] = total / 16.0
 
 
 static func _closest_coast_point(point: Vector2, coastline: PackedVector2Array) -> Vector2:
@@ -97,6 +99,40 @@ static func _noise(seed_value: int, frequency: float, octaves: int) -> FastNoise
 	return noise
 
 
+static func _lake_polygon(center: Vector2, axes: Vector2, rotation: float, seed_value: int) -> PackedVector2Array:
+	var bend_noise := _noise(seed_value, 0.00020, 2)
+	var bank_noise := _noise(seed_value + 37, 0.00065, 3)
+	var forward: Vector2 = Vector2.from_angle(rotation)
+	var across: Vector2 = forward.orthogonal()
+	var steps: int = maxi(28, ceili(axes.x * 4.0))
+	var left := PackedVector2Array()
+	var right := PackedVector2Array()
+	for index in range(steps + 1):
+		var t: float = float(index) / float(steps) * 2.0 - 1.0
+		var middle: Vector2 = center + forward * axes.x * t
+		var bend: float = bend_noise.get_noise_2d(middle.x * 1000.0, middle.y * 1000.0) * axes.y * 0.48
+		middle += across * bend
+		var half_width: float = axes.y * sqrt(maxf(0.0, 1.0 - t * t))
+		var left_sample: Vector2 = middle + across * half_width
+		var right_sample: Vector2 = middle - across * half_width
+		var left_width: float = clampf(0.94 + bank_noise.get_noise_2d(left_sample.x * 1000.0, left_sample.y * 1000.0) * 0.48, 0.62, 1.3)
+		var right_width: float = clampf(0.94 + bank_noise.get_noise_2d(right_sample.x * 1000.0 + 431.0, right_sample.y * 1000.0 - 257.0) * 0.48, 0.62, 1.3)
+		left.append(middle + across * half_width * left_width)
+		right.append(middle - across * half_width * right_width)
+	var shore := left
+	for index in range(steps - 1, 0, -1):
+		shore.append(right[index])
+	return shore
+
+
+static func _lake_bounds_radius(center: Vector2, shore: PackedVector2Array) -> Vector2:
+	var radius := Vector2.ZERO
+	for point in shore:
+		radius.x = maxf(radius.x, absf(point.x - center.x))
+		radius.y = maxf(radius.y, absf(point.y - center.y))
+	return radius
+
+
 static func _make_lakes(terrain, outline: PackedVector2Array) -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = terrain.seed_value * 65537 + 2207
@@ -105,20 +141,12 @@ static func _make_lakes(terrain, outline: PackedVector2Array) -> void:
 		attempts += 1
 		var center: Vector2 = terrain.bounds.position + Vector2(rng.randf(), rng.randf()) * terrain.bounds.size
 		var major: bool = terrain.lakes.size() < 4
-		var axes := Vector2(rng.randf_range(9.0, 18.0), rng.randf_range(3.0, 7.0)) if major else Vector2(rng.randf_range(2.0, 7.0), rng.randf_range(1.3, 5.0))
+		var axes := Vector2(rng.randf_range(12.0, 23.0), rng.randf_range(2.0, 4.8)) if major else Vector2(rng.randf_range(3.0, 8.0), rng.randf_range(1.0, 2.8))
 		var rotation: float = rng.randf_range(-PI, PI)
-		var axis_x: Vector2 = Vector2.from_angle(rotation) * axes.x
-		var axis_y: Vector2 = Vector2.from_angle(rotation + PI * 0.5) * axes.y
-		var radius := Vector2(absf(axis_x.x) + absf(axis_y.x), absf(axis_x.y) + absf(axis_y.y))
 		if not Geometry2D.is_point_in_polygon(center, outline) or terrain.elevation_at(center) > 430.0:
 			continue
-		var phase_a: float = rng.randf_range(0.0, TAU)
-		var phase_b: float = rng.randf_range(0.0, TAU)
-		var shore := PackedVector2Array()
-		for angle_index in range(72):
-			var angle: float = float(angle_index) * TAU / 72.0
-			var waviness: float = 1.0 + 0.13 * sin(3.0 * angle + phase_a) + 0.07 * sin(7.0 * angle + phase_b)
-			shore.append(center + (axis_x * cos(angle) + axis_y * sin(angle)) * waviness)
+		var shore: PackedVector2Array = _lake_polygon(center, axes, rotation, terrain.seed_value + attempts * 101)
+		var radius: Vector2 = _lake_bounds_radius(center, shore)
 		var valid := true
 		for p in shore:
 			if not Geometry2D.is_point_in_polygon(p, outline):
@@ -237,6 +265,7 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 	var accumulation := PackedFloat32Array()
 	var root_ids := PackedInt32Array()
 	root_ids.resize(count)
+	var flow_order := PackedInt32Array()
 	for _pass_index in range(32):
 		var children := PackedInt32Array()
 		children.resize(count)
@@ -260,6 +289,7 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 			children[downstream] -= 1
 			if children[downstream] == 0:
 				queue.append(downstream)
+		flow_order = queue
 		for queue_id in range(queue.size() - 1, -1, -1):
 			var id: int = queue[queue_id]
 			root_ids[id] = id if parent[id] < 0 else root_ids[parent[id]]
@@ -285,13 +315,13 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 			var basin_id: int = basin_candidates[root]
 			var center: Vector2 = terrain.bounds.position + Vector2(basin_id % terrain.width, basin_id / terrain.width) * TerrainData.GRID_KM
 			var radius_km: float = clampf(1.2 + sqrt(accumulation[basin_id]) * 0.035, 1.5, 4.0)
+			var downstream_point: Vector2 = terrain.bounds.position + Vector2(parent[basin_id] % terrain.width, parent[basin_id] / terrain.width) * TerrainData.GRID_KM
+			var rotation: float = (downstream_point - center).angle()
 			var shore := PackedVector2Array()
+			var radius := Vector2.ZERO
 			for _shrink in range(5):
-				shore.clear()
-				for angle_index in range(32):
-					var angle: float = float(angle_index) * TAU / 32.0
-					var wobble: float = 1.0 + 0.12 * sin(angle * 5.0 + float(basin_id) * 0.17)
-					shore.append(center + Vector2.from_angle(angle) * radius_km * wobble)
+				shore = _lake_polygon(center, Vector2(radius_km * 1.8, radius_km * 0.72), rotation, terrain.seed_value + basin_id * 19)
+				radius = _lake_bounds_radius(center, shore)
 				var inside := true
 				for shore_point in shore:
 					if not Geometry2D.is_point_in_polygon(shore_point, outline):
@@ -300,11 +330,11 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 				if inside:
 					break
 				radius_km *= 0.5
-			terrain.lakes.append({"center": center, "radius": Vector2.ONE * radius_km, "polygon": shore, "level_m": maxf(1.0, terrain.elevations[basin_id])})
-			var lake_left: int = maxi(0, floori((center.x - radius_km * 1.25 - terrain.bounds.position.x) / TerrainData.GRID_KM))
-			var lake_right: int = mini(terrain.width - 1, ceili((center.x + radius_km * 1.25 - terrain.bounds.position.x) / TerrainData.GRID_KM))
-			var lake_top: int = maxi(0, floori((center.y - radius_km * 1.25 - terrain.bounds.position.y) / TerrainData.GRID_KM))
-			var lake_bottom: int = mini(terrain.height - 1, ceili((center.y + radius_km * 1.25 - terrain.bounds.position.y) / TerrainData.GRID_KM))
+			terrain.lakes.append({"center": center, "radius": radius, "polygon": shore, "level_m": maxf(1.0, terrain.elevations[basin_id])})
+			var lake_left: int = maxi(0, floori((center.x - radius.x * 1.25 - terrain.bounds.position.x) / TerrainData.GRID_KM))
+			var lake_right: int = mini(terrain.width - 1, ceili((center.x + radius.x * 1.25 - terrain.bounds.position.x) / TerrainData.GRID_KM))
+			var lake_top: int = maxi(0, floori((center.y - radius.y * 1.25 - terrain.bounds.position.y) / TerrainData.GRID_KM))
+			var lake_bottom: int = mini(terrain.height - 1, ceili((center.y + radius.y * 1.25 - terrain.bounds.position.y) / TerrainData.GRID_KM))
 			for lake_y in range(lake_top, lake_bottom + 1):
 				for lake_x in range(lake_left, lake_right + 1):
 					var lake_point: Vector2 = terrain.bounds.position + Vector2(lake_x, lake_y) * TerrainData.GRID_KM
@@ -319,6 +349,13 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 		var point: Vector2 = terrain.bounds.position + Vector2(id % terrain.width, id / terrain.width) * TerrainData.GRID_KM
 		if parent[id] >= 0 and accumulation[id] >= RIVER_CATCHMENT_CELLS and Geometry2D.is_point_in_polygon(point, outline) and not terrain.water_at(point):
 			river_cells[id] = 1
+	var channel_levels: PackedFloat32Array = effective_height.duplicate()
+	for id in flow_order:
+		if river_cells[id] == 0:
+			continue
+		var downstream: int = parent[id]
+		if downstream >= 0 and river_cells[downstream] != 0:
+			channel_levels[downstream] = minf(channel_levels[downstream], channel_levels[id] - 0.01)
 	var used := PackedByteArray()
 	used.resize(count)
 	for id in range(count):
@@ -339,6 +376,7 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 			continue
 		var line := PackedVector2Array()
 		var levels := PackedFloat32Array()
+		var widths := PackedFloat32Array()
 		var source_point: Vector2 = terrain.bounds.position + Vector2(id % terrain.width, id / terrain.width) * TerrainData.GRID_KM
 		for dy in range(-1, 2):
 			for dx in range(-1, 2):
@@ -354,6 +392,7 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 				if not upstream_lake.is_empty():
 					line.append(_boundary_crossing(upstream_point, source_point, upstream_lake["polygon"]))
 					levels.append(float(upstream_lake["level_m"]))
+					widths.append(_river_width(accumulation[id]))
 					break
 			if not line.is_empty():
 				break
@@ -364,7 +403,8 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 			used[cursor] = 1
 			var current_point: Vector2 = terrain.bounds.position + Vector2(cursor % terrain.width, cursor / terrain.width) * TerrainData.GRID_KM
 			line.append(current_point)
-			levels.append(effective_height[cursor])
+			levels.append(channel_levels[cursor])
+			widths.append(_river_width(accumulation[cursor]))
 			largest = maxf(largest, accumulation[cursor])
 			var downstream: int = parent[cursor]
 			if downstream < 0:
@@ -374,29 +414,47 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 			if not lake_entry.is_empty():
 				line.append(lake_entry["point"])
 				levels.append(float(lake_entry["lake"]["level_m"]))
+				widths.append(_river_width(accumulation[cursor]))
 				outlet = "lake"
 				break
 			if river_cells[downstream] == 0:
+				if seed_type[downstream] == 2:
+					var downstream_lake: Dictionary = _lake_at(terrain, downstream_point)
+					if not downstream_lake.is_empty():
+						line.append(_boundary_crossing(current_point, downstream_point, downstream_lake["polygon"]))
+						levels.append(float(downstream_lake["level_m"]))
+						widths.append(_river_width(accumulation[cursor]))
+						outlet = "lake"
+						break
 				if seed_type[downstream] == 1:
 					line.append(downstream_point)
 					levels.append(effective_height[downstream])
+					widths.append(_river_width(accumulation[downstream]))
 					line.append(_closest_coast_point(downstream_point, terrain.coastline))
 					levels.append(0.0)
+					widths.append(_river_width(accumulation[downstream]))
 				else:
 					line.append(_boundary_crossing(current_point, downstream_point, outline))
 					levels.append(effective_height[downstream])
+					widths.append(_river_width(accumulation[downstream]))
 				outlet = "sea"
 				break
 			if used[downstream] != 0:
 				line.append(downstream_point)
-				levels.append(effective_height[downstream])
+				levels.append(channel_levels[downstream])
+				widths.append(_river_width(accumulation[downstream]))
 				outlet = "confluence"
 				break
 			cursor = downstream
 		if line.size() >= 3:
+			if outlet == "lake":
+				var lake_level: float = levels[-1]
+				for level_index in range(levels.size() - 2, -1, -1):
+					levels[level_index] = maxf(levels[level_index], lake_level)
 			for level_index in range(1, levels.size()):
-				levels[level_index] = minf(levels[level_index], levels[level_index - 1] - 0.01)
-			terrain.rivers.append({"points": _smooth_river(line), "levels": _smooth_river_levels(levels), "width_km": clampf(0.035 + sqrt(largest) * 0.006, 0.05, 0.24), "outlet": outlet})
+				levels[level_index] = minf(levels[level_index], levels[level_index - 1])
+			var smoothed: Dictionary = _smooth_river(line, levels, widths, outlet)
+			terrain.rivers.append({"points": smoothed["points"], "levels": smoothed["levels"], "widths_km": smoothed["widths_km"], "width_km": _river_width(largest), "outlet": outlet})
 
 
 static func _lake_at(terrain, point: Vector2) -> Dictionary:
@@ -433,22 +491,104 @@ static func _boundary_crossing(first: Vector2, last: Vector2, polygon: PackedVec
 		var crossing = Geometry2D.segment_intersects_segment(first, last, polygon[edge], polygon[(edge + 1) % polygon.size()])
 		if crossing != null:
 			return crossing
+	var first_inside: bool = Geometry2D.is_point_in_polygon(first, polygon)
+	if first_inside != Geometry2D.is_point_in_polygon(last, polygon):
+		var outside: Vector2 = last if first_inside else first
+		var inside: Vector2 = first if first_inside else last
+		for _iteration in range(24):
+			var midpoint: Vector2 = (outside + inside) * 0.5
+			if Geometry2D.is_point_in_polygon(midpoint, polygon):
+				inside = midpoint
+			else:
+				outside = midpoint
+		return (outside + inside) * 0.5
 	return (first + last) * 0.5
 
 
-static func _smooth_river(line: PackedVector2Array) -> PackedVector2Array:
-	var result := PackedVector2Array([line[0]])
-	for i in range(1, line.size()):
-		result.append(line[i - 1].lerp(line[i], 0.25))
-		result.append(line[i - 1].lerp(line[i], 0.75))
-	result.append(line[-1])
-	return result
+static func _river_width(catchment_cells: float) -> float:
+	return clampf(0.018 + sqrt(maxf(0.0, catchment_cells)) * 0.0065, 0.035, 0.32)
 
 
-static func _smooth_river_levels(levels: PackedFloat32Array) -> PackedFloat32Array:
-	var result := PackedFloat32Array([levels[0]])
-	for i in range(1, levels.size()):
-		result.append(lerpf(levels[i - 1], levels[i], 0.25))
-		result.append(lerpf(levels[i - 1], levels[i], 0.75))
-	result.append(levels[-1])
-	return result
+static func _make_delta_branches(terrain, outline: PackedVector2Array) -> void:
+	var mouths := PackedVector2Array()
+	var original_count: int = terrain.rivers.size()
+	for river_id in range(original_count):
+		if mouths.size() >= 6:
+			break
+		var river: Dictionary = terrain.rivers[river_id]
+		if river["outlet"] != "sea" or float(river["width_km"]) < 0.16:
+			continue
+		var line: PackedVector2Array = river["points"]
+		var levels: PackedFloat32Array = river["levels"]
+		var widths: PackedFloat32Array = river["widths_km"]
+		var mouth: Vector2 = line[-1]
+		var near_existing := false
+		for previous_mouth in mouths:
+			if mouth.distance_to(previous_mouth) < 35.0:
+				near_existing = true
+				break
+		if near_existing:
+			continue
+		var branch_index: int = line.size() - 2
+		var upstream_distance := 0.0
+		while branch_index > 1 and upstream_distance < 8.0:
+			upstream_distance += line[branch_index].distance_to(line[branch_index + 1])
+			branch_index -= 1
+		if upstream_distance < 5.0 or levels[branch_index] < 0.5:
+			continue
+		var start: Vector2 = line[branch_index]
+		if terrain.gradient_at(start).length() > 0.08:
+			continue
+		var forward: Vector2 = (mouth - start).normalized()
+		if forward.length_squared() < 0.5:
+			continue
+		var across: Vector2 = forward.orthogonal()
+		for side in [1.0, -1.0]:
+			var target: Vector2 = _closest_coast_point(mouth + across * side * 5.5, terrain.coastline)
+			if target.distance_to(mouth) < 1.5 or target.distance_to(mouth) > 12.0:
+				continue
+			var guide: Vector2 = start.lerp(target, 0.55) + across * side * 2.2
+			var branch := PackedVector2Array()
+			var branch_levels := PackedFloat32Array()
+			var branch_widths := PackedFloat32Array()
+			var valid := true
+			for sample_index in range(25):
+				var t: float = float(sample_index) / 24.0
+				var position: Vector2 = start * pow(1.0 - t, 2.0) + guide * (2.0 * (1.0 - t) * t) + target * t * t
+				if sample_index < 24 and not Geometry2D.is_point_in_polygon(position, outline):
+					valid = false
+					break
+				branch.append(position)
+				branch_levels.append(lerpf(levels[branch_index], 0.0, t))
+				branch_widths.append(widths[branch_index] * lerpf(0.48, 0.70, t))
+			if not valid:
+				continue
+			terrain.rivers.append({"points": branch, "levels": branch_levels, "widths_km": branch_widths, "width_km": branch_widths[-1], "outlet": "sea", "delta_branch": true})
+			mouths.append(mouth)
+			break
+
+
+static func _smooth_river(line: PackedVector2Array, levels: PackedFloat32Array, widths: PackedFloat32Array, outlet: String) -> Dictionary:
+	var curve := PackedVector2Array([line[0]])
+	var curve_levels := PackedFloat32Array([levels[0]])
+	var curve_widths := PackedFloat32Array([widths[0]])
+	for index in range(line.size() - 1):
+		var before: Vector2 = line[maxi(0, index - 1)]
+		var start: Vector2 = line[index]
+		var end: Vector2 = line[index + 1]
+		var after: Vector2 = line[mini(line.size() - 1, index + 2)]
+		for subdivision in range(1, 5):
+			var fraction: float = float(subdivision) * 0.25
+			var position: Vector2 = start.lerp(end, fraction)
+			if subdivision < 4 and not (outlet == "lake" and index == line.size() - 2):
+				var t2: float = fraction * fraction
+				var t3: float = t2 * fraction
+				var tangent_a: Vector2 = (end - before) * 0.5
+				var tangent_b: Vector2 = (after - start) * 0.5
+				var curved: Vector2 = start * (2.0 * t3 - 3.0 * t2 + 1.0) + tangent_a * (t3 - 2.0 * t2 + fraction) + end * (-2.0 * t3 + 3.0 * t2) + tangent_b * (t3 - t2)
+				var offset: Vector2 = curved - position
+				position += offset.limit_length(minf(0.55, start.distance_to(end) * 0.28))
+			curve.append(position)
+			curve_levels.append(lerpf(levels[index], levels[index + 1], fraction))
+			curve_widths.append(lerpf(widths[index], widths[index + 1], fraction))
+	return {"points": curve, "levels": curve_levels, "widths_km": curve_widths}

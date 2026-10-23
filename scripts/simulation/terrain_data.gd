@@ -18,8 +18,10 @@ var river_cells: Dictionary = {}
 var detail_noise: FastNoiseLite
 var visual_relief_noise: FastNoiseLite
 var visual_detail_noise: FastNoiseLite
+var visual_gully_noise: FastNoiseLite
 var climate_noise: FastNoiseLite
 var vegetation_noise: FastNoiseLite
+var ground_noise: FastNoiseLite
 
 
 func elevation_at(point: Vector2) -> float:
@@ -70,12 +72,17 @@ func visual_elevation_at(point: Vector2) -> float:
 		return base
 	var dx: float = ((elevations[y1 + x2] - elevations[y1 + x1]) + (elevations[y2 + x2] - elevations[y2 + x1])) / (GRID_KM * 2000.0)
 	var dy: float = ((elevations[y2 + x1] - elevations[y1 + x1]) + (elevations[y2 + x2] - elevations[y1 + x2])) / (GRID_KM * 2000.0)
-	var hill_factor: float = smoothstep(0.04, 0.12, Vector2(dx, dy).length())
+	var hill_factor: float = smoothstep(0.03, 0.11, Vector2(dx, dy).length())
 	if hill_factor <= 0.0:
 		return base
-	var alpine_factor: float = smoothstep(350.0, 950.0, base)
-	var relief: float = visual_relief_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0) * 48.0 * alpine_factor * hill_factor if visual_relief_noise != null else 0.0
-	return base + relief + visual_detail_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0) * 4.0 * hill_factor
+	var alpine_factor: float = smoothstep(100.0, 650.0, base)
+	var relief: float = visual_relief_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0) * 88.0 * alpine_factor * hill_factor if visual_relief_noise != null else 0.0
+	var fine_relief: float = visual_detail_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0) * 44.0 * hill_factor
+	var gullies := 0.0
+	if visual_gully_noise != null:
+		var gully_noise: float = visual_gully_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0)
+		gullies = pow(maxf(0.0, 1.0 - absf(gully_noise) / 0.23), 2.0) * 62.0 * alpine_factor * hill_factor
+	return base + relief + fine_relief - gullies
 
 
 func land_cover_at(point: Vector2, elevation: float, gradient: Vector2) -> Vector3:
@@ -89,6 +96,10 @@ func land_cover_at(point: Vector2, elevation: float, gradient: Vector2) -> Vecto
 	var dry_ground: float = (1.0 - smoothstep(0.32, 0.45, moisture)) * (1.0 - smoothstep(0.12, 0.22, slope))
 	var exposed_rock: float = smoothstep(420.0, 1050.0, elevation) * smoothstep(0.055, 0.19, slope)
 	return Vector3(woodland, dry_ground, exposed_rock)
+
+
+func ground_detail_at(point: Vector2) -> float:
+	return ground_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0) if ground_noise != null else 0.0
 
 
 static func _interpolate_height(a: float, b: float, c: float, d: float, fraction: float) -> float:
@@ -125,8 +136,9 @@ func river_surface_at(point: Vector2) -> float:
 		var river: Dictionary = rivers[river_id]
 		var line: PackedVector2Array = river["points"]
 		var levels: PackedFloat32Array = river["levels"]
-		var radius: float = river["width_km"] * 0.5
+		var widths: PackedFloat32Array = river.get("widths_km", PackedFloat32Array())
 		for i in range(1, line.size()):
+			var radius: float = (widths[i - 1] + widths[i]) * 0.25 if widths.size() == line.size() else float(river["width_km"]) * 0.5
 			var closest: Vector2 = Geometry2D.get_closest_point_to_segment(point, line[i - 1], line[i])
 			if point.distance_to(closest) <= radius:
 				var segment: Vector2 = line[i] - line[i - 1]
