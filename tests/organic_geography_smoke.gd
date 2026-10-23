@@ -3,7 +3,7 @@ extends SceneTree
 const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const UiFixture = preload("res://tests/ui_fixture.gd")
 
 var failures := 0
@@ -62,7 +62,7 @@ func _run() -> void:
 					_check(neighborhood.developable_area_ha > 0.0 and neighborhood.developable_area_ha <= minf(130.0, neighborhood.land_area_ha), "larger administrative boundaries must not inflate developable housing and job capacity")
 			_check(neighborhood_counts.size() >= 2, "anchor and dormant cities must have different neighborhood counts")
 			if region.is_large_scale:
-				var snapshot = DayCycleCalculator.copy_region(region)
+				var snapshot = RegionSnapshot.copy_region(region)
 				var district_id: int = region.neighborhoods[0].jurisdiction_id
 				_check(snapshot.jurisdictions[district_id].polygon_km == region.jurisdictions[district_id].polygon_km, "background snapshots must preserve neighborhood boundaries")
 				_check(snapshot.neighborhoods[0].developable_area_ha == region.neighborhoods[0].developable_area_ha, "background snapshots must preserve developable land")

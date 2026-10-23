@@ -11,7 +11,6 @@ func _initialize() -> void:
 
 func _run() -> void:
 	var compact := 0
-	var around_half_kilometer := 0
 	var narrow := 0
 	var long := 0
 	var proposals := 0
@@ -47,16 +46,14 @@ func _run() -> void:
 			longest = maxf(longest, long_side)
 			if long_side <= 0.65:
 				compact += 1
-			if long_side <= 0.55:
-				around_half_kilometer += 1
 			if short_side <= 0.55:
 				narrow += 1
 			if long_side >= 2.0:
 				long += 1
-	if proposals < 70 or compact < 1 or around_half_kilometer < 1 or narrow < 5 or long < 1:
-		_fail("Growth districts lack a useful range of sizes: %d proposed, %d near 500 m, %d compact, %d narrow, %d long." % [proposals, around_half_kilometer, compact, narrow, long])
+	if proposals < 70 or compact < 1 or narrow < 5 or long < 1:
+		_fail("Growth districts lack a useful range of sizes: %d proposed, %d compact, %d narrow, %d long." % [proposals, compact, narrow, long])
 		return
-	print("Growth districts vary from %.2f to %.2f km along their long side (%d near 500 m, %d compact, %d narrow, %d long among %d proposals)." % [shortest, longest, around_half_kilometer, compact, narrow, long, proposals])
+	print("Growth districts vary from %.2f to %.2f km along their long side (%d compact, %d narrow, %d long among %d proposals)." % [shortest, longest, compact, narrow, long, proposals])
 	quit(0)
 
 

@@ -219,11 +219,6 @@ static func set_approval(region, candidate_id: int, approved: bool, allocation: 
 	return {"ok": true, "new_neighborhood": new_neighborhood, "allocated": allocation}
 
 
-static func advance_growth_policies(_region, _day_key: int) -> bool:
-	# New land enters the city only through an explicit approval.
-	return false
-
-
 static func _initialize_empty(neighborhood) -> void:
 	neighborhood.development_jobs_by_skill = neighborhood.jobs_by_skill.duplicate()
 	neighborhood.development_retail_share = neighborhood.shopping_attraction / maxf(1.0, float(neighborhood.jobs))

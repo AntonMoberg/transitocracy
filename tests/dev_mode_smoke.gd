@@ -4,7 +4,7 @@ const UiFixture = preload("res://tests/ui_fixture.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const DevelopmentBudget = preload("res://scripts/simulation/development_budget.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const RegionData = preload("res://scripts/simulation/region_data.gd")
 
 var failures := 0
@@ -67,11 +67,11 @@ func _run() -> void:
 			await _wait_for_mode(main, true)
 			DevelopmentBudget.advance_day(main.region, main.region.current_day_key + 1)
 			_check(plan.constructing_phase == 1 and plan.spent > 0 and plan.reserved == 0 and is_equal_approx(city.treasury, -200.0), "Dev Mode must fund construction phases automatically without spending city money.")
-			_check(DayCycleCalculator.copy_region(main.region).dev_mode, "Worker snapshots must retain Dev Mode.")
+			_check(RegionSnapshot.copy_region(main.region).dev_mode, "Worker snapshots must retain Dev Mode.")
 	var large = RegionData.new()
 	large.is_large_scale = true
 	large.dev_mode = true
-	_check(DayCycleCalculator.copy_region(large).dev_mode, "Large-scale worker snapshots must retain Dev Mode.")
+	_check(RegionSnapshot.copy_region(large).dev_mode, "Large-scale worker snapshots must retain Dev Mode.")
 	if failures == 0:
 		print("Dev Mode button, road and development budgets, and snapshots passed.")
 	quit(1 if failures > 0 else 0)

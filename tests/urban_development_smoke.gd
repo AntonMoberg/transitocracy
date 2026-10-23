@@ -5,13 +5,13 @@ const Budget = preload("res://scripts/simulation/development_budget.gd")
 const Planner = preload("res://scripts/simulation/development_planner.gd")
 const Accessibility = preload("res://scripts/simulation/accessibility_calculator.gd")
 const Dynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
-const DayCycle = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const Traffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const LocalTraffic = preload("res://scripts/simulation/local_street_traffic.gd")
 const UrbanRouting = preload("res://scripts/simulation/urban_routing.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 
 var failures := 0
 
@@ -46,7 +46,7 @@ func _run() -> void:
 					_check(nodes.size() == 1 and nodes[0] >= 0 and nodes[0] < neighborhood.street_layout.nodes.size(), "clipped edge blocks need a valid local street access node")
 				if nodes.size() == 4:
 					grid_blocks += 1
-			var footprints: Array = LayoutGenerator.buildings(block, "Residential", 0)
+			var footprints: Array = ParcelGeometry.buildings(block, "Residential", 0)
 			for footprint in footprints:
 				for vertex in footprint:
 					_check(preload("res://scripts/simulation/jurisdiction_data.gd").polygon_contains_point(vertex, block["polygon"]), "buildings must stay inside their blocks")
@@ -81,7 +81,7 @@ func _run() -> void:
 	var day: int = region.current_day_key + 1
 	Budget.advance_day(region, day)
 	_check(plan.constructing_phase == 1 and plan.completed_phase == 0 and plan.spent == first_cost and plan.reserved == 0, "construction must spend escrow without opening roads early")
-	var snapshot = DayCycle.copy_region(region)
+	var snapshot = RegionSnapshot.copy_region(region)
 	_check(snapshot.neighborhoods[neighborhood.id].development_plan != plan and snapshot.neighborhoods[neighborhood.id].street_layout == neighborhood.street_layout, "snapshots must detach funding state and share immutable layouts")
 	snapshot.neighborhoods[neighborhood.id].development_plan.reserved += 1
 	_check(plan.reserved == 0, "worker budget edits must not affect the live region")
@@ -148,7 +148,7 @@ func _run() -> void:
 	_check(initial.street_layout.local_upkeep(3, initial.development_plan.installed_multiplier) > initial.street_layout.local_upkeep(3), "upgraded local infrastructure must retain its higher maintenance cost")
 	Budget.queue_zoning(region, initial.id, shares, low_density, day + 12)
 	Budget.advance_day(region, day + 13)
-	LayoutGenerator.update_buildings(initial)
+	ParcelGeometry.update_buildings(initial)
 	_check(initial.population == initial_population and initial.block_zoning == frozen_zones, "downzoning must preserve occupied homes and existing building footprints")
 	_check(not Budget.allocate(region, initial.id, -1)["ok"] and not Budget.allocate(region, initial.id, 1000000000000)["ok"], "transfers must not overdraw reserves or city funds")
 	var state = setup["traffic_state"]

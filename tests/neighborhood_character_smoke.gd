@@ -3,9 +3,9 @@ extends SceneTree
 const Setup = preload("res://scripts/simulation/region_setup.gd")
 const Planner = preload("res://scripts/simulation/development_planner.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
-const Snapshot = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const Snapshot = preload("res://scripts/simulation/region_snapshot.gd")
 
 var errors := PackedStringArray()
 
@@ -16,10 +16,10 @@ func _initialize() -> void:
 
 func _run() -> void:
 	var block := {"polygon": PackedVector2Array([Vector2.ZERO, Vector2(0.16, 0), Vector2(0.16, 0.11), Vector2(0, 0.11)]), "seed": 42, "park": false}
-	var fine: Array[Dictionary] = LayoutGenerator.parcels(block, "Residential", 1, Character.FINE_GRAIN)
-	var courtyard: Array[Dictionary] = LayoutGenerator.parcels(block, "Residential", 1, Character.COURTYARD)
-	var garden: Array[Dictionary] = LayoutGenerator.parcels(block, "Residential", 1, Character.GARDEN)
-	var large: Array[Dictionary] = LayoutGenerator.parcels(block, "Residential", 1, Character.LARGE_PLOT)
+	var fine: Array[Dictionary] = ParcelGeometry.parcels(block, "Residential", 1, Character.FINE_GRAIN)
+	var courtyard: Array[Dictionary] = ParcelGeometry.parcels(block, "Residential", 1, Character.COURTYARD)
+	var garden: Array[Dictionary] = ParcelGeometry.parcels(block, "Residential", 1, Character.GARDEN)
+	var large: Array[Dictionary] = ParcelGeometry.parcels(block, "Residential", 1, Character.LARGE_PLOT)
 	_check(fine.size() > garden.size() and garden.size() > courtyard.size() and courtyard.size() > large.size(), "character profiles must produce distinct parcel frontage")
 	var fine_coverage := _coverage(fine)
 	var garden_coverage := _coverage(garden)
@@ -28,7 +28,7 @@ func _run() -> void:
 	for parcel in courtyard:
 		courtyard_buildings += parcel["buildings"].size()
 	_check(courtyard_buildings > courtyard.size(), "courtyard parcels must form several wings around open space")
-	_check(LayoutGenerator.parcels(block, "Residential", 1, Character.COURTYARD) == courtyard, "parcel geometry must be deterministic")
+	_check(ParcelGeometry.parcels(block, "Residential", 1, Character.COURTYARD) == courtyard, "parcel geometry must be deterministic")
 	var region = Setup.build(42, 32, 0.1)["region"]
 	var candidate_id := -1
 	for candidate in region.development_candidates:

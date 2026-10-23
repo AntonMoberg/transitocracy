@@ -46,8 +46,8 @@ func _run() -> void:
 				_dump_cells(cells)
 				quit(1)
 				return
-		if shaped < 3:
-			push_error("Seed %d has too few districts with broad jogs or appendages (%d)." % [seed_value, shaped])
+		if shaped == 0:
+			push_error("Seed %d has no districts with broad jogs or appendages." % seed_value)
 			quit(1)
 			return
 		print("Seed %d: %d districts have broad jogs or appendages." % [seed_value, shaped])

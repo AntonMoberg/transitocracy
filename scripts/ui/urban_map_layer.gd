@@ -1,9 +1,10 @@
 extends RefCounted
 
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const LocalTraffic = preload("res://scripts/simulation/local_street_traffic.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
+const NeighborhoodSpatialIndex = preload("res://scripts/simulation/neighborhood_spatial_index.gd")
 const ZoneColors = {"Residential": Color("929d89"), "Commercial": Color("b9a17a"), "Office": Color("8caaaf"), "Mixed": Color("b2ab8c"), "Industry": Color("8d8f9e")}
 const BUILDING_BUDGET_US = 4000
 const BUILDING_DETAIL_PPM = 0.2
@@ -27,7 +28,8 @@ func hit_street(map, point: Vector2) -> Vector2i:
 	var world: Vector2 = map._screen_to_world(point)
 	var best := Vector2i(-1, -1)
 	var best_distance := 5.0
-	for neighborhood in map.region.neighborhoods:
+	for neighborhood_id in NeighborhoodSpatialIndex.in_bounds(map.region, Rect2(world, Vector2.ZERO)):
+		var neighborhood = map.region.neighborhoods[neighborhood_id]
 		var layout = neighborhood.street_layout
 		if layout == null or not layout.bounds.has_point(world):
 			continue
@@ -61,6 +63,9 @@ func draw(map) -> void:
 	if meters < 0.025:
 		return
 	var viewport := Rect2(Vector2.ZERO, map.size)
+	var first_world: Vector2 = map._screen_to_world(viewport.position)
+	var last_world: Vector2 = map._screen_to_world(viewport.end)
+	var world_viewport := Rect2(first_world.min(last_world), (last_world - first_world).abs())
 	var building_deadline_us: int = Time.get_ticks_usec() + BUILDING_BUDGET_US
 	var pending_buildings := false
 	var casing_lines := PackedVector2Array()
@@ -69,7 +74,8 @@ func draw(map) -> void:
 	var dashed_streets := PackedVector2Array()
 	var street_width: float = maxf(1.3, meters * 7.0)
 	var casing_width: float = street_width + maxf(1.0, meters * 2.0)
-	for neighborhood in map.region.neighborhoods:
+	for neighborhood_id in NeighborhoodSpatialIndex.in_bounds(map.region, world_viewport):
+		var neighborhood = map.region.neighborhoods[neighborhood_id]
 		var layout = neighborhood.street_layout
 		var plan = neighborhood.development_plan
 		if layout == null or plan == null:
@@ -272,7 +278,7 @@ func _build_chunk_mesh(map, neighborhood, first: int, finish: int, clearance_key
 			if building_cache.size() > 8192:
 				for old_key in building_cache.keys().slice(0, 1024):
 					building_cache.erase(old_key)
-			var generated_footprints: Array = LayoutGenerator.buildings(block, zone, density, neighborhood.character_profile)
+			var generated_footprints: Array = ParcelGeometry.buildings(block, zone, density, neighborhood.character_profile)
 			var generated_visible := PackedByteArray()
 			for footprint in generated_footprints:
 				generated_visible.append(0 if RoadLand.polygon_intersects_masks(footprint, reserved_masks) else 1)
@@ -310,12 +316,3 @@ static func _building_color(neighborhood, zone: String, building_id: int, zoning
 	var city_shift: float = float(posmod(neighborhood.city_id * 23, 17)) / 100.0
 	var variation: float = float(posmod(building_id * 37, 13)) / 100.0
 	return base.lerp(target, 0.18 + city_shift + variation)
-
-
-static func _zone(neighborhood, seed_value: int) -> String:
-	var chosen: int = posmod(seed_value, 100)
-	for zone in ["Residential", "Commercial", "Office", "Mixed", "Industry"]:
-		chosen -= int(neighborhood.zone_shares[zone])
-		if chosen < 0:
-			return zone
-	return "Residential"

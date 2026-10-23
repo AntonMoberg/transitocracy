@@ -2,8 +2,9 @@ extends RefCounted
 
 const CityPlan = preload("res://scripts/simulation/city_street_plan.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const StreetLayoutOps = preload("res://scripts/simulation/street_layout_ops.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
+const RoadCorridorIndex = preload("res://scripts/simulation/road_corridor_index.gd")
 
 const MIN_DIAGONAL_LENGTH_KM = 0.60
 const MIN_ROTATED_DEPTH_KM = 0.27
@@ -20,21 +21,9 @@ static func separating_chart(region, city_id: int, outline: PackedVector2Array, 
 	var base_axis: Vector2 = base["axis"]
 	var best := -INF
 	var result: Dictionary = {}
-	var corridors: Dictionary = {}
-	for link in region.road_links:
-		if link.road_class != Roads.ARTERIAL or link.points.size() < 2:
-			continue
-		var corridor_id: int = link.corridor_id if link.corridor_id >= 0 else link.id
-		if not corridors.has(corridor_id):
-			corridors[corridor_id] = []
-		corridors[corridor_id].append(link)
+	var corridors: Dictionary = RoadCorridorIndex.arterials(region)
 	for corridor_id in corridors:
 		var links: Array = corridors[corridor_id]
-		links.sort_custom(func(a, b) -> bool:
-			if not is_equal_approx(a.corridor_start_km, b.corridor_start_km):
-				return a.corridor_start_km < b.corridor_start_km
-			return a.id < b.id
-		)
 		var first: Vector2 = links[0].points[0]
 		var last: Vector2 = links[-1].points[-1]
 		var chord: Vector2 = last - first
@@ -599,7 +588,7 @@ static func _add_lattice(layout, part: PackedVector2Array, chart: Dictionary, va
 			var piece_index := 0
 			for clipped in Geometry2D.intersect_polygons(quad, part):
 				piece_index += 1
-				if clipped.size() < 3 or Geography.polygon_area(clipped) < MIN_BLOCK_AREA_KM2 or LayoutGenerator.triangulate(clipped).is_empty():
+				if clipped.size() < 3 or Geography.polygon_area(clipped) < MIN_BLOCK_AREA_KM2 or StreetLayoutOps.triangulate(clipped).is_empty():
 					continue
 				var vertices := PackedInt32Array()
 				for point in clipped:
@@ -628,9 +617,9 @@ static func _add_lattice(layout, part: PackedVector2Array, chart: Dictionary, va
 					if _road_already_covers(first, last, road_context) or _on_chart_divider(first, last, chart):
 						continue
 					var road_class: String = Roads.COLLECTOR if _collector_line(first, last, chart) else Roads.LOCAL
-					LayoutGenerator._append_edge(layout, first_id, last_id, road_class, 1 if road_class == Roads.COLLECTOR else 2)
+					StreetLayoutOps._append_edge(layout, first_id, last_id, road_class, 1 if road_class == Roads.COLLECTOR else 2)
 					layout.canonical_edges[layout.edges.size() - 1] = edge_key
-				LayoutGenerator._append_block_polygon(layout, clipped, vertices, 2, hash("%d:%s:%d:%d:%d" % [seed_value, chart_key, x0, y0, variant]), false, false)
+				StreetLayoutOps._append_block_polygon(layout, clipped, vertices, 2, hash("%d:%s:%d:%d:%d" % [seed_value, chart_key, x0, y0, variant]), false, false)
 				var block: Dictionary = layout.blocks[-1]
 				block["canonical_id"] = "%s:%d:%d:%d:%d" % [chart_key, x0, y0, variant, piece_index]
 				layout.blocks[-1] = block
@@ -689,7 +678,7 @@ static func _point_on_arterial(point: Vector2, road_context: Dictionary) -> bool
 
 
 static func _road_already_covers(first: Vector2, last: Vector2, road_context: Dictionary) -> bool:
-	return LayoutGenerator._near_field_arterial(first, last, road_context, 0.075)
+	return StreetLayoutOps._near_field_arterial(first, last, road_context, 0.075)
 
 
 static func _on_chart_divider(first: Vector2, last: Vector2, chart: Dictionary) -> bool:

@@ -1,6 +1,6 @@
 extends RefCounted
 
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const Plan = preload("res://scripts/simulation/development_plan.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const RoadNode = preload("res://scripts/simulation/road_node_data.gd")
@@ -32,7 +32,7 @@ static func attach(region, neighborhood, layout, completed: bool = false) -> voi
 	if completed:
 		open_phase(region, neighborhood, 3)
 		plan.status = "Completed"
-		LayoutGenerator.update_buildings(neighborhood)
+		ParcelGeometry.update_buildings(neighborhood)
 
 
 static func ensure_node(region, point: Vector2, city_id: int, preferred_id: int = -1) -> int:

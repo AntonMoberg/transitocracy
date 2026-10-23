@@ -17,7 +17,7 @@ const UrbanMapLayer = preload("res://scripts/ui/urban_map_layer.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const StreetLayoutOps = preload("res://scripts/simulation/street_layout_ops.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const WORLD_CENTER = Vector2(120.0, 80.0)
 const WORLD_SIZE = Vector2(240.0, 160.0)
@@ -1562,7 +1562,7 @@ func _draw_neighborhood_boundaries() -> void:
 					for old_id in district_fill_meshes.keys().slice(0, 128):
 						district_fill_meshes.erase(old_id)
 				var vertices := PackedVector2Array()
-				for vertex_id in LayoutGenerator.triangulate(district.polygon_km):
+				for vertex_id in StreetLayoutOps.triangulate(district.polygon_km):
 					vertices.append(district.polygon_km[vertex_id] - district.bounds_km.position)
 				var mesh: ArrayMesh
 				if not vertices.is_empty():

@@ -18,7 +18,8 @@ func _initialize() -> void:
 
 	_check(first.region_ids.size() == 4 and first.county_ids.size() == 8 and first.cities.size() == 32 and first.neighborhoods.size() == 62, "a state must generate all five administrative tiers")
 	for city in first.cities:
-		_check(city["neighborhood_ids"].size() == (4 if first.starting_city_ids.has(city["id"]) else 1), "only anchor cities should start with developed neighborhood clusters")
+		var expected_count: int = int(city.get("initial_neighborhood_count", 1)) if first.starting_city_ids.has(city["id"]) else 1
+		_check(city["neighborhood_ids"].size() == expected_count and (expected_count >= 2 and expected_count <= 6 if first.starting_city_ids.has(city["id"]) else expected_count == 1), "only anchor cities should start with varied developed neighborhood clusters")
 	for neighborhood in first.neighborhoods:
 		_check(first.jurisdictions[0].contains_point(neighborhood.position_km), "generated neighborhoods must stay on playable land")
 		_check(first.jurisdiction_for_neighborhood(neighborhood.id, "State").id == 0 and first.jurisdiction_for_neighborhood(neighborhood.id, "County") != null, "every neighborhood must have state and county parents")

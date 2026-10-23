@@ -9,7 +9,7 @@ const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 
 var failures := 0
 
@@ -81,7 +81,7 @@ func _run() -> void:
 		_check(result.get("ok", false), "the fully priced road should fund")
 		if result.get("ok", false):
 			_check(homes.households < before_homes and homes.housing_capacity < 160 and RoadLand.contains_reserved(region, Vector2(3, 3)), "funding should clear occupied land and reserve the corridor")
-			var snapshot = DayCycleCalculator.copy_region(region)
+			var snapshot = RegionSnapshot.copy_region(region)
 			_check(snapshot.road_reservations.size() == region.road_reservations.size() and snapshot.road_projects[0].crossings.size() == 1, "worker snapshot should retain corridor and crossing choices")
 			RoadPlanner.advance_day(region, result["project"].open_day_key)
 			_check(region.road_links[-1].crossings.size() == 1 and not region.road_links[-1].crossings[0]["above"], "completed road should retain its grade choice")

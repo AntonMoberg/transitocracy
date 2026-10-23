@@ -52,6 +52,11 @@ static func recalculate_large_with_costs(region, costs: PackedVector2Array) -> v
 
 static func _recalculate_large(region, supplied_costs: PackedVector2Array = PackedVector2Array()) -> void:
 	var city_count: int = region.cities.size()
+	var costs: PackedVector2Array = supplied_costs if not supplied_costs.is_empty() else RoadGraph.free_flow_costs(region)
+	if region.accessibility_cost_revision == region.road_geometry_revision and region.city_travel_times.size() == city_count and region.neighborhood_accessible.size() == region.neighborhoods.size() and _same_link_costs(region.accessibility_link_costs, costs):
+		UrbanRouting.prepare(region, supplied_costs)
+		_recalculate_large_jobs(region)
+		return
 	region.neighborhood_development_connected = RoadGraph.neighborhoods_connected_to_start(region)
 	var adjacency: Array = RoadGraph.adjacency(region)
 	var rooted_nodes: PackedByteArray = RoadGraph.nodes_connected_to_start(region)
@@ -70,7 +75,6 @@ static func _recalculate_large(region, supplied_costs: PackedVector2Array = Pack
 				break
 	region.neighborhood_accessible.resize(region.neighborhoods.size())
 	region.neighborhood_accessible.fill(0)
-	var costs: PackedVector2Array = supplied_costs if not supplied_costs.is_empty() else RoadGraph.free_flow_costs(region)
 	var neighbors: Array = RoadGraph.strategic_adjacency(region)
 	for city in region.cities:
 		var city_id: int = city["id"]
@@ -101,7 +105,18 @@ static func _recalculate_large(region, supplied_costs: PackedVector2Array = Pack
 		for local_id in range(neighborhood_ids.size()):
 			region.neighborhood_accessible[neighborhood_ids[local_id]] = 1 if region.neighborhood_development_connected[neighborhood_ids[local_id]] != 0 else rows[city_id]["accessible"][local_id]
 	UrbanRouting.prepare(region, supplied_costs)
+	region.accessibility_cost_revision = region.road_geometry_revision
+	region.accessibility_link_costs = costs.duplicate()
 	_recalculate_large_jobs(region)
+
+
+static func _same_link_costs(first: PackedVector2Array, second: PackedVector2Array) -> bool:
+	if first.size() != second.size():
+		return false
+	for index in range(first.size()):
+		if first[index].distance_squared_to(second[index]) > 0.00000001:
+			return false
+	return true
 
 
 static func _city_times_row(region, costs: PackedVector2Array, neighbors: Array, forest: bool, city_id: int) -> Dictionary:

@@ -1,15 +1,5 @@
 extends RefCounted
 
-const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
-const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
-const DevelopmentBudget = preload("res://scripts/simulation/development_budget.gd")
-const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
-const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
-const RoadTrafficCalculator = preload("res://scripts/simulation/road_traffic_calculator.gd")
-const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
-const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
-const RollingTrafficCalculator = preload("res://scripts/simulation/rolling_traffic_calculator.gd")
-const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 const RegionData = preload("res://scripts/simulation/region_data.gd")
 const NeighborhoodData = preload("res://scripts/simulation/neighborhood_data.gd")
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
@@ -51,6 +41,8 @@ static func _copy_large_region(source):
 	copy.next_road_link_id = source.next_road_link_id
 	copy.next_road_project_id = source.next_road_project_id
 	copy.road_geometry_revision = source.road_geometry_revision
+	copy.accessibility_cost_revision = source.accessibility_cost_revision
+	copy.accessibility_link_costs = source.accessibility_link_costs.duplicate()
 	copy.neighborhood_gateway_node_ids = source.neighborhood_gateway_node_ids.duplicate()
 	copy.city_hub_node_ids = source.city_hub_node_ids.duplicate()
 	copy.city_highway_access_node_ids = source.city_highway_access_node_ids.duplicate()
@@ -199,33 +191,6 @@ static func release_retired_data(payload: Dictionary) -> void:
 	payload.clear()
 
 
-static func advance_day(region, day_key: int, previous_flow, previous_traffic, previous_state = null) -> Dictionary:
-	region.current_day_key = day_key
-	FiscalCalculator.apply_due_policies(region, day_key * 86400)
-	var project_roads_changed: bool = RoadPlanner.advance_day(region, day_key)
-	var changed_city_ids: Array[int] = []
-	var roads_changed: bool = DevelopmentBudget.advance_day(region, day_key, changed_city_ids) or project_roads_changed
-	roads_changed = DevelopmentPlanner.advance_growth_policies(region, day_key) or roads_changed
-	if roads_changed:
-		var refresh_city_ids: Array[int] = []
-		if not project_roads_changed:
-			refresh_city_ids = changed_city_ids
-		DevelopmentPlanner.refresh_candidates(region, refresh_city_ids)
-		AccessibilityCalculator.recalculate(region)
-	elif previous_flow != null and previous_traffic != null and previous_state != null and previous_state.next_bin >= 96:
-		var weighted_times: Array[PackedFloat32Array] = RoadTrafficCalculator.generalized_travel_times(region, previous_flow, previous_traffic)
-		region.travel_times = weighted_times
-		AccessibilityCalculator.recalculate_jobs(region)
-	NeighborhoodDynamics.advance_day(region)
-	var flow_profile = TripFlowCalculator.build(region)
-	TripFlowCalculator.populate_day(flow_profile, region.generation_seed, day_key * 86400, CalendarClock.is_weekend_unix(day_key * 86400), previous_flow)
-	var traffic_state = RollingTrafficCalculator.new_day(region, flow_profile, previous_state, roads_changed)
-	RollingTrafficCalculator.advance_chunk(region, flow_profile, traffic_state, 1)
-	NeighborhoodDynamics.refresh_desirability(region)
-	RoadPlanner.refresh_regional_grants(region)
-	return {"region": region, "flow": flow_profile, "traffic": traffic_state.profile, "traffic_state": traffic_state}
-
-
 static func _copy_value(value):
 	match typeof(value):
 		TYPE_OBJECT:
@@ -236,17 +201,17 @@ static func _copy_value(value):
 			var copy = value.get_script().new()
 			for property in value.get_property_list():
 				if int(property["usage"]) & PROPERTY_USAGE_SCRIPT_VARIABLE:
-					if property["name"] in ["street_spatial_cache", "urban_route_cache", "urban_route_revision"]:
+					if property["name"] in ["street_spatial_cache", "road_corridor_cache", "neighborhood_spatial_cache", "urban_district_owner_cache", "urban_valid_junction_cache", "urban_route_cache", "urban_route_revision"]:
 						continue
 					copy.set(property["name"], _copy_value(value.get(property["name"])))
 			return copy
 		TYPE_ARRAY:
-			var copy: Array = value.duplicate(true)
+			var copy: Array = value.duplicate()
 			for index in range(value.size()):
 				copy[index] = _copy_value(value[index])
 			return copy
 		TYPE_DICTIONARY:
-			var copy: Dictionary = value.duplicate(true)
+			var copy: Dictionary = value.duplicate()
 			for key in value:
 				copy[key] = _copy_value(value[key])
 			return copy

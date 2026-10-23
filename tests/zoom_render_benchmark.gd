@@ -16,6 +16,20 @@ func _run() -> void:
 		quit(1)
 		return
 	main.playing = false
+	for argument in OS.get_cmdline_user_args():
+		if not argument.begins_with("--seed="):
+			continue
+		var requested_seed: int = int(argument.trim_prefix("--seed="))
+		if main.region.generation_seed != requested_seed:
+			main._generate_region(requested_seed)
+			deadline = Time.get_ticks_msec() + 15000
+			while (main.region == null or main.region.generation_seed != requested_seed) and Time.get_ticks_msec() < deadline:
+				await process_frame
+			if main.region == null or main.region.generation_seed != requested_seed:
+				push_error("Requested benchmark seed generation timed out")
+				quit(1)
+				return
+		break
 	var map = main.map_view
 	var city: Dictionary = main.region.cities[main.region.starting_city_ids[0]]
 	var street_zoom: float = map.MAX_PIXELS_PER_KM / map._map_scale()
@@ -29,7 +43,7 @@ func _run() -> void:
 		map.queue_redraw()
 		await process_frame
 		await process_frame
-		print("Zoom %.0f warm: %d µs, stages %s" % [magnification, map.last_draw_us, map.last_draw_stages_us])
+		print("Zoom %.0f warm: %d µs, stages %s, urban blocks %d µs, urban streets %d µs, visible buildings %d" % [magnification, map.last_draw_us, map.last_draw_stages_us, map.urban_layer.last_block_draw_us, map.urban_layer.last_street_draw_us, map.urban_layer.last_building_count])
 		if magnification == 3.0:
 			if map.road_arrow_mesh == null or map.road_arrow_mesh.get_surface_count() == 0:
 				push_error("Batched road arrows were not built")

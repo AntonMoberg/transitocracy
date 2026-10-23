@@ -9,7 +9,7 @@ const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.g
 const MultiScaleDayCalculator = preload("res://scripts/simulation/multiscale_day_calculator.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 
 var failures := 0
 
@@ -28,7 +28,7 @@ func _run() -> void:
 	TripFlowCalculator.populate_day(flow, region.generation_seed, clock.unix_seconds, clock.is_weekend())
 	var state = MultiScaleTraffic.new_day(region, flow, clock.unix_seconds)
 	var first_time: int = state.unix_seconds
-	var queue_probe_region = DayCycleCalculator.copy_region(region)
+	var queue_probe_region = RegionSnapshot.copy_region(region)
 	var queue_probe_state = MultiScaleTraffic.new_day(queue_probe_region, flow, first_time)
 	MultiScaleTraffic.advance(region, flow, state, first_time + 60, MultiScaleTraffic.SECOND)
 	MultiScaleTraffic.advance(queue_probe_region, flow, queue_probe_state, first_time + 60, MultiScaleTraffic.MINUTE)
@@ -62,7 +62,7 @@ func _run() -> void:
 	MultiScaleTraffic.change_mode(next_result["region"], next_result["flow"], next_state, MultiScaleTraffic.DAY, MultiScaleTraffic.SECOND)
 	_check(absf(next_state.queued_cars() - macro_queue_total) < 0.1, "returning to detail preserves aggregate queue count")
 	_check(next_state.estimated == false and next_state.queued_cars() >= 0.0 and before_macro >= 0.0, "return to detailed mode reconstructs nonnegative traffic")
-	var junction_region = DayCycleCalculator.copy_region(region)
+	var junction_region = RegionSnapshot.copy_region(region)
 	var hub_id: int = -1
 	for node in junction_region.road_nodes:
 		var approaches := 0

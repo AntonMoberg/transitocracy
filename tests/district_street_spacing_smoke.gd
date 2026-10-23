@@ -1,7 +1,7 @@
 extends SceneTree
 
 const Setup = preload("res://scripts/simulation/region_setup.gd")
-const Streets = preload("res://scripts/simulation/street_layout_generator.gd")
+const StreetLayoutOps = preload("res://scripts/simulation/street_layout_ops.gd")
 const Field = preload("res://scripts/simulation/street_direction_field.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
@@ -28,7 +28,7 @@ func _run() -> void:
 				if layout.classes[edge_id] == Roads.ARTERIAL:
 					continue
 				var edge: Vector2 = layout.edges[edge_id]
-				if Streets._near_field_arterial(layout.nodes[int(edge.x)], layout.nodes[int(edge.y)], context, 0.075):
+				if StreetLayoutOps._near_field_arterial(layout.nodes[int(edge.x)], layout.nodes[int(edge.y)], context, 0.075):
 					push_error("Seed %d district %s puts local street %d alongside an arterial." % [seed_value, candidate["key"], edge_id])
 					quit(1)
 					return

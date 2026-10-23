@@ -1,6 +1,6 @@
 extends RefCounted
 
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
@@ -14,7 +14,7 @@ const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 static func build(source_region, previous_state, unix_seconds: int, changed_city_ids: Array[int] = [], previous_flow = null, new_district_only: bool = false) -> Dictionary:
 	var started: int = Time.get_ticks_usec()
 	var stages_us: Dictionary = {}
-	var region = DayCycleCalculator.copy_region(source_region)
+	var region = RegionSnapshot.copy_region(source_region)
 	stages_us["copy"] = Time.get_ticks_usec() - started
 	started = Time.get_ticks_usec()
 	DevelopmentPlanner.refresh_candidates(region, changed_city_ids)

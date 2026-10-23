@@ -3,8 +3,8 @@ extends SceneTree
 const Setup = preload("res://scripts/simulation/region_setup.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const Project = preload("res://scripts/simulation/road_project_data.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
-const Snapshot = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
+const Snapshot = preload("res://scripts/simulation/region_snapshot.gd")
 
 
 func _initialize() -> void:
@@ -37,7 +37,7 @@ func _run() -> void:
 			if block_id < neighborhood.block_zoning.size() and neighborhood.block_zoning[block_id] > 0:
 				var code: int = neighborhood.block_zoning[block_id] - 1
 				var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][floori(float(code) / 3.0)]
-				for footprint in LayoutGenerator.buildings(block, zone, code % 3, neighborhood.character_profile):
+				for footprint in ParcelGeometry.buildings(block, zone, code % 3, neighborhood.character_profile):
 					if RoadLand.polygon_intersects_masks(footprint, masks):
 						errors.append("Generated building footprint lies beneath a highway.")
 						break

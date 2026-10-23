@@ -2,7 +2,7 @@ extends RefCounted
 
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
-const StreetLayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 
 # One aggregate update per simulated day. Income is a proxy derived from the
 # local job mix; tax, housing costs, job access and amenities affect migration.
@@ -133,7 +133,7 @@ static func advance_day(region) -> void:
 		var next_jobs: int = clampi(neighborhood.jobs + job_change, 0, mini(neighborhood.job_capacity, job_limit))
 		neighborhood.job_growth_remainder = exact_jobs - float(job_change) if next_jobs == neighborhood.jobs + job_change else 0.0
 		_set_jobs(neighborhood, next_jobs)
-		StreetLayoutGenerator.update_buildings(neighborhood)
+		ParcelGeometry.update_buildings(neighborhood)
 		if neighborhood.households == 0:
 			neighborhood.average_monthly_income = 0
 			neighborhood.average_household_wealth = 0.0

@@ -14,7 +14,7 @@ const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_gene
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const MultiScaleDayCalculator = preload("res://scripts/simulation/multiscale_day_calculator.gd")
@@ -1194,7 +1194,7 @@ func _ensure_day_profiles() -> void:
 
 func _retire_simulation_data(payload: Dictionary) -> void:
 	var worker := Thread.new()
-	if worker.start(Callable(DayCycleCalculator, "release_retired_data").bind(payload), Thread.PRIORITY_LOW) == OK:
+	if worker.start(Callable(RegionSnapshot, "release_retired_data").bind(payload), Thread.PRIORITY_LOW) == OK:
 		retired_data_threads.append(worker)
 	else:
 		# Keep the payload alive and retry on a later frame if a thread cannot start.
@@ -1338,7 +1338,7 @@ func _queue_next_day(current_day_key: int) -> void:
 		return
 	if pending_day_thread != null:
 		_discard_pending_day()
-	var snapshot = DayCycleCalculator.copy_region(region)
+	var snapshot = RegionSnapshot.copy_region(region)
 	var worker := Thread.new()
 	var traffic_snapshot = MultiScaleTraffic.fork_for_day(traffic_state)
 	var task := Callable(MultiScaleDayCalculator, "advance_day").bind(snapshot, target_day_key, flow_profile, traffic_snapshot)

@@ -2,7 +2,7 @@ extends RefCounted
 
 const CityPlan = preload("res://scripts/simulation/city_street_plan.gd")
 const Layout = preload("res://scripts/simulation/street_layout.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const StreetLayoutOps = preload("res://scripts/simulation/street_layout_ops.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
 const Spatial = preload("res://scripts/simulation/street_spatial_index.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
@@ -299,8 +299,11 @@ static func district_cells(region, city_id: int, sector: Vector2i) -> Array[Vect
 					var cell := Vector2i(x + dx, y + dy)
 					var valid := true
 					for corner in [cell, cell + Vector2i.RIGHT, cell + Vector2i.ONE, cell + Vector2i.DOWN]:
-						var point: Vector2 = origin + axis * (float(corner.x) * column_spacing) + normal * (float(corner.y) * row_spacing)
-						if not city.contains_point(point) or not state.contains_point(point):
+						var corner_key := Vector3i(city_id, corner.x, corner.y)
+						if not region.urban_valid_junction_cache.has(corner_key):
+							var point: Vector2 = origin + axis * (float(corner.x) * column_spacing) + normal * (float(corner.y) * row_spacing)
+							region.urban_valid_junction_cache[corner_key] = city.contains_point(point) and state.contains_point(point)
+						if not region.urban_valid_junction_cache[corner_key]:
 							valid = false
 							break
 					if valid:
@@ -314,25 +317,33 @@ static func district_cells(region, city_id: int, sector: Vector2i) -> Array[Vect
 # Only alternating seams move. A few new growth bands use a straight,
 # two-column compact district; the starting neighborhoods keep their seams.
 static func _district_owner(region, city_id: int, group: Vector2i) -> Vector2i:
+	var owner_key := Vector3i(city_id, group.x, group.y)
+	if region.urban_district_owner_cache.has(owner_key):
+		return region.urban_district_owner_cache[owner_key]
 	var vertical: bool = posmod(hash("%d:district-seam-axis:%d" % [region.generation_seed, city_id]), 4) != 0
+	var result: Vector2i
 	if vertical:
 		var band: int = _sector_for_coordinate(region, city_id, false, group.y)
 		var approximate: int = _sector_for_coordinate(region, city_id, true, group.x + 1)
 		var local: int = group.y - _sector_boundary(region, city_id, false, band)
 		var left: int = _sector_boundary(region, city_id, true, approximate) + _district_seam_shift(region, city_id, true, approximate, band, local)
 		if group.x + 1 < left:
-			return Vector2i(approximate - 1, band)
-		var right: int = _sector_boundary(region, city_id, true, approximate + 1) + _district_seam_shift(region, city_id, true, approximate + 1, band, local)
-		return Vector2i(approximate + 1 if group.x + 1 >= right else approximate, band)
+			result = Vector2i(approximate - 1, band)
+		else:
+			var right: int = _sector_boundary(region, city_id, true, approximate + 1) + _district_seam_shift(region, city_id, true, approximate + 1, band, local)
+			result = Vector2i(approximate + 1 if group.x + 1 >= right else approximate, band)
 	else:
 		var band: int = _sector_for_coordinate(region, city_id, true, group.x)
 		var approximate: int = _sector_for_coordinate(region, city_id, false, group.y + 1)
 		var local: int = group.x - _sector_boundary(region, city_id, true, band)
 		var top: int = _sector_boundary(region, city_id, false, approximate) + _district_seam_shift(region, city_id, false, approximate, band, local)
 		if group.y + 1 < top:
-			return Vector2i(band, approximate - 1)
-		var bottom: int = _sector_boundary(region, city_id, false, approximate + 1) + _district_seam_shift(region, city_id, false, approximate + 1, band, local)
-		return Vector2i(band, approximate + 1 if group.y + 1 >= bottom else approximate)
+			result = Vector2i(band, approximate - 1)
+		else:
+			var bottom: int = _sector_boundary(region, city_id, false, approximate + 1) + _district_seam_shift(region, city_id, false, approximate + 1, band, local)
+			result = Vector2i(band, approximate + 1 if group.y + 1 >= bottom else approximate)
+	region.urban_district_owner_cache[owner_key] = result
+	return result
 
 
 static func _district_seam_shift(region, city_id: int, vertical: bool, seam: int, band: int, local: int) -> int:
@@ -456,11 +467,11 @@ static func make_layout(region, city_id: int, sector: Vector2i, variant: int = 0
 			var anchor_id: int = layout.nodes.size()
 			layout.nodes.append(chart_access["connector_point"])
 			layout.arterial_nodes.append(anchor_id)
-			LayoutGenerator._append_edge(layout, anchor_id, int(chart_access["near_id"]), Roads.COLLECTOR, 1)
+			StreetLayoutOps._append_edge(layout, anchor_id, int(chart_access["near_id"]), Roads.COLLECTOR, 1)
 		_connect_local_arterials(region, layout, road_context)
 		_remove_city_border_edges(region, layout)
-		LayoutGenerator._build_core_paths(layout)
-		LayoutGenerator._mark_canonical_edges(layout)
+		StreetLayoutOps._build_core_paths(layout)
+		StreetLayoutOps._mark_canonical_edges(layout)
 		BorderSeams.plan(region, layout)
 		BorderSeams.finalize(region, layout)
 		_reserve_border_connector_blocks(layout)
@@ -511,10 +522,10 @@ static func make_layout(region, city_id: int, sector: Vector2i, variant: int = 0
 				continue
 			var first_id: int = node_ids[first]
 			var last_id: int = node_ids[last]
-			if _covered_by_access_road(region, layout.nodes[first_id], layout.nodes[last_id]) or LayoutGenerator._near_field_arterial(layout.nodes[first_id], layout.nodes[last_id], road_context, 0.075):
+			if _covered_by_access_road(region, layout.nodes[first_id], layout.nodes[last_id]) or StreetLayoutOps._near_field_arterial(layout.nodes[first_id], layout.nodes[last_id], road_context, 0.075):
 				continue
 			var road_class: String = Roads.COLLECTOR if collector else Roads.LOCAL
-			LayoutGenerator._append_edge(layout, first_id, last_id, road_class, 1 if collector else 2)
+			StreetLayoutOps._append_edge(layout, first_id, last_id, road_class, 1 if collector else 2)
 			present_roads[edge_key] = true
 	var visited: Dictionary = {}
 	for cell in cells:
@@ -548,7 +559,7 @@ static func make_layout(region, city_id: int, sector: Vector2i, variant: int = 0
 				if not access_nodes.has(local_id):
 					access_nodes.append(local_id)
 		var block_seed: int = hash("%d:graph-block:%d:%d:%d:%d" % [region.generation_seed, city_id, cell.x, cell.y, variant])
-		LayoutGenerator._append_block_polygon(layout, block_polygon, access_nodes, 2, block_seed, false, false)
+		StreetLayoutOps._append_block_polygon(layout, block_polygon, access_nodes, 2, block_seed, false, false)
 		var block: Dictionary = layout.blocks[-1]
 		block["canonical_id"] = "%d:%d:%d:%d" % [city_id, cell.x, cell.y, variant]
 		layout.blocks[-1] = block
@@ -568,10 +579,10 @@ static func make_layout(region, city_id: int, sector: Vector2i, variant: int = 0
 		var anchor_id: int = layout.nodes.size()
 		layout.nodes.append(access["connector_point"])
 		layout.arterial_nodes.append(anchor_id)
-		LayoutGenerator._append_edge(layout, anchor_id, int(access["near_id"]), Roads.COLLECTOR, 1)
+		StreetLayoutOps._append_edge(layout, anchor_id, int(access["near_id"]), Roads.COLLECTOR, 1)
 	_connect_local_arterials(region, layout, road_context)
-	LayoutGenerator._build_core_paths(layout)
-	LayoutGenerator._mark_canonical_edges(layout)
+	StreetLayoutOps._build_core_paths(layout)
+	StreetLayoutOps._mark_canonical_edges(layout)
 	BorderSeams.plan(region, layout)
 	BorderSeams.finalize(region, layout)
 	_reserve_border_connector_blocks(layout)
@@ -609,7 +620,7 @@ static func _connect_local_arterials(region, layout, road_context: Dictionary) -
 			var connector_middle: Vector2 = (point + best_point) * 0.5
 			if best_distance >= 0.002 and Geometry2D.is_point_in_polygon(connector_middle, layout.polygon) and not _near_layout_outline(connector_middle, layout.polygon, 0.03):
 				continue
-			if best_distance >= 0.002 and LayoutGenerator._near_field_arterial(point, best_point, road_context, 0.075):
+			if best_distance >= 0.002 and StreetLayoutOps._near_field_arterial(point, best_point, road_context, 0.075):
 				continue
 			var spaced := true
 			for previous in installed:
@@ -626,7 +637,7 @@ static func _connect_local_arterials(region, layout, road_context: Dictionary) -
 				var anchor_id: int = layout.nodes.size()
 				layout.nodes.append(best_point)
 				layout.arterial_nodes.append(anchor_id)
-				LayoutGenerator._append_edge(layout, end_id, anchor_id, Roads.LOCAL, 2)
+				StreetLayoutOps._append_edge(layout, end_id, anchor_id, Roads.LOCAL, 2)
 
 
 static func _split_local_arterial_crossings(region, layout) -> void:
@@ -1014,9 +1025,9 @@ static func _extend_grid_to_city_border(region, city_id: int, plan: Dictionary, 
 					continue
 				var line: int = roundi((midpoint - plan["origin"]).dot(normal) / float(plan["row_spacing"])) if horizontal else roundi((midpoint - plan["origin"]).dot(axis) / float(plan["column_spacing"]))
 				var road_class: String = Roads.COLLECTOR if posmod(line, 4) == 0 else Roads.LOCAL
-				if _covered_by_access_road(region, first, last) or LayoutGenerator._near_field_arterial(first, last, context, 0.075):
+				if _covered_by_access_road(region, first, last) or StreetLayoutOps._near_field_arterial(first, last, context, 0.075):
 					continue
-				LayoutGenerator._append_edge(layout, vertex_ids[index], vertex_ids[(index + 1) % piece.size()], road_class, 1 if road_class == Roads.COLLECTOR else 2)
+				StreetLayoutOps._append_edge(layout, vertex_ids[index], vertex_ids[(index + 1) % piece.size()], road_class, 1 if road_class == Roads.COLLECTOR else 2)
 				road_keys[key] = true
 				active_nodes[vertex_ids[index]] = true
 				active_nodes[vertex_ids[(index + 1) % piece.size()]] = true
@@ -1033,7 +1044,7 @@ static func _extend_grid_to_city_border(region, city_id: int, plan: Dictionary, 
 					access_id = id
 			if access_id < 0:
 				continue
-			LayoutGenerator._append_block_polygon(layout, piece, PackedInt32Array([access_id]), 2, hash("%d:border-fringe:%d:%d:%d" % [region.generation_seed, city_id, cell.x, cell.y]), false, true)
+			StreetLayoutOps._append_block_polygon(layout, piece, PackedInt32Array([access_id]), 2, hash("%d:border-fringe:%d:%d:%d" % [region.generation_seed, city_id, cell.x, cell.y]), false, true)
 
 
 static func _remove_city_border_edges(region, layout) -> void:

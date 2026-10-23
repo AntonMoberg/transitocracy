@@ -1,7 +1,7 @@
 extends SceneTree
 
 const RegionSetup = preload("res://scripts/simulation/region_setup.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const MultiScaleDayCalculator = preload("res://scripts/simulation/multiscale_day_calculator.gd")
 
@@ -43,7 +43,7 @@ func _run() -> void:
 		quit(1)
 		return
 	start_us = Time.get_ticks_usec()
-	var copy = DayCycleCalculator.copy_region(region)
+	var copy = RegionSnapshot.copy_region(region)
 	print("Region copy: %.1f ms" % (float(Time.get_ticks_usec() - start_us) / 1000.0))
 	if copy.neighborhoods[0] == region.neighborhoods[0]:
 		push_error("Region snapshot shares mutable neighborhoods.")

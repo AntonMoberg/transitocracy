@@ -4,7 +4,7 @@ const RegionData = preload("res://scripts/simulation/region_data.gd")
 const NodeData = preload("res://scripts/simulation/road_node_data.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const Layout = preload("res://scripts/simulation/street_layout.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const StreetLayoutOps = preload("res://scripts/simulation/street_layout_ops.gd")
 const Neighborhood = preload("res://scripts/simulation/neighborhood_data.gd")
 const Plan = preload("res://scripts/simulation/development_plan.gd")
 const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
@@ -41,7 +41,7 @@ func _run() -> void:
 	var layout = Layout.new()
 	layout.city_id = 0
 	layout.nodes = PackedVector2Array([Vector2(1.0, -0.1), Vector2(1.0, 0.1)])
-	LayoutGenerator._append_edge(layout, 0, 1, Roads.LOCAL, 2)
+	StreetLayoutOps._append_edge(layout, 0, 1, Roads.LOCAL, 2)
 	UrbanGraph._connect_local_arterials(region, layout, {})
 	if layout.edges.size() != 2 or layout.arterial_nodes.size() != 1:
 		_fail("A local road crossing an arterial was not split at the intersection.")

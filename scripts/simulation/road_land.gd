@@ -7,8 +7,9 @@ const SITE_COST_PER_HA = 25000.0
 const JOB_COMPENSATION = 50000.0
 const CLEARANCE_KM = 0.005
 const PARCEL_BUFFER_KM = 0.007
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const Geography = preload("res://scripts/simulation/state_geography.gd")
+const NeighborhoodSpatialIndex = preload("res://scripts/simulation/neighborhood_spatial_index.gd")
 
 
 static func width_for(road_class: String) -> float:
@@ -68,13 +69,22 @@ static func preview(region, points: PackedVector2Array, road_class: String) -> D
 	var redevelopment_ha := 0.0
 	var street_cost := 0.0
 	var local_bridge_cost := 0.0
-	for neighborhood in region.neighborhoods:
+	var mask_bounds: Array[Rect2] = []
+	var corridor_bounds := Rect2()
+	for mask in masks:
+		var bounds: Rect2 = _bounds(mask)
+		corridor_bounds = bounds if mask_bounds.is_empty() else corridor_bounds.merge(bounds)
+		mask_bounds.append(bounds)
+	var nearby_ids: Array[int] = NeighborhoodSpatialIndex.in_bounds(region, corridor_bounds) if not mask_bounds.is_empty() else []
+	for neighborhood_id in nearby_ids:
+		var neighborhood = region.neighborhoods[neighborhood_id]
 		var polygon: PackedVector2Array = region.jurisdictions[neighborhood.jurisdiction_id].polygon_km
+		var polygon_bounds: Rect2 = region.jurisdictions[neighborhood.jurisdiction_id].bounds_km
 		var area := 0.0
-		for mask in masks:
-			if not _bounds(polygon).intersects(_bounds(mask)):
+		for mask_id in range(masks.size()):
+			if not polygon_bounds.intersects(mask_bounds[mask_id]):
 				continue
-			area += _unclaimed_area(region, polygon, mask)
+			area += _unclaimed_area(region, polygon, masks[mask_id])
 		if area <= 0.000001:
 			continue
 		var hectares: float = area * 100.0
@@ -619,7 +629,7 @@ static func _building_displacement(region, neighborhood, new_masks: Array[Packed
 		var has_homes: bool = zone in ["Residential", "Mixed"]
 		var has_jobs: bool = zone != "Residential"
 		var density: int = code % 3
-		var footprints: Array = LayoutGenerator.buildings(block, zone, density, neighborhood.character_profile)
+		var footprints: Array = ParcelGeometry.buildings(block, zone, density, neighborhood.character_profile)
 		for building_id in range(footprints.size()):
 			var appearance: float = float(posmod(int(block["seed"]) + building_id * 7919, 1000)) / 1000.0
 			if appearance > neighborhood.built_fraction:

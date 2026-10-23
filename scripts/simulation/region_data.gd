@@ -29,6 +29,8 @@ var last_household_change: int = 0
 var next_road_link_id: int = 0
 var next_road_project_id: int = 0
 var road_geometry_revision: int = 0
+var accessibility_cost_revision: int = -1
+var accessibility_link_costs: PackedVector2Array = PackedVector2Array()
 
 # Each city has an id, name, center_km, and neighborhood_ids.
 var cities: Array[Dictionary] = []
@@ -51,11 +53,15 @@ var development_candidate_city_ids: Dictionary = {}
 var urban_route_cache: Dictionary = {}
 var urban_route_revision: int = -1
 var street_spatial_cache: Dictionary = {}
+var road_corridor_cache: Dictionary = {}
+var neighborhood_spatial_cache: Dictionary = {}
 var urban_sector_claims: Dictionary = {}
 var urban_block_claims: Dictionary = {}
 var urban_plan_edges: Dictionary = {}
 var urban_locked_junctions: Dictionary = {}
 var urban_district_cells: Dictionary = {}
+var urban_district_owner_cache: Dictionary = {}
+var urban_valid_junction_cache: Dictionary = {}
 var urban_sector_merges: Dictionary = {}
 var urban_sector_merge_members: Dictionary = {}
 var urban_grid_domains: Dictionary = {}

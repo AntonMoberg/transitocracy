@@ -10,7 +10,7 @@ const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd"
 const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const RoadTrafficSummary = preload("res://scripts/simulation/road_traffic_summary.gd")
 
 
@@ -69,7 +69,7 @@ static func advance_day(region, day_key: int, previous_flow, previous_state) -> 
 static func produce_seven_day_windows(region, flow, traffic_state, buffer) -> void:
 	# Publish each completed next-day snapshot while continuing to calculate
 	# a seven-day window. The queue stays bounded so edits can invalidate it.
-	region = DayCycleCalculator.copy_region(region)
+	region = RegionSnapshot.copy_region(region)
 	buffer.mark_snapshot_ready()
 	if bool(buffer.status()["cancelled"]):
 		return
@@ -102,7 +102,7 @@ static func produce_seven_day_windows(region, flow, traffic_state, buffer) -> vo
 			traffic_state = result["traffic_state"]
 			stage_start = Time.get_ticks_usec()
 			var snapshot: Dictionary = {
-				"region": DayCycleCalculator.copy_region(region),
+				"region": RegionSnapshot.copy_region(region),
 				"flow": flow,
 				"traffic_state": MultiScaleTraffic.fork_for_week(traffic_state),
 				"completed_road_day": completed_road_day,

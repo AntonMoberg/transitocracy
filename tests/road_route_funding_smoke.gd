@@ -6,7 +6,7 @@ const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_gene
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 
 var failures := 0
 
@@ -172,7 +172,7 @@ func _run() -> void:
 					RoadPlanner.advance_day(region, exit_result["project"].open_day_key)
 					_check(region.road_nodes[-1].interchange_owner_jurisdiction_id == link.owner_jurisdiction_id, "exit upkeep must follow its sponsoring highway")
 					_check(region.road_links[-1].owner_jurisdiction_id == link.owner_jurisdiction_id, "both halves of a split highway must keep their original owner")
-					var snapshot = DayCycleCalculator.copy_region(region)
+					var snapshot = RegionSnapshot.copy_region(region)
 					_check(snapshot.road_nodes[-1].interchange_owner_jurisdiction_id == region.road_nodes[-1].interchange_owner_jurisdiction_id, "worker snapshot must retain exit ownership")
 					_check(is_equal_approx(snapshot.jurisdictions[0].daily_transfer_expense, region.jurisdictions[0].daily_transfer_expense), "worker snapshot must retain transfer expenses")
 	if failures == 0:

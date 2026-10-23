@@ -1,6 +1,6 @@
 extends RefCounted
 
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const CompactTrafficCalculator = preload("res://scripts/simulation/compact_traffic_calculator.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 
@@ -61,7 +61,7 @@ func snapshot_hours() -> Dictionary:
 static func prepare(region, flow, traffic_state, buffer) -> Dictionary:
 	# Copy mutable region data before reading it on the worker. Edits wait only
 	# for this short snapshot, while route work continues off the UI thread.
-	var snapshot = DayCycleCalculator.copy_region(region)
+	var snapshot = RegionSnapshot.copy_region(region)
 	buffer.mark_snapshot_ready()
 	if buffer.status()["cancelled"]:
 		return {}

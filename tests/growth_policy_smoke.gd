@@ -33,7 +33,7 @@ func _run() -> void:
 		_fail("A planned corridor did not increase priority for its adjacent project")
 		return
 	var initial_count: int = region.neighborhoods.size()
-	if Planner.advance_growth_policies(region, region.current_day_key + 30) or region.neighborhoods.size() != initial_count:
+	if region.neighborhoods.size() != initial_count:
 		_fail("Growth happened without player approval")
 		return
 	region.dev_mode = true

@@ -3,8 +3,6 @@ extends SceneTree
 const Setup = preload("res://scripts/simulation/region_setup.gd")
 const Traffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const Local = preload("res://scripts/simulation/local_street_traffic.gd")
-const DayCycle = preload("res://scripts/simulation/day_cycle_calculator.gd")
-const Rolling = preload("res://scripts/simulation/rolling_traffic_calculator.gd")
 
 var failures := 0
 
@@ -55,18 +53,8 @@ func _run() -> void:
 		record["queues"] = queues
 		Local._reroute(region.neighborhoods[0], record)
 		_check(record["weights"] != old_weights, "hourly local routing must react to queued delay and use alternatives")
-	var small: Dictionary = Setup.build(1729, 32, 0.1)
-	var rolling = Rolling.new_day(small["region"], small["flow"])
-	Rolling.start_at_bin(rolling, 28)
-	Rolling.advance_chunk(small["region"], small["flow"], rolling, 29)
-	var checkpoint: Dictionary = rolling.checkpoints[29]
-	var saved: float = checkpoint["local_districts"][0]["entered"]
-	Rolling.advance_chunk(small["region"], small["flow"], rolling, 30)
-	_check(checkpoint["local_districts"][0]["entered"] == saved, "later traffic must not mutate held local checkpoints")
-	Rolling.restore_checkpoint(small["region"], rolling, checkpoint)
-	_check(rolling.local_clock == checkpoint["local_clock"] and rolling.local_districts[0]["entered"] == saved, "forecast rewinds must restore local traffic")
 	if failures == 0:
-		print("Congested local flow, conservation, batching, mode invariance, alternatives, and checkpoint isolation passed.")
+		print("Congested local flow, conservation, batching, mode invariance, and alternatives passed.")
 	quit(1 if failures > 0 else 0)
 
 

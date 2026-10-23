@@ -263,6 +263,11 @@ static func _build_visits(profile, region, purpose: String, rate: float) -> void
 
 static func _build_region_od(profile, region) -> void:
 	var region_count: int = region.region_ids.size()
+	var city_count: int = region.cities.size()
+	var city_regions := PackedInt32Array()
+	city_regions.resize(city_count)
+	for city_id in range(city_count):
+		city_regions[city_id] = region.cities[city_id]["region_id"]
 	for purpose in [FlowProfile.WORK, FlowProfile.COMMERCIAL, FlowProfile.SOCIAL]:
 		var matrix: Array[PackedFloat32Array] = []
 		for _region_id in range(region_count):
@@ -270,11 +275,11 @@ static func _build_region_od(profile, region) -> void:
 			row.resize(region_count)
 			matrix.append(row)
 		var city_matrix: Array = profile.compact_city_od[purpose]
-		for origin_city in range(region.cities.size()):
-			var from_region: int = region.cities[origin_city]["region_id"]
-			for destination_city in range(region.cities.size()):
-				var to_region: int = region.cities[destination_city]["region_id"]
-				matrix[from_region][to_region] += city_matrix[origin_city][destination_city]
+		for origin_city in range(city_count):
+			var from_region: int = city_regions[origin_city]
+			var city_row: PackedFloat32Array = city_matrix[origin_city]
+			for destination_city in region.city_od_candidates[origin_city]:
+				matrix[from_region][city_regions[destination_city]] += city_row[destination_city]
 		profile.compact_region_od[purpose] = matrix
 
 

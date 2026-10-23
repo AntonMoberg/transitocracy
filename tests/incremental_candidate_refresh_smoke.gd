@@ -3,7 +3,7 @@ extends SceneTree
 const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
 const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_generator.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 
 
 func _initialize() -> void:
@@ -23,7 +23,7 @@ func _run() -> void:
 		_fail("Fixture district could not be approved.")
 		return
 	var city_id: int = int(region.development_candidates[candidate_id]["city_id"])
-	var full = DayCycleCalculator.copy_region(region)
+	var full = RegionSnapshot.copy_region(region)
 	DevelopmentPlanner.refresh_candidates(region, [city_id])
 	DevelopmentPlanner.refresh_candidates(full)
 	if region.development_candidates.size() != full.development_candidates.size():

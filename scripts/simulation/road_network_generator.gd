@@ -4,10 +4,8 @@ const RoadNodeData = preload("res://scripts/simulation/road_node_data.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const StreetNetwork = preload("res://scripts/simulation/street_network.gd")
-const StreetLayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
-const Streamlines = preload("res://scripts/simulation/street_streamline_tracer.gd")
 const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
 
 

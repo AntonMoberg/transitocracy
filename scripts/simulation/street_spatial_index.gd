@@ -4,11 +4,11 @@ extends RefCounted
 static func cache(region) -> Dictionary:
 	var data: Dictionary = region.street_spatial_cache
 	var count: int = data.get("link_count", 0)
-	if count > region.road_links.size() or (count > 0 and region.road_links[count - 1].id != data.get("last_link", -1)):
+	if data.get("revision", -1) != region.road_geometry_revision or count > region.road_links.size() or (count > 0 and region.road_links[count - 1].id != data.get("last_link", -1)):
 		data = {}
 		region.street_spatial_cache = data
 	if data.is_empty():
-		data.assign({"nodes": {}, "links": {}, "arterials": {}, "pairs": {}, "id_indices": {}, "used_nodes": {}, "node_count": 0, "link_count": 0, "last_link": -1})
+		data.assign({"revision": region.road_geometry_revision, "nodes": {}, "links": {}, "arterials": {}, "pairs": {}, "id_indices": {}, "used_nodes": {}, "node_count": 0, "link_count": 0, "last_link": -1})
 	for node_id in range(data["node_count"], region.road_nodes.size()):
 		index_node(data, region.road_nodes[node_id])
 	data["node_count"] = region.road_nodes.size()

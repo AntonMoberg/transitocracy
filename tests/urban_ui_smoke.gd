@@ -2,7 +2,7 @@ extends SceneTree
 
 const UiFixture = preload("res://tests/ui_fixture.gd")
 const Local = preload("res://scripts/simulation/local_street_traffic.gd")
-const LayoutGenerator = preload("res://scripts/simulation/street_layout_generator.gd")
+const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
 
 
@@ -51,7 +51,7 @@ func _run() -> void:
 			continue
 		var code: int = neighborhood.block_zoning[block_id] - 1
 		var zone: String = ["Residential", "Commercial", "Office", "Mixed", "Industry"][code / 3]
-		var footprints: Array = LayoutGenerator.buildings(block, zone, code % 3, neighborhood.character_profile)
+		var footprints: Array = ParcelGeometry.buildings(block, zone, code % 3, neighborhood.character_profile)
 		for building_id in range(footprints.size()):
 			var appearance: float = float(posmod(int(block["seed"]) + building_id * 7919, 1000)) / 1000.0
 			if appearance > neighborhood.built_fraction:

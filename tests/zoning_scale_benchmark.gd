@@ -8,7 +8,7 @@ const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dyna
 const TripFlowCalculator = preload("res://scripts/simulation/trip_flow_calculator.gd")
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const MultiScaleDayCalculator = preload("res://scripts/simulation/multiscale_day_calculator.gd")
-const DayCycleCalculator = preload("res://scripts/simulation/day_cycle_calculator.gd")
+const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 const DevelopmentPlanner = preload("res://scripts/simulation/development_planner.gd")
 const RegionMap = preload("res://scripts/ui/region_map.gd")
@@ -116,7 +116,7 @@ func _run() -> void:
 	var state = MultiScaleTraffic.new_day(region, flow, clock.unix_seconds)
 	var generation_ms: float = float(Time.get_ticks_usec() - started) / 1000.0
 	started = Time.get_ticks_usec()
-	var snapshot = DayCycleCalculator.copy_region(region)
+	var snapshot = RegionSnapshot.copy_region(region)
 	var copy_ms: float = float(Time.get_ticks_usec() - started) / 1000.0
 	if map_index:
 		var map := RegionMap.new()
