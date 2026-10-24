@@ -58,6 +58,11 @@ func _run() -> void:
 	_check(TerrainDetailTile.land_color(700.0, Vector2(0.3, 0.1)).is_equal_approx(TerrainDetailTile.land_color(700.0, Vector2(-0.3, -0.1))), "plain Map facets must depend on steepness, not light direction")
 	_check(not TerrainDetailTile.land_color(700.0, Vector2.ZERO).is_equal_approx(TerrainDetailTile.land_color(700.0, Vector2(0.3, 0.1))), "plain Map must show steep terrain with discrete colors")
 	_check(TerrainDetailTile.land_color(500.0, Vector2.ZERO, Vector3.ZERO, -1.0).is_equal_approx(TerrainDetailTile.land_color(500.0, Vector2.ZERO, Vector3.ZERO, 1.0)), "plain Map colors must not include fine ground texture")
+	var lowland: Color = TerrainDetailTile.land_color(50.0, Vector2.ZERO)
+	var foothill: Color = TerrainDetailTile.land_color(650.0, Vector2(0.1, 0.0))
+	var alpine: Color = TerrainDetailTile.land_color(2500.0, Vector2(0.2, 0.1))
+	_check(lowland.g > lowland.r and foothill.g > foothill.r and foothill.g < lowland.g, "Map elevation colors must deepen from light green flatlands to green hills")
+	_check(alpine.r > alpine.g and alpine.g > alpine.b, "high mountains must transition into beige elevation colors")
 	_check(not TerrainDetailTile.terrain_color(500.0, Vector2.ZERO).is_equal_approx(TerrainDetailTile.terrain_color(500.0, Vector2(0.3, 0.1))), "terrain toggle must add relief shading")
 	_check(not TerrainDetailTile.satellite_color(500.0, Vector2.ZERO).is_equal_approx(TerrainDetailTile.land_color(500.0, Vector2.ZERO)), "satellite style must use distinct natural colors")
 	var contour_pixels := 0

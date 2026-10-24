@@ -8,6 +8,7 @@ const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const DirectionField = preload("res://scripts/simulation/street_direction_field.gd")
 const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
 const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
+const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 
 
 static func generate(region) -> void:
@@ -47,6 +48,7 @@ static func generate(region) -> void:
 	for city in region.cities:
 		_build_city_arterials(region, city)
 	_build_starting_highways(region)
+	_build_regional_arterials(region)
 	for link in region.road_links:
 		if link.road_class != RoadLinkData.COLLECTOR:
 			link.owner_jurisdiction_id = region.road_owner_for_points(link.points, link.road_class)
@@ -157,6 +159,181 @@ static func _build_starting_highways(region) -> void:
 		if connector_node < 0:
 			connector_node = region.city_hub_node_ids[city_id]
 		_add_link(region, connector_node, access_id, RoadLinkData.ARTERIAL, 1)
+
+
+static func _build_regional_arterials(region) -> void:
+	# One settlement corridor per county gives the state a sparse lower-order
+	# network. These are physical links, so dormant towns remain dormant until
+	# development is approved while still having a route into the region.
+	var connected: Dictionary = {}
+	for city_id in region.starting_city_ids:
+		connected[city_id] = true
+	var served_counties: Dictionary = {}
+	var rejected: Dictionary = {}
+	var target_count: int = mini(region.county_ids.size(), region.cities.size() - connected.size())
+	for _route_index in range(target_count):
+		var installed := false
+		for _attempt in range(12):
+			var best := Vector2i(-1, -1)
+			var best_score := INF
+			for target_city in region.cities:
+				var to_id: int = target_city["id"]
+				if connected.has(to_id):
+					continue
+				var to_point: Vector2 = target_city["center_km"]
+				for from_id in connected:
+					var key := Vector2i(int(from_id), to_id)
+					if rejected.has(key):
+						continue
+					var distance: float = region.cities[int(from_id)]["center_km"].distance_to(to_point)
+					var score: float = distance + (36.0 if served_counties.has(target_city["county_id"]) else 0.0)
+					if score < best_score:
+						best_score = score
+						best = key
+			if best.x < 0:
+				return
+			var first_id: int = _regional_departure_node(region, best.x, region.cities[best.y]["center_km"])
+			var last_id: int = region.city_hub_node_ids[best.y]
+			var route: PackedVector2Array = _regional_valley_route(region, region.road_nodes[first_id].position_km, region.road_nodes[last_id].position_km)
+			if route.size() < 2 or _route_length(route) > region.road_nodes[first_id].position_km.distance_to(region.road_nodes[last_id].position_km) * 2.2:
+				rejected[best] = true
+				continue
+			var link = RoadLinkData.new()
+			link.id = region.next_road_link_id
+			region.next_road_link_id += 1
+			link.corridor_id = link.id
+			link.from_node_id = first_id
+			link.to_node_id = last_id
+			link.road_class = RoadLinkData.ARTERIAL
+			link.lanes_per_direction = 1
+			link.points = route
+			link.recalculate_length()
+			link.terrain_spans = RoadTerrain.spans(region, route, RoadLinkData.ARTERIAL)
+			link.crossings = RoadPlanner._crossings_for_route(region, route, RoadLinkData.ARTERIAL, {})
+			for crossing in link.crossings:
+				crossing["above"] = false
+			link.owner_jurisdiction_id = region.road_owner_for_points(route, RoadLinkData.ARTERIAL)
+			region.road_links.append(link)
+			RoadPlanner._connect_surface_crossings(region, link.corridor_id)
+			connected[best.y] = true
+			served_counties[region.cities[best.y]["county_id"]] = true
+			installed = true
+			break
+		if not installed:
+			return
+
+
+static func _regional_departure_node(region, city_id: int, target: Vector2) -> int:
+	var best_id: int = region.city_hub_node_ids[city_id]
+	var best_distance: float = region.road_nodes[best_id].position_km.distance_squared_to(target)
+	for link in region.road_links:
+		if link.road_class != RoadLinkData.ARTERIAL:
+			continue
+		for node_id in [link.from_node_id, link.to_node_id]:
+			var node = region.road_nodes[node_id]
+			if node.city_id != city_id or node.is_interchange:
+				continue
+			var distance: float = node.position_km.distance_squared_to(target)
+			if distance < best_distance:
+				best_distance = distance
+				best_id = node_id
+	return best_id
+
+
+static func _regional_valley_route(region, first: Vector2, last: Vector2) -> PackedVector2Array:
+	var distance: float = first.distance_to(last)
+	if distance < 1.0:
+		return PackedVector2Array()
+	var tangent: Vector2 = (last - first) / distance
+	var normal: Vector2 = tangent.orthogonal()
+	var stations: int = maxi(2, ceili(distance / 12.0))
+	var rows: Array = []
+	var costs: Array = []
+	var parents: Array = []
+	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
+	for station in range(stations + 1):
+		var fraction: float = float(station) / float(stations)
+		var center: Vector2 = first.lerp(last, fraction)
+		var offsets: Array = [0.0] if station == 0 or station == stations else [0.0, -8.0, 8.0, -16.0, 16.0, -28.0, 28.0, -42.0, 42.0]
+		var row: Array[Vector2] = []
+		var row_costs: Array[float] = []
+		var row_parents: Array[int] = []
+		for offset in offsets:
+			var point: Vector2 = center + normal * offset
+			if not Geometry2D.is_point_in_polygon(point, land):
+				continue
+			var slope: float = region.terrain.slope_at(point)
+			var water: bool = region.terrain.water_at(point)
+			var intrinsic: float = absf(offset) * 0.12 + slope * 100.0 + (140.0 if water else 0.0)
+			var best_cost: float = intrinsic if station == 0 else INF
+			var best_parent := -1
+			if station > 0:
+				for previous in range(rows[-1].size()):
+					var before: Vector2 = rows[-1][previous]
+					if not StateGeography.segment_on_land(land, before, point):
+						continue
+					var middle: Vector2 = (before + point) * 0.5
+					var segment_cost: float = before.distance_to(point) + region.terrain.slope_at(middle) * 125.0 + (160.0 if region.terrain.water_at(middle) else 0.0)
+					var trial: float = costs[-1][previous] + intrinsic + segment_cost
+					if trial < best_cost:
+						best_cost = trial
+						best_parent = previous
+			row.append(point)
+			row_costs.append(best_cost)
+			row_parents.append(best_parent)
+		rows.append(row)
+		costs.append(row_costs)
+		parents.append(row_parents)
+	if rows[-1].is_empty() or costs[-1][0] == INF:
+		return PackedVector2Array()
+	var trace := PackedVector2Array()
+	var choice := 0
+	for station in range(stations, -1, -1):
+		trace.append(rows[station][choice])
+		choice = parents[station][choice]
+		if station > 0 and choice < 0:
+			return PackedVector2Array()
+	trace.reverse()
+	var guide := PackedVector2Array()
+	for index in range(1, trace.size() - 1):
+		if index % 2 == 0 or index == trace.size() - 2:
+			guide.append(trace[index])
+	var route := PackedVector2Array([first])
+	for point in guide:
+		route.append(point)
+	route.append(last)
+	for index in range(1, route.size()):
+		if not StateGeography.segment_on_land(land, route[index - 1], route[index]):
+			return _smooth_regional_polyline(trace, land)
+	return _smooth_regional_polyline(route, land)
+
+
+static func _smooth_regional_polyline(points: PackedVector2Array, land: PackedVector2Array) -> PackedVector2Array:
+	var smoothed := PackedVector2Array([points[0]])
+	for index in range(points.size() - 1):
+		var before: Vector2 = points[maxi(0, index - 1)]
+		var first: Vector2 = points[index]
+		var last: Vector2 = points[index + 1]
+		var after: Vector2 = points[mini(points.size() - 1, index + 2)]
+		for subdivision in range(1, 5):
+			var t: float = float(subdivision) * 0.25
+			var t2: float = t * t
+			var t3: float = t2 * t
+			var tangent_a: Vector2 = (last - before) * 0.5
+			var tangent_b: Vector2 = (after - first) * 0.5
+			var curved: Vector2 = first * (2.0 * t3 - 3.0 * t2 + 1.0) + tangent_a * (t3 - 2.0 * t2 + t) + last * (-2.0 * t3 + 3.0 * t2) + tangent_b * (t3 - t2)
+			var point: Vector2 = first.lerp(last, t) + (curved - first.lerp(last, t)).limit_length(2.0)
+			if not StateGeography.segment_on_land(land, smoothed[-1], point):
+				return points
+			smoothed.append(point)
+	return smoothed
+
+
+static func _route_length(points: PackedVector2Array) -> float:
+	var total := 0.0
+	for index in range(1, points.size()):
+		total += points[index - 1].distance_to(points[index])
+	return total
 
 
 static func _choose_highway_bands(region, ordered: Array[int], span: float) -> Array:

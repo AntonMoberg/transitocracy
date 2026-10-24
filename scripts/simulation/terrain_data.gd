@@ -10,6 +10,7 @@ var bounds: Rect2
 var width: int
 var height: int
 var elevations: PackedFloat32Array = PackedFloat32Array()
+var visual_valley_depths: PackedFloat32Array = PackedFloat32Array()
 var coastline: PackedVector2Array = PackedVector2Array()
 var lakes: Array[Dictionary] = []
 var lake_cells: Dictionary = {}
@@ -68,6 +69,10 @@ func visual_elevation_at(point: Vector2) -> float:
 		_interpolate_height(elevations[y2 + x0], elevations[y2 + x1], elevations[y2 + x2], elevations[y2 + x3], fx),
 		_interpolate_height(elevations[y3 + x0], elevations[y3 + x1], elevations[y3 + x2], elevations[y3 + x3], fx), fy
 	)
+	if visual_valley_depths.size() == elevations.size():
+		var valley_a: float = lerpf(visual_valley_depths[y1 + x1], visual_valley_depths[y1 + x2], fx)
+		var valley_b: float = lerpf(visual_valley_depths[y2 + x1], visual_valley_depths[y2 + x2], fx)
+		base -= lerpf(valley_a, valley_b, fy)
 	if visual_detail_noise == null:
 		return base
 	var dx: float = ((elevations[y1 + x2] - elevations[y1 + x1]) + (elevations[y2 + x2] - elevations[y2 + x1])) / (GRID_KM * 2000.0)
@@ -91,8 +96,11 @@ func land_cover_at(point: Vector2, elevation: float, gradient: Vector2) -> Vecto
 	var climate: float = climate_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0)
 	var patches: float = vegetation_noise.get_noise_2d(point.x * 1000.0, point.y * 1000.0)
 	var slope: float = gradient.length()
-	var moisture: float = 0.53 + climate * 0.22 + patches * 0.20 - maxf(0.0, elevation - 650.0) * 0.00010
-	var woodland: float = smoothstep(0.50, 0.68, moisture) * (1.0 - smoothstep(1050.0, 1550.0, elevation))
+	var upland: float = smoothstep(130.0, 430.0, elevation) * smoothstep(0.012, 0.065, slope)
+	var moisture: float = 0.46 + climate * 0.19 + patches * 0.10 + upland * 0.19 - maxf(0.0, elevation - 1150.0) * 0.00016
+	var mountain_forest: float = smoothstep(170.0, 450.0, elevation) * (1.0 - smoothstep(1250.0, 1850.0, elevation)) * (0.72 + climate * 0.16 + patches * 0.10)
+	var lowland_forest: float = smoothstep(0.55, 0.67, moisture) * 0.38
+	var woodland: float = clampf(maxf(mountain_forest, lowland_forest), 0.0, 1.0)
 	var dry_ground: float = (1.0 - smoothstep(0.32, 0.45, moisture)) * (1.0 - smoothstep(0.12, 0.22, slope))
 	var exposed_rock: float = smoothstep(420.0, 1050.0, elevation) * smoothstep(0.055, 0.19, slope)
 	return Vector3(woodland, dry_ground, exposed_rock)

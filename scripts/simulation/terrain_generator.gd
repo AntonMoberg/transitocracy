@@ -13,8 +13,9 @@ static func generate(seed_value: int, outline: PackedVector2Array, bounds: Rect2
 	terrain.height = ceili(terrain.bounds.size.y / TerrainData.GRID_KM) + 1
 	var broad := _noise(seed_value + 71, 0.000018, 3)
 	var hills := _noise(seed_value + 179, 0.00009, 3)
-	var ridges := _noise(seed_value + 307, 0.00018, 2)
-	var ridge_warp := _noise(seed_value + 389, 0.000035, 2)
+	var ridges := _noise(seed_value + 307, 0.00020, 3)
+	var ridge_warp := _noise(seed_value + 389, 0.000025, 2)
+	var ranges: Array[Dictionary] = _mountain_ranges(seed_value, bounds)
 	terrain.detail_noise = _noise(seed_value + 541, 0.00075, 2)
 	terrain.visual_relief_noise = _noise(seed_value + 613, 0.00045, 3)
 	terrain.visual_detail_noise = _noise(seed_value + 719, 0.0010, 3)
@@ -35,14 +36,24 @@ static func generate(seed_value: int, outline: PackedVector2Array, bounds: Rect2
 			var bx: float = broad.get_noise_2d(point.x * 1000.0, point.y * 1000.0)
 			var hx: float = hills.get_noise_2d(point.x * 1000.0, point.y * 1000.0)
 			var rx: float = ridges.get_noise_2d(point.x * 1000.0, point.y * 1000.0)
-			var mountain: float = smoothstep(0.03, 0.5, bx)
-			# A bent ridge train gives mountain districts continuous spurs and
-			# valleys rather than isolated circular bumps. The broad noise still
-			# determines where mountain country exists.
-			var bend: float = ridge_warp.get_noise_2d(point.x * 1000.0, point.y * 1000.0) * 11.0
-			var cross_ridge_km: float = point.x * 0.47 + point.y * 0.88 + bend
-			var crest: float = pow(maxf(0.0, cos(cross_ridge_km * TAU / 14.0)), 2.0)
-			var inland_elevation: float = maxf(2.0, 90.0 + bx * 140.0 + hx * (70.0 + mountain * 100.0) + crest * mountain * (2800.0 + rx * 300.0))
+			var warp: float = ridge_warp.get_noise_2d(point.x * 1000.0, point.y * 1000.0)
+			var uplift := 0.0
+			for range_data in ranges:
+				var relative: Vector2 = point - range_data["center"]
+				var along: float = relative.dot(range_data["axis"])
+				var length_km: float = range_data["length"]
+				var envelope: float = smoothstep(-length_km * 0.55, -length_km * 0.36, along) * (1.0 - smoothstep(length_km * 0.36, length_km * 0.55, along))
+				if envelope <= 0.0:
+					continue
+				var width_km: float = range_data["width"]
+				var bend: float = sin(along / range_data["bend_scale"] + range_data["phase"]) * width_km * 0.28 + warp * width_km * 0.8
+				var across: float = absf(relative.dot(range_data["normal"]) - bend)
+				var shoulder: float = exp(-0.5 * pow(across / width_km, 2.0))
+				var crest: float = exp(-0.5 * pow(across / (width_km * 0.35), 2.0))
+				var gully: float = pow(maxf(0.0, 1.0 - absf(rx) / 0.20), 2.0)
+				var spur: float = 1.0 + rx * 0.30 + hx * 0.15 - gully * 0.55
+				uplift = maxf(uplift, range_data["height"] * envelope * (shoulder * 0.70 + crest * 0.30) * maxf(0.35, spur))
+			var inland_elevation: float = maxf(2.0, 75.0 + bx * 65.0 + hx * 45.0 + uplift)
 			terrain.elevations[id] = lerpf(2.0, inland_elevation, smoothstep(0.0, 18.0, coast_distance))
 	_smooth_elevations(terrain)
 	_make_lakes(terrain, outline)
@@ -52,6 +63,28 @@ static func generate(seed_value: int, outline: PackedVector2Array, bounds: Rect2
 	_make_delta_branches(terrain, outline)
 	terrain.index_rivers()
 	return terrain
+
+
+static func _mountain_ranges(seed_value: int, bounds: Rect2) -> Array[Dictionary]:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value * 811 + 5237
+	var result: Array[Dictionary] = []
+	var count: int = rng.randi_range(2, 3)
+	for index in range(count):
+		var axis: Vector2 = Vector2(1.0, rng.randf_range(-0.24, 0.24)).normalized()
+		var center := bounds.position + bounds.size * Vector2(rng.randf_range(0.40, 0.62), (float(index) + 0.7) / (float(count) + 0.4))
+		center += Vector2(rng.randf_range(-bounds.size.x * 0.08, bounds.size.x * 0.08), rng.randf_range(-12.0, 12.0))
+		result.append({
+			"center": center,
+			"axis": axis,
+			"normal": axis.orthogonal(),
+			"length": bounds.size.x * rng.randf_range(0.52, 0.85),
+			"width": rng.randf_range(17.0, 34.0),
+			"height": rng.randf_range(2800.0, 3900.0) if index == count - 1 else rng.randf_range(950.0, 1800.0),
+			"bend_scale": rng.randf_range(70.0, 145.0),
+			"phase": rng.randf_range(0.0, TAU),
+		})
+	return result
 
 
 static func _smooth_elevations(terrain) -> void:
@@ -143,7 +176,7 @@ static func _make_lakes(terrain, outline: PackedVector2Array) -> void:
 		var major: bool = terrain.lakes.size() < 4
 		var axes := Vector2(rng.randf_range(12.0, 23.0), rng.randf_range(2.0, 4.8)) if major else Vector2(rng.randf_range(3.0, 8.0), rng.randf_range(1.0, 2.8))
 		var rotation: float = rng.randf_range(-PI, PI)
-		if not Geometry2D.is_point_in_polygon(center, outline) or terrain.elevation_at(center) > 430.0:
+		if not Geometry2D.is_point_in_polygon(center, outline) or terrain.elevation_at(center) > (340.0 if major else 500.0) or terrain.slope_at(center) > 0.075:
 			continue
 		var shore: PackedVector2Array = _lake_polygon(center, axes, rotation, terrain.seed_value + attempts * 101)
 		var radius: Vector2 = _lake_bounds_radius(center, shore)
@@ -343,6 +376,7 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 						parent[lake_id] = -1
 						seed_type[lake_id] = 2
 		terrain.index_lakes()
+	_record_visual_valleys(terrain, parent, accumulation, land)
 	var river_cells := PackedByteArray()
 	river_cells.resize(count)
 	for id in range(count):
@@ -455,6 +489,27 @@ static func _make_drainage(terrain, outline: PackedVector2Array, coast_distances
 				levels[level_index] = minf(levels[level_index], levels[level_index - 1])
 			var smoothed: Dictionary = _smooth_river(line, levels, widths, outlet)
 			terrain.rivers.append({"points": smoothed["points"], "levels": smoothed["levels"], "widths_km": smoothed["widths_km"], "width_km": _river_width(largest), "outlet": outlet})
+
+
+static func _record_visual_valleys(terrain, parent: PackedInt32Array, accumulation: PackedFloat32Array, land: PackedByteArray) -> void:
+	var count: int = terrain.width * terrain.height
+	terrain.visual_valley_depths.resize(count)
+	for id in range(count):
+		if land[id] == 0 or parent[id] < 0 or accumulation[id] < 12.0:
+			continue
+		var depth: float = minf(34.0, (sqrt(accumulation[id]) - 3.0) * 3.0)
+		var x: int = id % terrain.width
+		var y: int = id / terrain.width
+		for offset_y in range(-2, 3):
+			for offset_x in range(-2, 3):
+				var nx: int = x + offset_x
+				var ny: int = y + offset_y
+				if nx < 0 or ny < 0 or nx >= terrain.width or ny >= terrain.height:
+					continue
+				var other: int = ny * terrain.width + nx
+				if land[other] != 0:
+					var weight: float = exp(-0.55 * float(offset_x * offset_x + offset_y * offset_y))
+					terrain.visual_valley_depths[other] = maxf(terrain.visual_valley_depths[other], depth * weight)
 
 
 static func _lake_at(terrain, point: Vector2) -> Dictionary:

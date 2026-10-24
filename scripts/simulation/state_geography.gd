@@ -57,7 +57,7 @@ static func generate(region, rng: RandomNumberGenerator) -> void:
 		for city in region.cities:
 			if region.starting_city_ids.has(city["id"]):
 				continue
-			if region.terrain != null and not region.terrain.buildable_at(city["center_km"]):
+			if region.terrain != null and not _good_starter_site(region.terrain, city["center_km"]):
 				continue
 			var distance := INF
 			for starting_id in region.starting_city_ids:
@@ -73,6 +73,16 @@ static func generate(region, rng: RandomNumberGenerator) -> void:
 		if best_id < 0:
 			break
 		region.starting_city_ids.append(best_id)
+
+
+static func _good_starter_site(terrain, center: Vector2) -> bool:
+	if terrain.elevation_at(center) > 650.0:
+		return false
+	for offset in [Vector2.ZERO, Vector2(-2.0, 0.0), Vector2(2.0, 0.0), Vector2(0.0, -2.0), Vector2(0.0, 2.0), Vector2(-2.0, -2.0), Vector2(2.0, 2.0)]:
+		var point: Vector2 = center + offset
+		if terrain.water_at(point) or terrain.slope_at(point) > 0.17:
+			return false
+	return true
 
 
 static func initialize_development(region) -> void:
@@ -121,11 +131,16 @@ static func _generate_outline(seed_value: int) -> Dictionary:
 	var sample_count: int = rng.randi_range(190, 230)
 	var phase: float = rng.randf_range(0.0, TAU)
 	var amplitude: float = rng.randf_range(0.025, 0.07)
+	var shore_noise := FastNoiseLite.new()
+	shore_noise.seed = seed_value + 4381
+	shore_noise.frequency = 0.018
+	shore_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	shore_noise.fractal_octaves = 3
 	var coast_start: int = outline.size() - 1
 	for sample_index in range(sample_count, -1, -1):
 		var position: float = 0.94 * float(sample_index) / float(sample_count)
 		var coastline: float = 0.87 + sin(phase + position * 7.0) * amplitude
-		coastline += sin(phase * 1.7 + position * 63.0) * 0.014 + sin(phase * 2.3 + position * 137.0) * 0.007 + rng.randf_range(-0.004, 0.004)
+		coastline += sin(phase * 1.7 + position * 63.0) * 0.010 + shore_noise.get_noise_1d(position * 1000.0) * 0.014
 		for bay in bays:
 			coastline -= bay.z * exp(-0.5 * pow((position - bay.x) / bay.y, 2.0))
 		for cove in coves:

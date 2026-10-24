@@ -192,10 +192,10 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 			project.road_class = preview["road_class"]
 			project.lanes_per_direction = preview["lanes"]
 			project.points = preview["points"]
-			project.crossings = preview.get("crossings", []).duplicate(true)
-			project.terrain_spans = preview["terrain_impact"]["spans"].duplicate(true)
-			project.terrain_surface_paths = preview["terrain_impact"]["surface_paths"].duplicate(true)
-			project.redevelopment_impact = preview["land_impact"]["neighborhoods"].duplicate(true)
+			project.crossings.assign(preview.get("crossings", []).duplicate(true))
+			project.terrain_spans.assign(preview["terrain_impact"]["spans"].duplicate(true))
+			project.terrain_surface_paths.assign(preview["terrain_impact"]["surface_paths"].duplicate(true))
+			project.redevelopment_impact.assign(preview["land_impact"]["neighborhoods"].duplicate(true))
 		RoadProjectData.WIDEN, RoadProjectData.INTERCHANGE_EXIT:
 			project.target_link_id = preview["target_link_id"]
 			if project.kind == RoadProjectData.INTERCHANGE_EXIT:

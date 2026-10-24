@@ -654,7 +654,11 @@ func _draw_aggregate_roads() -> void:
 		if map_mode == "Trips":
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
-		_draw_active_road(_screen_polyline(link.points), link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+		var points: PackedVector2Array = _screen_polyline(link.points)
+		if _map_scale() * zoom < 60.0:
+			_draw_overview_road(points, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+		else:
+			_draw_active_road(points, link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 	var font := get_theme_default_font()
 	draw_string(font, Vector2(18, size.y - 18), "%s view  •  %.0f km of local roads subdued" % [detail_level, local_km], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("aec5d4"))
 
@@ -664,7 +668,10 @@ func _draw_aggregate_road_projects() -> void:
 		match project.kind:
 			"New road":
 				if _is_strategic_road_nodes(project.from_node_id, project.to_node_id, project.road_class):
-					_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
+					if _map_scale() * zoom < 60.0:
+						_draw_dashed_polyline(_screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
+					else:
+						_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
 			"Widen":
 				for link in region.road_links:
 					if link.id == project.target_link_id and _is_strategic_road(link):
@@ -904,6 +911,7 @@ func _draw_roads() -> void:
 		_draw_aggregate_roads()
 		_draw_aggregate_road_projects()
 		return
+	var overview: bool = _map_scale() * zoom < 60.0
 	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, _road_cull_margin(), true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
 	var batch_roads: bool = region.is_large_scale and zoom >= 2.0 and _pixels_per_meter() < 0.025
 	var show_local_roads: bool = _show_local_road_detail()
@@ -934,6 +942,21 @@ func _draw_roads() -> void:
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
+		if overview:
+			if link.road_class in ["Local", "Collector"] and not _is_strategic_road(link):
+				var color: Color = forward_color.lerp(reverse_color, 0.5) if show_traffic_overlay else Color("a7afb1", 0.55)
+				if selected_road_link_id == link.id and map_mode == "Roads":
+					selected_local_points = screen_points
+				if batch_roads:
+					for segment in range(1, screen_points.size()):
+						local_lines.append(screen_points[segment - 1])
+						local_lines.append(screen_points[segment])
+						local_colors.append(color)
+				else:
+					draw_polyline(screen_points, color, 0.8, true)
+			else:
+				_draw_overview_road(screen_points, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+			continue
 		if link.road_class == "Local":
 			if not batch_roads:
 				_draw_active_road(screen_points, link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
@@ -971,7 +994,7 @@ func _draw_roads() -> void:
 		if map_mode == "Roads":
 			_append_road_arrow_triangles(screen_points, link.lanes_per_direction, arrow_vertices, arrow_colors)
 	if batch_roads:
-		var local_width: float = maxf(1.8, 6.0 * _pixels_per_meter())
+		var local_width: float = 0.8 if overview else maxf(1.8, 6.0 * _pixels_per_meter())
 		if not selected_local_points.is_empty():
 			draw_polyline(selected_local_points, Color("f7f0bf"), local_width + 4.0, true)
 		if not local_casing_lines.is_empty():
@@ -1004,7 +1027,10 @@ func _draw_roads() -> void:
 	for project in region.road_projects:
 		match project.kind:
 			"New road":
-				_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
+				if overview:
+					_draw_dashed_polyline(_screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
+				else:
+					_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
 			"Widen":
 				for link in region.road_links:
 					if link.id == project.target_link_id:
@@ -1075,6 +1101,25 @@ func _draw_active_road(screen_points: PackedVector2Array, lanes: int, road_class
 			draw_polyline(lane_points, lane_color, _road_lane_width(road_class), true)
 	if map_mode == "Roads":
 		_draw_road_direction_arrows(screen_points, lanes, road_class)
+
+
+func _draw_overview_road(screen_points: PackedVector2Array, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:
+	if screen_points.size() < 2:
+		return
+	var highway: bool = road_class == "Highway"
+	var outer_width: float = 4.0 if highway else 2.8
+	var inner_width: float = 2.45 if highway else 1.55
+	var route_color: Color = Color("8193b1") if highway else Color("a5aeb4")
+	if base_map_style == "Satellite":
+		route_color = Color("a8b8b1") if highway else Color("a8aea1")
+	if show_traffic_overlay:
+		route_color = forward_color.lerp(reverse_color, 0.5)
+	if map_mode == "Trips":
+		route_color.a = 0.25
+	if selected:
+		draw_polyline(screen_points, Color("f3cd70"), outer_width + 4.0, true)
+	draw_polyline(screen_points, Color("fbfaf5", route_color.a), outer_width, true)
+	draw_polyline(screen_points, route_color, inner_width, true)
 
 
 func _draw_road_direction_arrows(screen_points: PackedVector2Array, lanes: int, road_class: String) -> void:
@@ -1472,16 +1517,17 @@ func _draw_road_nodes() -> void:
 		if detail_level != "Neighborhood" and node.neighborhood_id >= 0 and not node.is_interchange:
 			draw_circle(position_on_screen, 2.0, Color("8ea3b1", 0.48))
 			continue
-		var radius := 5.0 if node.is_interchange else 3.5
+		var overview: bool = _map_scale() * zoom < 60.0
+		var radius := (3.0 if overview else 5.0) if node.is_interchange else (2.5 if overview else 3.5)
 		var dormant: bool = node.neighborhood_id >= 0 and region.neighborhoods[node.neighborhood_id].development_state == "Dormant"
 		if node.kind == "City":
 			dormant = region.city_development_state(region.city_jurisdiction_ids[node.city_id]) == "Dormant"
 		if dormant:
 			draw_arc(position_on_screen, 3.5, 0.0, TAU, 12, Color("718899", 0.65), 1.0, true)
 			continue
-		draw_circle(position_on_screen, radius + 2.0, Color("091321"))
+		draw_circle(position_on_screen, radius + (1.0 if overview else 2.0), Color("f7f6f1") if overview else Color("091321"))
 		draw_circle(position_on_screen, radius, Color("f2d786") if node.is_interchange else Color("c8d5df"))
-		if node.is_interchange:
+		if node.is_interchange and not overview:
 			draw_arc(position_on_screen, radius + 4.0, 0.0, TAU, 24, Color("f2d786", 0.8), 1.0, true)
 
 
@@ -1568,7 +1614,7 @@ func _draw_transit_overlay() -> void:
 
 
 func _draw_grade_crossings() -> void:
-	if zoom < 2.0:
+	if _map_scale() * zoom < 60.0:
 		return
 	for link in region.road_links:
 		for crossing in link.crossings:
@@ -1749,7 +1795,7 @@ func _draw_boundaries() -> void:
 			var color: Color = _jurisdiction_color(kind)
 			color.a = {"City": 0.46, "County": 0.72, "Region": 0.92}[kind]
 			if region.is_large_scale and zoom < 2.0:
-				color.a = 0.18 if kind == "County" else 0.65
+				color.a = 0.11 if kind == "County" else 0.31
 			_draw_polygon_border(area, color, {"City": 1.0, "County": 1.5, "Region": 2.0}[kind])
 	if selected_jurisdiction_id >= 0:
 		var selected = region.jurisdictions[selected_jurisdiction_id]
@@ -2831,6 +2877,14 @@ func _hit_road_link(screen_position: Vector2) -> int:
 		if not show_local_roads and not _is_strategic_road(link):
 			continue
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
+		if _map_scale() * zoom < 60.0:
+			for segment in range(1, screen_points.size()):
+				var near: Vector2 = Geometry2D.get_closest_point_to_segment(screen_position, screen_points[segment - 1], screen_points[segment])
+				var center_distance: float = near.distance_to(screen_position)
+				if center_distance <= 6.0 and center_distance < best:
+					best = center_distance
+					closest = link.id
+			continue
 		var lane_hit_radius: float = maxf(4.5, _road_lane_width(link.road_class) * 0.5 + 2.0)
 		for direction in range(2):
 			for lane_index in range(link.lanes_per_direction):

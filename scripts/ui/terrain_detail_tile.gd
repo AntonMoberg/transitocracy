@@ -81,11 +81,10 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 
 static func land_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, _ground_detail: float = 0.0) -> Color:
 	var base: Color = _base_color(elevation, cover)
-	var ruggedness: float = smoothstep(0.03, 0.20, gradient.length()) * smoothstep(180.0, 600.0, elevation)
-	var facet: float = floorf(ruggedness * 5.0 + 0.5) / 5.0
-	var woodland: float = smoothstep(0.13, 0.55, cover.x)
-	var highland_color: Color = Color("cec9bf").lerp(Color("a8cfb5"), woodland)
-	return base.lerp(highland_color, facet * 0.58)
+	var upland: float = smoothstep(300.0, 1050.0, elevation)
+	var facet: float = floorf(smoothstep(0.035, 0.18, gradient.length()) * 4.0 + 0.5) / 4.0
+	var tint: Color = Color("d5d0c4").lerp(Color("a8d7bb"), cover.x)
+	return base.lerp(tint, upland * 0.06 + facet * 0.18)
 
 
 static func terrain_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, ground_detail: float = 0.0, broad_gradient: Vector2 = Vector2.INF) -> Color:
@@ -110,9 +109,15 @@ static func satellite_color(elevation: float, gradient: Vector2, cover: Vector3 
 
 
 static func _base_color(elevation: float, cover: Vector3) -> Color:
-	var base: Color = Color("f1eee6").lerp(Color("e9e4db"), smoothstep(750.0, 1600.0, elevation) * 0.75)
-	var woodland: float = smoothstep(0.13, 0.55, cover.x)
-	return base.lerp(Color("c9ecda"), woodland * 0.92)
+	# Narrow transitions produce readable landform regions on the unshaded map.
+	var base: Color = Color("d7efdc").lerp(Color("c5e5cd"), smoothstep(140.0, 170.0, elevation))
+	base = base.lerp(Color("b4d7b7"), smoothstep(400.0, 440.0, elevation))
+	base = base.lerp(Color("a8cca9"), smoothstep(800.0, 850.0, elevation))
+	base = base.lerp(Color("e6dfcb"), smoothstep(1250.0, 1310.0, elevation))
+	base = base.lerp(Color("d8ccb5"), smoothstep(2000.0, 2060.0, elevation))
+	base = base.lerp(Color("c9bba2"), smoothstep(3000.0, 3080.0, elevation))
+	var woodland: float = cover.x * (1.0 - smoothstep(950.0, 1700.0, elevation))
+	return base.lerp(Color("9fc8aa"), woodland * 0.10)
 
 
 static func slope_color(gradient: Vector2) -> Color:
