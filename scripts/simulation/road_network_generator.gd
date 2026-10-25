@@ -506,6 +506,9 @@ static func _build_highways(region, planner, sites: Array[Dictionary]) -> void:
 		unvisited.erase(start)
 		var chain: Array[int] = [start]
 		var total_km := 0.0
+		# Chained legs share their heading at each interchange so trunk lines
+		# continue smoothly instead of snapping to a new direction.
+		var chain_tangent := Vector2.ZERO
 		while chain.size() < majors.size() and total_km < 900.0:
 			var current: Dictionary = majors[chain[-1]]
 			var direction: Vector2 = _trunk_heading(majors, chain)
@@ -518,7 +521,9 @@ static func _build_highways(region, planner, sites: Array[Dictionary]) -> void:
 				var last: int = majors[next_index]["node"]
 				var a: Vector2 = region.road_nodes[first].position_km
 				var b: Vector2 = region.road_nodes[last].position_km
-				var alignment: Dictionary = planner.route(a, b, Roads.HIGHWAY, Vector2.ZERO, Vector2.ZERO, false)
+				var alignment: Dictionary = planner.route(a, b, Roads.HIGHWAY, chain_tangent, Vector2.ZERO, false)
+				if alignment.is_empty() and chain_tangent != Vector2.ZERO:
+					alignment = planner.route(a, b, Roads.HIGHWAY, Vector2.ZERO, Vector2.ZERO, false)
 				if alignment.is_empty():
 					highway_stats["alignment_failed"] += 1
 					continue
@@ -530,6 +535,8 @@ static func _build_highways(region, planner, sites: Array[Dictionary]) -> void:
 					region.road_nodes[node_id].is_interchange = true
 					region.road_nodes[node_id].interchange_owner_jurisdiction_id = region.road_owner_for_points(PackedVector2Array([region.road_nodes[node_id].position_km]), Roads.HIGHWAY)
 				var highway = _install(region, first, last, Roads.HIGHWAY, alignment)
+				var leg_points: PackedVector2Array = highway.points
+				chain_tangent = (leg_points[-1] - leg_points[-2]).normalized()
 				_connect_highways(region, highway.corridor_id)
 				unvisited.erase(next_index)
 				chained[next_index] = true
