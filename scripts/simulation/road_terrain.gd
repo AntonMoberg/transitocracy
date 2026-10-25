@@ -4,6 +4,56 @@ const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const SAMPLE_KM = 0.10
 
 
+static func slice_profile(original: PackedVector2Array, heights: PackedFloat32Array, path: PackedVector2Array) -> PackedFloat32Array:
+	var result := PackedFloat32Array()
+	if heights.size() != original.size():
+		return result
+	var known: Dictionary = {}
+	for index in range(original.size()):
+		known[original[index]] = heights[index]
+	for point in path:
+		if known.has(point):
+			result.append(known[point])
+			continue
+		var best := INF
+		var value := 0.0
+		for index in range(1, original.size()):
+			var near: Vector2 = Geometry2D.get_closest_point_to_segment(point, original[index - 1], original[index])
+			var distance: float = near.distance_squared_to(point)
+			if distance < best:
+				best = distance
+				var fraction: float = original[index - 1].distance_to(near) / maxf(0.000001, original[index - 1].distance_to(original[index]))
+				value = lerpf(heights[index - 1], heights[index], fraction)
+		result.append(value)
+	return result
+
+
+static func clip_spans(original: Array[Dictionary], path: PackedVector2Array, profile: PackedFloat32Array) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for index in range(1, path.size()):
+		var middle: Vector2 = (path[index - 1] + path[index]) * 0.5
+		var kind := ""
+		for span in original:
+			var points: PackedVector2Array = span.get("points", PackedVector2Array([span["from"], span["to"]]))
+			for segment in range(1, points.size()):
+				if middle.distance_to(Geometry2D.get_closest_point_to_segment(middle, points[segment - 1], points[segment])) < 0.0001:
+					kind = span["kind"]
+					break
+			if kind != "":
+				break
+		if kind == "":
+			continue
+		var distance: float = path[index - 1].distance_to(path[index])
+		if not result.is_empty() and result[-1]["kind"] == kind and result[-1]["to"].distance_to(path[index - 1]) < 0.00001:
+			result[-1]["points"].append(path[index])
+			result[-1]["elevations_m"].append(profile[index])
+			result[-1]["to"] = path[index]
+			result[-1]["length_km"] += distance
+		else:
+			result.append({"kind": kind, "from": path[index - 1], "to": path[index], "points": PackedVector2Array([path[index - 1], path[index]]), "elevations_m": PackedFloat32Array([profile[index - 1], profile[index]]), "length_km": distance})
+	return result
+
+
 static func spans(region, points: PackedVector2Array, road_class: String) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	for span in preview(region, points, road_class, true).get("spans", []):

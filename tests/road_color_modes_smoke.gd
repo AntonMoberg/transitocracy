@@ -11,7 +11,7 @@ func _initialize() -> void:
 func _run() -> void:
 	var main = load("res://scenes/main.tscn").instantiate()
 	root.add_child(main)
-	var deadline: int = Time.get_ticks_msec() + 15000
+	var deadline: int = Time.get_ticks_msec() + 300000
 	while main.region == null and Time.get_ticks_msec() < deadline:
 		await process_frame
 	if main.region == null:
@@ -132,7 +132,7 @@ func _run() -> void:
 		return
 	main.map_size_selector.select(0)
 	main._generate_region(1729)
-	deadline = Time.get_ticks_msec() + 15000
+	deadline = Time.get_ticks_msec() + 300000
 	while main.generation_thread != null and Time.get_ticks_msec() < deadline:
 		await process_frame
 	if main.generation_thread != null or main.region.is_large_scale:

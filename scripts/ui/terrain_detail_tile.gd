@@ -3,6 +3,7 @@ extends RefCounted
 # CPU-only terrain tile rendering. RegionMap creates GPU textures on the main
 # thread after the visible tiles finish on background workers.
 const PIXELS = 128
+const CartographicTile = preload("res://scripts/ui/cartographic_tile.gd")
 
 
 static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: float) -> Dictionary:
@@ -32,7 +33,7 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 		satellite_image.fill(Color.TRANSPARENT)
 		slope_image.fill(Color.TRANSPARENT)
 		contour_image.fill(Color.TRANSPARENT)
-		return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+		return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image, "map_vertices": PackedVector2Array(), "map_colors": PackedColorArray()}
 	var has_land_cover: bool = terrain.has_method("land_cover_at")
 	var has_ground_detail: bool = terrain.has_method("ground_detail_at")
 	# Padding lets hillshade compare broad slopes with local gullies
@@ -76,7 +77,9 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 			satellite_image.set_pixel(x, y, satellite_color(elevation, gradient, cover, ground_detail, fine_detail))
 			slope_image.set_pixel(x, y, slope_color(gradient))
 			contour_image.set_pixel(x, y, contour_color(elevation, gradient, step_km, contour_interval_m))
-	return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+	var result := {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+	result.merge(CartographicTile.build(terrain, land, origin, step_km * PIXELS, land_color))
+	return result
 
 
 static func land_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, _ground_detail: float = 0.0) -> Color:

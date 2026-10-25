@@ -85,7 +85,7 @@ func _run() -> void:
 			_check(snapshot.road_reservations.size() == region.road_reservations.size() and snapshot.road_projects[0].crossings.size() == 1, "worker snapshot should retain corridor and crossing choices")
 			RoadPlanner.advance_day(region, result["project"].open_day_key)
 			_check(region.road_links[-1].crossings.size() == 1 and not region.road_links[-1].crossings[0]["above"], "completed road should retain its grade choice")
-			_check(RoadGraph.adjacency(region)[0].size() == 1 and RoadGraph.adjacency(region)[2].size() == 1, "grade crossing must not connect road nodes")
+			_check(RoadGraph.adjacency(region)["neighbors"][0].size() == 1 and RoadGraph.adjacency(region)["neighbors"][2].size() == 1, "grade crossing must not connect road nodes")
 			var reduced_area: float = homes.developable_area_ha
 			var removal: Dictionary = RoadPlanner.demolish(region, region.road_links[-1].id)
 			_check(removal.get("ok", false) and homes.developable_area_ha > reduced_area and not RoadLand.contains_reserved(region, Vector2(3, 3)), "removing the road should release its land")

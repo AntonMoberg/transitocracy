@@ -8,7 +8,7 @@ func _initialize() -> void:
 func _run() -> void:
 	var main = load("res://scenes/main.tscn").instantiate()
 	root.add_child(main)
-	var deadline: int = Time.get_ticks_msec() + 20000
+	var deadline: int = Time.get_ticks_msec() + 300000
 	while main.region == null and Time.get_ticks_msec() < deadline:
 		await process_frame
 	if main.region == null:

@@ -20,6 +20,7 @@ var last_building_count: int = 0
 var last_block_draw_us: int = 0
 var last_street_draw_us: int = 0
 var building_update_scheduled := false
+var footprint_cache: Dictionary = {}
 
 
 func hit_street(map, point: Vector2) -> Vector2i:
@@ -60,7 +61,7 @@ func draw(map) -> void:
 	last_block_draw_us = 0
 	last_street_draw_us = 0
 	var meters: float = map._pixels_per_meter()
-	if meters < 0.025:
+	if meters < 0.003:
 		return
 	var viewport := Rect2(Vector2.ZERO, map.size)
 	var first_world: Vector2 = map._screen_to_world(viewport.position)
@@ -72,8 +73,8 @@ func draw(map) -> void:
 	var street_lines := PackedVector2Array()
 	var street_colors := PackedColorArray()
 	var dashed_streets := PackedVector2Array()
-	var street_width: float = maxf(1.3, meters * 7.0)
-	var casing_width: float = street_width + maxf(1.0, meters * 2.0)
+	var street_width: float = maxf(0.65 if map.base_map_style == "Map" else 1.3, meters * 7.0)
+	var casing_width: float = street_width + maxf(0.4 if map.base_map_style == "Map" else 1.0, meters * 2.0)
 	for neighborhood_id in NeighborhoodSpatialIndex.in_bounds(map.region, world_viewport):
 		var neighborhood = map.region.neighborhoods[neighborhood_id]
 		var layout = neighborhood.street_layout
@@ -82,6 +83,10 @@ func draw(map) -> void:
 			continue
 		var screen_bounds := Rect2(map._world_to_screen(layout.bounds.position), layout.bounds.size * map._map_scale() * map.zoom)
 		if not screen_bounds.intersects(viewport):
+			continue
+		if map.base_map_style == "Map" and map.map_mode != "Zoning":
+			pending_buildings = _draw_footprint(map, neighborhood, building_deadline_us) or pending_buildings
+		if meters < 0.025:
 			continue
 		if meters >= BUILDING_DETAIL_PPM:
 			var block_started: int = Time.get_ticks_usec()
@@ -112,7 +117,7 @@ func draw(map) -> void:
 				continue
 			if layout.classes[edge_id] != Roads.LOCAL:
 				continue
-			var color := Color("6f7f80")
+			var color := Color("fcfcf7") if map.base_map_style == "Map" else Color("6f7f80")
 			if not record.is_empty() and map.show_traffic_overlay:
 				var rate: Vector2 = LocalTraffic.edge_rate(record, edge_id)
 				var queue: Vector2 = record["queues"][edge_id]
@@ -144,7 +149,7 @@ func draw(map) -> void:
 		last_street_draw_us += Time.get_ticks_usec() - street_started
 	if not casing_lines.is_empty():
 		var batch_started: int = Time.get_ticks_usec()
-		map.draw_multiline(casing_lines, Color("17252c"), casing_width, true)
+		map.draw_multiline(casing_lines, Color("c4ced0") if map.base_map_style == "Map" else Color("17252c"), casing_width, true)
 		map.draw_multiline_colors(street_lines, street_colors, street_width, true)
 		for index in range(0, dashed_streets.size(), 2):
 			map.draw_dashed_line(dashed_streets[index], dashed_streets[index + 1], Color("b5baa1", 0.5), maxf(0.6, meters * 0.12), meters * 3.0, true)
@@ -185,6 +190,44 @@ func _screen_edge_path(map, layout, edge_id: int) -> PackedVector2Array:
 	for point in path:
 		screen.append(map._world_to_screen(point))
 	return screen
+
+
+func _draw_footprint(map, neighborhood, deadline: int) -> bool:
+	if neighborhood.built_fraction <= 0.01:
+		return false
+	var layout = neighborhood.street_layout
+	var phase: int = neighborhood.development_plan.completed_phase
+	var key: String = "%d:%d:%d" % [layout.get_instance_id(), phase, map.region.road_geometry_revision]
+	if not footprint_cache.has(key):
+		if Time.get_ticks_usec() > deadline:
+			return true
+		if footprint_cache.size() > 1024:
+			footprint_cache.clear()
+		var vertices := PackedVector2Array()
+		var colors := PackedColorArray()
+		for block in layout.blocks:
+			if int(block["phase"]) > phase or block.get("demolished", false):
+				continue
+			var polygon: PackedVector2Array = block["polygon"]
+			var indices: PackedInt32Array = Geometry2D.triangulate_polygon(polygon)
+			var color := Color("bee5c9") if block["park"] else Color("f1f2ef")
+			for index in indices:
+				vertices.append(polygon[index] - layout.bounds.position)
+				colors.append(color)
+		var mesh: ArrayMesh = null
+		if not vertices.is_empty():
+			var arrays: Array = []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = vertices
+			arrays[Mesh.ARRAY_COLOR] = colors
+			mesh = ArrayMesh.new()
+			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		footprint_cache[key] = mesh
+	if footprint_cache[key] != null:
+		var scale: float = map._map_scale() * map.zoom
+		var transform := Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), map._world_to_screen(layout.bounds.position))
+		map.draw_mesh(footprint_cache[key], null, transform)
+	return false
 
 
 func _draw_blocks(map, neighborhood, viewport: Rect2, meters: float, building_deadline_us: int) -> bool:

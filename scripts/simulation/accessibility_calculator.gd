@@ -58,7 +58,7 @@ static func _recalculate_large(region, supplied_costs: PackedVector2Array = Pack
 		_recalculate_large_jobs(region)
 		return
 	region.neighborhood_development_connected = RoadGraph.neighborhoods_connected_to_start(region)
-	var adjacency: Array = RoadGraph.adjacency(region)
+	var adjacency: Array = RoadGraph.adjacency(region)["neighbors"]
 	var rooted_nodes: PackedByteArray = RoadGraph.nodes_connected_to_start(region)
 	region.city_route_node_ids = region.city_hub_node_ids.duplicate()
 	for city in region.cities:
@@ -75,14 +75,14 @@ static func _recalculate_large(region, supplied_costs: PackedVector2Array = Pack
 				break
 	region.neighborhood_accessible.resize(region.neighborhoods.size())
 	region.neighborhood_accessible.fill(0)
-	var neighbors: Array = RoadGraph.strategic_adjacency(region)
+	var neighbors: Dictionary = RoadGraph.strategic_adjacency(region)
 	for city in region.cities:
 		var city_id: int = city["id"]
 		var selected_node: int = region.city_route_node_ids[city_id]
-		if not neighbors[selected_node].is_empty():
+		if not neighbors["neighbors"][selected_node].is_empty():
 			continue
 		for node in region.road_nodes:
-			if node.city_id == city_id and rooted_nodes[node.id] != 0 and not neighbors[node.id].is_empty():
+			if node.city_id == city_id and rooted_nodes[node.id] != 0 and not neighbors["neighbors"][node.id].is_empty():
 				region.city_route_node_ids[city_id] = node.id
 				break
 	var forest: bool = RoadGraph.is_forest(region)
@@ -119,7 +119,7 @@ static func _same_link_costs(first: PackedVector2Array, second: PackedVector2Arr
 	return true
 
 
-static func _city_times_row(region, costs: PackedVector2Array, neighbors: Array, forest: bool, city_id: int) -> Dictionary:
+static func _city_times_row(region, costs: PackedVector2Array, neighbors: Dictionary, forest: bool, city_id: int) -> Dictionary:
 	var source_node: int = region.city_route_node_ids[city_id]
 	var tree: Dictionary = RoadGraph._shortest_tree(region, costs, neighbors, source_node, false, false, forest)
 	var distances: PackedFloat32Array = tree["distances"]

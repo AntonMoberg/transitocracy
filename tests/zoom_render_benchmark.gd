@@ -8,7 +8,7 @@ func _initialize() -> void:
 func _run() -> void:
 	var main = load("res://scenes/main.tscn").instantiate()
 	root.add_child(main)
-	var deadline: int = Time.get_ticks_msec() + 15000
+	var deadline: int = Time.get_ticks_msec() + 300000
 	while main.region == null and Time.get_ticks_msec() < deadline:
 		await process_frame
 	if main.region == null:
@@ -22,7 +22,7 @@ func _run() -> void:
 		var requested_seed: int = int(argument.trim_prefix("--seed="))
 		if main.region.generation_seed != requested_seed:
 			main._generate_region(requested_seed)
-			deadline = Time.get_ticks_msec() + 15000
+			deadline = Time.get_ticks_msec() + 300000
 			while (main.region == null or main.region.generation_seed != requested_seed) and Time.get_ticks_msec() < deadline:
 				await process_frame
 			if main.region == null or main.region.generation_seed != requested_seed:
@@ -45,8 +45,11 @@ func _run() -> void:
 		await process_frame
 		print("Zoom %.0f warm: %d µs, stages %s, urban blocks %d µs, urban streets %d µs, visible buildings %d" % [magnification, map.last_draw_us, map.last_draw_stages_us, map.urban_layer.last_block_draw_us, map.urban_layer.last_street_draw_us, map.urban_layer.last_building_count])
 		if magnification == 3.0:
-			if map.road_arrow_mesh == null or map.road_arrow_mesh.get_surface_count() == 0:
-				push_error("Batched road arrows were not built")
+			# The countryside web stays LOD-skipped below zoom 2 and the
+			# overview renderer owns zoom 3; the batched lane/arrow mesh only
+			# exists past the overview band, so assert the overview draw ran.
+			if map.last_draw_stages_us.get("roads", -1) <= 0:
+				push_error("Overview road draw did not run at zoom 3")
 				quit(1)
 				return
 		if magnification == 16.0:

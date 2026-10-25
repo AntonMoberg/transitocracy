@@ -171,6 +171,7 @@ static func _copy_large_region(source):
 		link.road_class = original.road_class
 		link.lanes_per_direction = original.lanes_per_direction
 		link.points = original.points
+		link.elevation_profile_m = original.elevation_profile_m
 		link.length_km = original.length_km
 		link.owner_jurisdiction_id = original.owner_jurisdiction_id
 		link.toll_forward = original.toll_forward
@@ -180,6 +181,7 @@ static func _copy_large_region(source):
 		link.managed_neighborhood_id = original.managed_neighborhood_id
 		link.crossings = original.crossings.duplicate(true)
 		link.terrain_spans = original.terrain_spans.duplicate(true)
+		link.junctions = original.junctions.duplicate(true)
 		link.border_city_ids = original.border_city_ids
 		link.border_seam_key = original.border_seam_key
 		copy.road_links.append(link)

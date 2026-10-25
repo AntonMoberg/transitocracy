@@ -3,7 +3,7 @@ extends RefCounted
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 const LOCAL_ACCESS_MINUTES = 5.0
 const UNREACHABLE_MINUTES = 1000000.0
-const FREE_SPEEDS_KMH = {RoadLinkData.HIGHWAY: 90.0, RoadLinkData.ARTERIAL: 50.0, RoadLinkData.COLLECTOR: 30.0, RoadLinkData.LOCAL: 20.0}
+const FREE_SPEEDS_KMH = {RoadLinkData.HIGHWAY: 90.0, RoadLinkData.ARTERIAL: 50.0, RoadLinkData.COLLECTOR: 50.0, RoadLinkData.LOCAL: 20.0}
 const CAPACITY_PER_LANE = {RoadLinkData.HIGHWAY: 1800.0, RoadLinkData.ARTERIAL: 900.0, RoadLinkData.COLLECTOR: 600.0, RoadLinkData.LOCAL: 300.0}
 
 
@@ -15,6 +15,9 @@ static func capacity_per_lane(road_class: String) -> float:
 	return CAPACITY_PER_LANE.get(road_class, 900.0)
 
 
+# Costs stay per link: one (forward, reverse) minute pair for each whole road.
+# Sub-edge fractions of junction chains scale these inside the tree search,
+# so congestion-weighted cost arrays keep working unchanged.
 static func free_flow_costs(region) -> PackedVector2Array:
 	var costs := PackedVector2Array()
 	for link in region.road_links:
@@ -33,46 +36,83 @@ static func link_index(region, link_id: int) -> int:
 	return -1
 
 
-static func adjacency(region) -> Array:
+# The routing view. A road is one edge between its endpoint junctions; a link
+# with interior junctions contributes a chain of sub-edges (endpoint ->
+# junctions -> endpoint) instead of being split. Every neighbor entry is
+# Vector2i(edge_index, direction) where direction 0 traverses edge_from ->
+# edge_to. edge_link maps each edge back to its parent link for costs, tolls
+# and volumes; edge_fraction is the sub-edge's share of the parent's cost.
+static func edge_view(region, strategic: bool = false) -> Dictionary:
 	var neighbors: Array = []
-	for node in region.road_nodes:
-		neighbors.append([])
-	for index in range(region.road_links.size()):
-		var link = region.road_links[index]
-		neighbors[link.from_node_id].append(Vector2i(index, 0))
-		neighbors[link.to_node_id].append(Vector2i(index, 1))
-	return neighbors
-
-
-static func strategic_adjacency(region) -> Array:
+	neighbors.resize(region.road_nodes.size())
+	for node_id in range(neighbors.size()):
+		neighbors[node_id] = []
+	var edge_from := PackedInt32Array()
+	var edge_to := PackedInt32Array()
+	var edge_link := PackedInt32Array()
+	var edge_fraction := PackedFloat32Array()
 	var portals: Dictionary = {}
-	var route_nodes: Array[int] = region.city_route_node_ids if not region.city_route_node_ids.is_empty() else region.city_hub_node_ids
-	for node_id in route_nodes:
-		var city_id: int = region.road_nodes[node_id].city_id
-		if not portals.has(city_id):
-			portals[city_id] = {}
-		portals[city_id][node_id] = true
-	for link in region.road_links:
-		var first = region.road_nodes[link.from_node_id]
-		var last = region.road_nodes[link.to_node_id]
-		if link.road_class != RoadLinkData.HIGHWAY and first.city_id == last.city_id:
-			continue
-		for node in [first, last]:
-			if not portals.has(node.city_id):
-				portals[node.city_id] = {}
-			portals[node.city_id][node.id] = true
-	var neighbors: Array = []
-	for _node in region.road_nodes:
-		neighbors.append([])
+	if strategic:
+		var route_nodes: Array[int] = region.city_route_node_ids if not region.city_route_node_ids.is_empty() else region.city_hub_node_ids
+		for node_id in route_nodes:
+			var city_id: int = region.road_nodes[node_id].city_id
+			if not portals.has(city_id):
+				portals[city_id] = {}
+			portals[city_id][node_id] = true
 	for index in range(region.road_links.size()):
 		var link = region.road_links[index]
 		var first = region.road_nodes[link.from_node_id]
 		var last = region.road_nodes[link.to_node_id]
-		if link.road_class != RoadLinkData.HIGHWAY and first.city_id == last.city_id and portals.get(first.city_id, {}).size() <= 1:
-			continue
-		neighbors[link.from_node_id].append(Vector2i(index, 0))
-		neighbors[link.to_node_id].append(Vector2i(index, 1))
-	return neighbors
+		if strategic:
+			if link.road_class != RoadLinkData.HIGHWAY and first.city_id == last.city_id:
+				for node in [first, last]:
+					if not portals.has(node.city_id):
+						portals[node.city_id] = {}
+					portals[node.city_id][node.id] = true
+				if portals.get(first.city_id, {}).size() <= 1:
+					continue
+		var chain: Array[int] = [link.from_node_id]
+		var stations: Array[float] = [0.0]
+		var junctions: Array[Dictionary] = link.junctions
+		var length: float = maxf(link.length_km, 0.0001)
+		for junction in junctions:
+			chain.append(int(junction["node_id"]))
+			stations.append(clampf(float(junction["station_km"]), 0.0, length))
+		chain.append(link.to_node_id)
+		stations.append(length)
+		for chain_index in range(chain.size() - 1):
+			var from_id: int = chain[chain_index]
+			var to_id: int = chain[chain_index + 1]
+			if from_id == to_id:
+				continue
+			var edge_index: int = edge_from.size()
+			edge_from.append(from_id)
+			edge_to.append(to_id)
+			edge_link.append(index)
+			edge_fraction.append((stations[chain_index + 1] - stations[chain_index]) / length)
+			neighbors[from_id].append(Vector2i(edge_index, 0))
+			neighbors[to_id].append(Vector2i(edge_index, 1))
+	return {"neighbors": neighbors, "edge_from": edge_from, "edge_to": edge_to, "edge_link": edge_link, "edge_fraction": edge_fraction}
+
+
+static func adjacency(region) -> Dictionary:
+	return edge_view(region, false)
+
+
+static func strategic_adjacency(region) -> Dictionary:
+	return edge_view(region, true)
+
+
+static func _view_or_build(region, adjacent_links) -> Dictionary:
+	if typeof(adjacent_links) == TYPE_DICTIONARY and adjacent_links.has("neighbors"):
+		return adjacent_links
+	return adjacency(region)
+
+
+# Map a traversal (edge, entered from prior_node) back onto its parent link
+# with the direction along that link, for consumers that think in roads.
+static func _parent_edge(view: Dictionary, edge_index: int, prior_node: int) -> Vector2i:
+	return Vector2i(view["edge_link"][edge_index], 0 if view["edge_from"][edge_index] == prior_node else 1)
 
 
 static func neighborhoods_connected_to_hubs(region) -> PackedByteArray:
@@ -109,7 +149,10 @@ static func _neighborhoods_connected_to_nodes(region, roots: Array[int]) -> Pack
 
 
 static func _nodes_connected_to(region, roots: Array[int]) -> PackedByteArray:
-	var neighbors: Array = adjacency(region)
+	var view: Dictionary = adjacency(region)
+	var neighbors: Array = view["neighbors"]
+	var edge_from: PackedInt32Array = view["edge_from"]
+	var edge_to: PackedInt32Array = view["edge_to"]
 	var visited := PackedByteArray()
 	visited.resize(region.road_nodes.size())
 	var queue := PackedInt32Array()
@@ -122,17 +165,16 @@ static func _nodes_connected_to(region, roots: Array[int]) -> PackedByteArray:
 		var node_id: int = queue[cursor]
 		cursor += 1
 		for edge in neighbors[node_id]:
-			var link = region.road_links[edge.x]
-			var next_id: int = link.to_node_id if edge.y == 0 else link.from_node_id
+			var next_id: int = edge_to[edge.x] if edge.y == 0 else edge_from[edge.x]
 			if visited[next_id] == 0:
 				visited[next_id] = 1
 				queue.append(next_id)
 	return visited
 
 
-static func route_pairs(region, costs: PackedVector2Array, adjacent_links: Array = [], include_paths: bool = true, parallel_sources: bool = true) -> Dictionary:
+static func route_pairs(region, costs: PackedVector2Array, adjacent_links = [], include_paths: bool = true, parallel_sources: bool = true) -> Dictionary:
 	var count: int = region.neighborhoods.size()
-	var neighbors: Array = adjacent_links if not adjacent_links.is_empty() else adjacency(region)
+	var view: Dictionary = _view_or_build(region, adjacent_links)
 	var forest: bool = is_forest(region)
 	var times: Array[PackedFloat32Array] = []
 	var paths: Array = []
@@ -142,12 +184,12 @@ static func route_pairs(region, costs: PackedVector2Array, adjacent_links: Array
 		var workers: int = mini(8, OS.get_processor_count())
 		var task_id: int = WorkerThreadPool.add_group_task(
 			func(origin_id: int) -> void:
-				results[origin_id] = _route_origin(region, costs, neighbors, forest, origin_id, count, include_paths),
+				results[origin_id] = _route_origin(region, costs, view, forest, origin_id, count, include_paths),
 			count, workers, false, "Road routes")
 		WorkerThreadPool.wait_for_group_task_completion(task_id)
 	else:
 		for origin_id in range(count):
-			results[origin_id] = _route_origin(region, costs, neighbors, forest, origin_id, count, include_paths)
+			results[origin_id] = _route_origin(region, costs, view, forest, origin_id, count, include_paths)
 	for result in results:
 		times.append(result["times"])
 		if include_paths:
@@ -155,9 +197,9 @@ static func route_pairs(region, costs: PackedVector2Array, adjacent_links: Array
 	return {"times": times, "paths": paths}
 
 
-static func _route_origin(region, costs: PackedVector2Array, neighbors: Array, forest: bool, origin_id: int, count: int, include_paths: bool) -> Dictionary:
+static func _route_origin(region, costs: PackedVector2Array, view: Dictionary, forest: bool, origin_id: int, count: int, include_paths: bool) -> Dictionary:
 	var source_node: int = region.neighborhood_gateway_node_ids[origin_id]
-	var tree: Dictionary = _shortest_tree(region, costs, neighbors, source_node, include_paths, false, forest, _access_nodes(region, origin_id))
+	var tree: Dictionary = _shortest_tree(region, costs, view, source_node, include_paths, false, forest, _access_nodes(region, origin_id))
 	var distances: PackedFloat32Array = tree["distances"]
 	var previous_node: PackedInt32Array = tree["previous_node"]
 	var previous_link: PackedInt32Array = tree["previous_link"]
@@ -174,8 +216,7 @@ static func _route_origin(region, costs: PackedVector2Array, neighbors: Array, f
 			while previous_link[cursor] >= 0:
 				var edge_index: int = previous_link[cursor]
 				var prior: int = previous_node[cursor]
-				var direction := 0 if region.road_links[edge_index].from_node_id == prior else 1
-				path.append(Vector2i(edge_index, direction))
+				path.append(_parent_edge(view, edge_index, prior))
 				cursor = prior
 			path.reverse()
 			path_row.append(path)
@@ -198,15 +239,16 @@ static func _destination_node(region, neighborhood_id: int, distances: PackedFlo
 static func route_from_node(region, costs: PackedVector2Array, source_node: int, destination_node: int) -> Array[Vector2i]:
 	if source_node == destination_node:
 		return []
-	var tree: Dictionary = _shortest_tree(region, costs, adjacency(region), source_node, true, false, is_forest(region))
+	var view: Dictionary = adjacency(region)
+	var tree: Dictionary = _shortest_tree(region, costs, view, source_node, true, false, is_forest(region))
 	var previous_link: PackedInt32Array = tree["previous_link"]
 	var previous_node: PackedInt32Array = tree["previous_node"]
 	var path: Array[Vector2i] = []
 	var cursor: int = destination_node
 	while cursor != source_node and previous_link[cursor] >= 0:
-		var link_index_value: int = previous_link[cursor]
+		var edge_index: int = previous_link[cursor]
 		var prior: int = previous_node[cursor]
-		path.append(Vector2i(link_index_value, 0 if region.road_links[link_index_value].from_node_id == prior else 1))
+		path.append(_parent_edge(view, edge_index, prior))
 		cursor = prior
 	if cursor != source_node:
 		return []
@@ -214,25 +256,25 @@ static func route_from_node(region, costs: PackedVector2Array, source_node: int,
 	return path
 
 
-static func assignment_trees(region, costs: PackedVector2Array, adjacent_links: Array = []) -> Array[Dictionary]:
-	var neighbors: Array = adjacent_links if not adjacent_links.is_empty() else adjacency(region)
+static func assignment_trees(region, costs: PackedVector2Array, adjacent_links = []) -> Array[Dictionary]:
+	var view: Dictionary = _view_or_build(region, adjacent_links)
 	var forest: bool = is_forest(region)
 	var trees: Array[Dictionary] = []
 	for origin_id in range(region.neighborhoods.size()):
 		var source_node: int = region.neighborhood_gateway_node_ids[origin_id]
-		trees.append(_shortest_tree(region, costs, neighbors, source_node, true, true, forest, _access_nodes(region, origin_id)))
+		trees.append(_shortest_tree(region, costs, view, source_node, true, true, forest, _access_nodes(region, origin_id)))
 	return trees
 
 
-static func assign_volumes(region, costs: PackedVector2Array, demand: Array[PackedFloat32Array], adjacent_links: Array = [], cached_trees: Array[Dictionary] = []) -> PackedVector2Array:
-	var neighbors: Array = adjacent_links if not adjacent_links.is_empty() else adjacency(region)
+static func assign_volumes(region, costs: PackedVector2Array, demand: Array[PackedFloat32Array], adjacent_links = [], cached_trees: Array[Dictionary] = []) -> PackedVector2Array:
+	var view: Dictionary = _view_or_build(region, adjacent_links)
 	var use_cached_trees: bool = cached_trees.size() == region.neighborhoods.size()
 	var forest: bool = is_forest(region) if not use_cached_trees else false
 	var volumes := PackedVector2Array()
 	volumes.resize(region.road_links.size())
 	for origin_id in range(region.neighborhoods.size()):
 		var source_node: int = region.neighborhood_gateway_node_ids[origin_id]
-		var tree: Dictionary = cached_trees[origin_id] if use_cached_trees else _shortest_tree(region, costs, neighbors, source_node, true, true, forest, _access_nodes(region, origin_id))
+		var tree: Dictionary = cached_trees[origin_id] if use_cached_trees else _shortest_tree(region, costs, view, source_node, true, true, forest, _access_nodes(region, origin_id))
 		var distances: PackedFloat32Array = tree["distances"]
 		var previous_node: PackedInt32Array = tree["previous_node"]
 		var previous_link: PackedInt32Array = tree["previous_link"]
@@ -246,16 +288,16 @@ static func assign_volumes(region, costs: PackedVector2Array, demand: Array[Pack
 		# Each destination's demand flows back through its parents to the origin.
 		for order_index in range(visit_order.size() - 1, -1, -1):
 			var node_id: int = visit_order[order_index]
-			var link_index_value: int = previous_link[node_id]
-			if link_index_value < 0:
+			var edge_index: int = previous_link[node_id]
+			if edge_index < 0:
 				continue
 			var vehicles: float = node_loads[node_id]
 			if vehicles <= 0.0:
 				continue
 			var prior: int = previous_node[node_id]
-			var link = region.road_links[link_index_value]
+			var link_index_value: int = view["edge_link"][edge_index]
 			var volume: Vector2 = volumes[link_index_value]
-			if link.from_node_id == prior:
+			if view["edge_from"][edge_index] == prior:
 				volume.x += vehicles
 			else:
 				volume.y += vehicles
@@ -265,7 +307,7 @@ static func assign_volumes(region, costs: PackedVector2Array, demand: Array[Pack
 
 
 static func group_route_trees(region, costs: PackedVector2Array, group_nodes: PackedInt32Array) -> Array[Dictionary]:
-	var neighbors: Array = strategic_adjacency(region) if region.is_large_scale else adjacency(region)
+	var view: Dictionary = strategic_adjacency(region) if region.is_large_scale else adjacency(region)
 	var forest: bool = is_forest(region)
 	var results: Array = []
 	results.resize(group_nodes.size())
@@ -273,12 +315,12 @@ static func group_route_trees(region, costs: PackedVector2Array, group_nodes: Pa
 		var workers: int = mini(8, OS.get_processor_count())
 		var task_id: int = WorkerThreadPool.add_group_task(
 			func(index: int) -> void:
-				results[index] = _shortest_tree(region, costs, neighbors, group_nodes[index], true, true, forest),
+				results[index] = _shortest_tree(region, costs, view, group_nodes[index], true, true, forest),
 			group_nodes.size(), workers, false, "Group road routes")
 		WorkerThreadPool.wait_for_group_task_completion(task_id)
 	else:
 		for index in range(group_nodes.size()):
-			results[index] = _shortest_tree(region, costs, neighbors, group_nodes[index], true, true, forest)
+			results[index] = _shortest_tree(region, costs, view, group_nodes[index], true, true, forest)
 	var trees: Array[Dictionary] = []
 	for result in results:
 		trees.append(result)
@@ -286,6 +328,7 @@ static func group_route_trees(region, costs: PackedVector2Array, group_nodes: Pa
 
 
 static func assign_group_volumes(region, group_nodes: PackedInt32Array, demand: Array[PackedFloat32Array], trees: Array[Dictionary]) -> PackedVector2Array:
+	var view: Dictionary = strategic_adjacency(region) if region.is_large_scale else adjacency(region)
 	var volumes := PackedVector2Array()
 	volumes.resize(region.road_links.size())
 	for origin_id in range(group_nodes.size()):
@@ -298,17 +341,17 @@ static func assign_group_volumes(region, group_nodes: PackedInt32Array, demand: 
 		node_load.resize(region.road_nodes.size())
 		for destination_id in range(group_nodes.size()):
 			var destination_node: int = group_nodes[destination_id]
-			if destination_id != origin_id and distances[destination_node] < UNREACHABLE_MINUTES:
+			if destination_node != origin_id and distances[destination_node] < UNREACHABLE_MINUTES:
 				node_load[destination_node] += demand[origin_id][destination_id]
 		for order_index in range(order.size() - 1, -1, -1):
 			var node_id: int = order[order_index]
-			var link_index_value: int = previous_link[node_id]
-			if link_index_value < 0 or node_load[node_id] <= 0.0:
+			var edge_index: int = previous_link[node_id]
+			if edge_index < 0 or node_load[node_id] <= 0.0:
 				continue
 			var prior: int = previous_node[node_id]
-			var link = region.road_links[link_index_value]
+			var link_index_value: int = view["edge_link"][edge_index]
 			var volume: Vector2 = volumes[link_index_value]
-			if link.from_node_id == prior:
+			if view["edge_from"][edge_index] == prior:
 				volume.x += node_load[node_id]
 			else:
 				volume.y += node_load[node_id]
@@ -317,8 +360,13 @@ static func assign_group_volumes(region, group_nodes: PackedInt32Array, demand: 
 	return volumes
 
 
-static func _shortest_tree(region, costs: PackedVector2Array, neighbors: Array, source_node: int, collect_previous: bool, collect_order: bool, forest: bool, source_nodes: PackedInt32Array = PackedInt32Array()) -> Dictionary:
+static func _shortest_tree(region, costs: PackedVector2Array, view: Dictionary, source_node: int, collect_previous: bool, collect_order: bool, forest: bool, source_nodes: PackedInt32Array = PackedInt32Array()) -> Dictionary:
 	var node_count: int = region.road_nodes.size()
+	var neighbors: Array = view["neighbors"]
+	var edge_from: PackedInt32Array = view["edge_from"]
+	var edge_to: PackedInt32Array = view["edge_to"]
+	var edge_link: PackedInt32Array = view["edge_link"]
+	var edge_fraction: PackedFloat32Array = view["edge_fraction"]
 	var distances := PackedFloat32Array()
 	distances.resize(node_count)
 	distances.fill(UNREACHABLE_MINUTES)
@@ -343,17 +391,17 @@ static func _shortest_tree(region, costs: PackedVector2Array, neighbors: Array, 
 			if collect_order:
 				visit_order.append(current)
 			for edge in neighbors[current]:
-				var link_index_value: int = edge.x
-				var link = region.road_links[link_index_value]
-				var next_node: int = link.to_node_id if edge.y == 0 else link.from_node_id
+				var edge_index: int = edge.x
+				var next_node: int = edge_to[edge_index] if edge.y == 0 else edge_from[edge_index]
 				if visited[next_node] != 0:
 					continue
 				visited[next_node] = 1
-				var edge_time: float = costs[link_index_value].x if edge.y == 0 else costs[link_index_value].y
+				var parent_cost: Vector2 = costs[edge_link[edge_index]]
+				var edge_time: float = (parent_cost.x if edge.y == 0 else parent_cost.y) * edge_fraction[edge_index]
 				distances[next_node] = distances[current] + edge_time
 				if collect_previous:
 					previous_node[next_node] = current
-					previous_link[next_node] = link_index_value
+					previous_link[next_node] = edge_index
 				stack.append(next_node)
 		return {"distances": distances, "previous_node": previous_node, "previous_link": previous_link, "order": visit_order}
 	var heap_nodes: Array[int] = [source_node]
@@ -387,17 +435,17 @@ static func _shortest_tree(region, costs: PackedVector2Array, neighbors: Array, 
 		if collect_order:
 			visit_order.append(current)
 		for edge in neighbors[current]:
-			var link_index_value: int = edge.x
-			var link = region.road_links[link_index_value]
-			var next_node: int = link.to_node_id if edge.y == 0 else link.from_node_id
-			var edge_time: float = costs[link_index_value].x if edge.y == 0 else costs[link_index_value].y
+			var edge_index: int = edge.x
+			var next_node: int = edge_to[edge_index] if edge.y == 0 else edge_from[edge_index]
+			var parent_cost: Vector2 = costs[edge_link[edge_index]]
+			var edge_time: float = (parent_cost.x if edge.y == 0 else parent_cost.y) * edge_fraction[edge_index]
 			var next_distance: float = distances[current] + edge_time
 			if next_distance >= distances[next_node]:
 				continue
 			distances[next_node] = next_distance
 			if collect_previous:
 				previous_node[next_node] = current
-				previous_link[next_node] = link_index_value
+				previous_link[next_node] = edge_index
 			var heap_index := heap_nodes.size()
 			heap_nodes.append(next_node)
 			heap_costs.append(next_distance)
@@ -414,6 +462,9 @@ static func _shortest_tree(region, costs: PackedVector2Array, neighbors: Array, 
 
 
 static func is_forest(region) -> bool:
+	for link in region.road_links:
+		if not link.junctions.is_empty():
+			return false
 	var parents := PackedInt32Array()
 	parents.resize(region.road_nodes.size())
 	for node_id in range(parents.size()):

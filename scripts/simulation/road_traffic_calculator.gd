@@ -37,7 +37,7 @@ static func assign_day(region, flow_profile, hours_to_assign: int = 24, warm_sta
 	for link in region.road_links:
 		profile.link_ids.append(link.id)
 	var free_costs: PackedVector2Array = RoadGraph.free_flow_costs(region)
-	var neighbors: Array = RoadGraph.adjacency(region)
+	var neighbors: Dictionary = RoadGraph.adjacency(region)
 	var count: int = region.neighborhoods.size()
 	# A forest has one path per pair, so congestion cannot change route choice.
 	var forest: bool = RoadGraph.is_forest(region)
@@ -103,7 +103,7 @@ static func carry_queues(link_ids: PackedInt32Array, previous_profile) -> Packed
 	return queues
 
 
-static func _assign_hour(region, flow_profile, hour: int, free_costs: PackedVector2Array, neighbors: Array, count: int, assignment_passes: int, fixed_trees: Array[Dictionary]) -> Dictionary:
+static func _assign_hour(region, flow_profile, hour: int, free_costs: PackedVector2Array, neighbors: Dictionary, count: int, assignment_passes: int, fixed_trees: Array[Dictionary]) -> Dictionary:
 	var demand: Array[PackedFloat32Array] = []
 	for origin_id in range(count):
 		var row := PackedFloat32Array()

@@ -21,11 +21,7 @@ func _initialize() -> void:
 	var day_key: int = clock.unix_seconds / 86400
 	var initial_links: int = region.road_links.size()
 	_check(initial_links >= 49 and not RoadGraph.is_forest(region) and _all_connected(region), "starter roads must connect forty developed neighborhoods and ten city hubs with a looped urban network")
-	var regional_arterials := 0
-	for link in region.road_links:
-		if link.road_class == "Arterial" and region.road_nodes[link.from_node_id].city_id != region.road_nodes[link.to_node_id].city_id:
-			regional_arterials += 1
-	_check(regional_arterials >= 4, "the state needs a sparse, routable secondary road network between settlements")
+	_check(_secondary_network_connects_hubs(region), "the state needs a sparse, routable secondary road network between settlements that works without trunk highways")
 	for city_id in region.starting_city_ids:
 		var hub_id: int = region.city_hub_node_ids[city_id]
 		var arterial_count := 0
@@ -34,10 +30,14 @@ func _initialize() -> void:
 				arterial_count += 1
 		var access_id: int = region.city_highway_access_node_ids[city_id]
 		var access_arterials := 0
-		for link in region.road_links:
-			if link.road_class == "Arterial" and (link.from_node_id == access_id or link.to_node_id == access_id):
-				access_arterials += 1
-		_check(arterial_count >= 1 and arterial_count <= 4 and access_id != hub_id and region.road_nodes[access_id].is_interchange and access_arterials >= 1, "city %d center needs arterial access to a separate highway exit (%d hub, %d access)" % [city_id, arterial_count, access_arterials])
+		if access_id >= 0:
+			for link in region.road_links:
+				if link.road_class == "Arterial" and (link.from_node_id == access_id or link.to_node_id == access_id):
+					access_arterials += 1
+			_check(access_id != hub_id and region.road_nodes[access_id].is_interchange and access_arterials >= 1, "city %d center needs arterial access to a separate highway exit (%d access arterials)" % [city_id, access_arterials])
+		else:
+			_check(arterial_count >= 1, "city %d without a highway exit still needs arterial access" % city_id)
+		_check(arterial_count >= 1 and arterial_count <= 4, "city %d hub needs one to four internal arterial links (%d)" % [city_id, arterial_count])
 	var interchange: Dictionary = RoadPlanner.interchange_preview(region, region.neighborhood_gateway_node_ids[0], -1, Vector2.ZERO, day_key)
 	_check(interchange["ok"] and region.jurisdictions[interchange["owner_id"]].kind == "City" and region.jurisdictions[interchange["owner_id"]].treasury >= interchange["cost"], "a starting city must be able to fund a junction interchange")
 	var state_roads := 0
@@ -47,11 +47,11 @@ func _initialize() -> void:
 		state_roads += 1 if link.owner_jurisdiction_id == 0 else 0
 		local_roads += 1 if region.jurisdictions[link.owner_jurisdiction_id].kind in ["City", "Neighborhood"] else 0
 	_check(state_roads > 0 and local_roads > 0, "the generated network must have both state and local road owners")
-	var adjacency: Array = RoadGraph.adjacency(region)
+	var adjacency: Array = RoadGraph.adjacency(region)["neighbors"]
 	var removed = null
 	for index in range(region.road_links.size() - 1, -1, -1):
 		var link = region.road_links[index]
-		if link.managed_neighborhood_id < 0 and (adjacency[link.from_node_id].size() == 1 or adjacency[link.to_node_id].size() == 1):
+		if link.managed_neighborhood_id < 0 and link.road_class == "Collector" and link.corridor_id == link.id and (adjacency[link.from_node_id].size() == 1 or adjacency[link.to_node_id].size() == 1):
 			removed = link
 			break
 	_check(removed != null, "the sparse regional network needs a removable branch")
@@ -68,8 +68,13 @@ func _initialize() -> void:
 	_check(RoadPlanner.calculate_upkeep(region) < upkeep_before, "demolition must lower road upkeep")
 	AccessibilityCalculator.recalculate(region)
 	_check(RoadGraph.route_from_node(region, RoadGraph.free_flow_costs(region), removed.from_node_id, removed.to_node_id).is_empty(), "demolition must disconnect the removed branch's endpoints")
-	var reconnect: Dictionary = RoadPlanner.link_preview(region, removed.from_node_id, removed.to_node_id, removed.road_class, PackedVector2Array(), day_key)
-	_check(reconnect["ok"] and reconnect["owner_id"] == removed_owner_id, "rebuilding a corridor must assign its original paying jurisdiction")
+	# Generation-only rural branches are rebuilt by their owner as the arterial
+	# upgrade the player toolset actually offers.
+	var reconnect: Dictionary = RoadPlanner.link_preview(region, removed.from_node_id, removed.to_node_id, "Arterial", PackedVector2Array(), day_key)
+	_check(reconnect.get("ok", false) and reconnect["owner_id"] == region.road_owner_for_points(reconnect["points"], "Arterial"), "rebuilding a corridor must assign the jurisdiction that covers its geometry")
+	if not reconnect.get("ok", false):
+		quit(1)
+		return
 	var owner = region.jurisdictions[reconnect["owner_id"]]
 	owner.treasury = float(reconnect["cost"]) - 1.0
 	_check(not RoadPlanner.commit(region, reconnect, day_key)["ok"], "insufficient owner funds must block construction even when other treasuries have money")
@@ -94,6 +99,35 @@ func _initialize() -> void:
 	if failures == 0:
 		print("Road smoke checks passed.")
 	quit(1 if failures > 0 else 0)
+
+
+func _secondary_network_connects_hubs(region) -> bool:
+	# The arterial/rural web alone must link every starting settlement; trunk
+	# highways are the fast layer on top, not the only path between towns.
+	var neighbors := {}
+	for link in region.road_links:
+		if link.road_class == "Highway":
+			continue
+		if not neighbors.has(link.from_node_id):
+			neighbors[link.from_node_id] = []
+		if not neighbors.has(link.to_node_id):
+			neighbors[link.to_node_id] = []
+		neighbors[link.from_node_id].append(link.to_node_id)
+		neighbors[link.to_node_id].append(link.from_node_id)
+	var queue: Array[int] = [region.city_hub_node_ids[region.starting_city_ids[0]]]
+	var visited := {queue[0]: true}
+	var cursor := 0
+	while cursor < queue.size():
+		var node_id: int = queue[cursor]
+		cursor += 1
+		for next_id in neighbors.get(node_id, []):
+			if not visited.has(next_id):
+				visited[next_id] = true
+				queue.append(next_id)
+	for city_id in region.starting_city_ids:
+		if not visited.has(region.city_hub_node_ids[city_id]):
+			return false
+	return true
 
 
 func _all_connected(region) -> bool:

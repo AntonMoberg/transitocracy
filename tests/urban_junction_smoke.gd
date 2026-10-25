@@ -41,21 +41,22 @@ func _run() -> void:
 		RoadPlanner._append_link(region, node_ids[0], node_ids[1], "Arterial", 1, PackedVector2Array([center - normal, center + normal]), original.owner_jurisdiction_id)
 		var corridor_id: int = region.road_links[-1].corridor_id
 		RoadPlanner._connect_surface_crossings(region, corridor_id)
-		var neighbors: Array = RoadGraph.adjacency(region)
+		var view: Dictionary = RoadGraph.adjacency(region)
+		var neighbors: Array = view["neighbors"]
 		var connected := false
 		for node in region.road_nodes:
 			if node.position_km.distance_to(center) > 0.002:
 				continue
 			var types: Dictionary = {}
 			for edge in neighbors[node.id]:
-				types[region.road_links[edge.x].road_class] = true
+				types[region.road_links[view["edge_link"][edge.x]].road_class] = true
 			connected = connected or (types.has("Arterial") and types.has(road_class))
 		if road_class == "Collector":
-			_check(connected and original.length_km < old_length, "a new surface arterial must share an actual junction with crossed collectors")
+			_check(connected and original.points == old_points and original.length_km == old_length and not original.junctions.is_empty(), "a new surface arterial must share an actual junction with the crossed collector without splitting it")
 		else:
 			_check(not connected and original.points == old_points, "crossing a highway must not create a free interchange")
 		for link in region.road_links:
-			_check(link.length_km > 0.0001 and link.from_node_id != link.to_node_id, "intersection splitting must not create zero-length links")
+			_check(link.length_km > 0.0001 and link.from_node_id != link.to_node_id, "intersection handling must not create zero-length links")
 		Spatial.cache(region)
 		for link_index in range(region.road_links.size()):
 			var link = region.road_links[link_index]

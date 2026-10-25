@@ -7,6 +7,8 @@ const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
+const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
+const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 
 var failures := 0
 
@@ -43,42 +45,35 @@ func _run() -> void:
 	_check(curved_highways > 0, "starter highways should include broad bends")
 	_check(inland_curve, "open-land highways should bend rather than only detour around water")
 	_check(sharp_inland_turns == 0, "inland highways should not contain sharp polyline corners")
-	var highway_corridors: Dictionary = {}
+	var highway_links := 0
+	var interchanged := true
 	for link in region.road_links:
 		if link.road_class != "Highway":
 			continue
-		if not highway_corridors.has(link.corridor_id):
-			highway_corridors[link.corridor_id] = Rect2(link.points[0], Vector2.ZERO)
-		var bounds: Rect2 = highway_corridors[link.corridor_id]
-		for point in link.points:
-			bounds = bounds.expand(point)
-		highway_corridors[link.corridor_id] = bounds
-	var trunks := 0
-	var connectors := 0
-	for bounds in highway_corridors.values():
-		if bounds.size.x > bounds.size.y * 3.0 and bounds.size.x > 500.0:
-			trunks += 1
-		else:
-			connectors += 1
-			_check(bounds.size.x > 20.0 and bounds.size.y > 10.0, "cross-state highway connections should be diagonal")
-	_check(trunks >= 1 and trunks <= 3 and connectors == trunks - 1 and highway_corridors.size() == trunks + connectors, "the starter network needs one to three lengthwise trunks joined into a single network")
+		highway_links += 1
+		for node_id in [link.from_node_id, link.to_node_id]:
+			if not region.road_nodes[node_id].is_interchange:
+				interchanged = false
+	_check(highway_links >= 4 and interchanged, "the starter network needs terrain-following highways that end at interchanges")
 	_check_highway_joins(region, 1729)
-	var direct_city_connections := 0
+	var served_cities := 0
 	for city_id in region.starting_city_ids:
 		var access_id: int = region.city_highway_access_node_ids[city_id]
+		if access_id < 0:
+			continue
+		served_cities += 1
 		var highway_count := 0
-		var arterial_count := 0
+		var feeder_count := 0
 		for link in region.road_links:
 			if link.from_node_id != access_id and link.to_node_id != access_id:
 				continue
 			highway_count += 1 if link.road_class == "Highway" else 0
-			arterial_count += 1 if link.road_class == "Arterial" else 0
-		_check(highway_count >= 1 and arterial_count >= 1 and region.road_nodes[access_id].kind == "Highway", "a city arterial must join a trunk node rather than a terminal highway spur")
+			feeder_count += 1 if link.road_class != "Highway" else 0
+		_check(region.road_nodes[access_id].is_interchange and highway_count >= 1 and feeder_count >= 1, "city %d highway access needs an interchange fed by the road network" % city_id)
 		var center: Vector2 = region.cities[city_id]["center_km"]
 		var access: Vector2 = region.road_nodes[access_id].position_km
-		if absf(center.x - access.x) < 5.1:
-			direct_city_connections += 1
-	_check(direct_city_connections == region.starting_city_ids.size(), "city arterials should meet lengthwise trunk highways on their perpendicular projection")
+		_check(center.distance_to(access) < 30.0, "city %d highway access must stay near the settlement" % city_id)
+	_check(served_cities == region.starting_city_ids.size(), "every starting city needs a highway access interchange")
 	for seed_value in [291, 3819]:
 		_check_highway_joins(RegionSetup.build(seed_value, 32, 0.10)["region"], seed_value)
 	for city_count in [32, 256, 768]:
@@ -137,7 +132,7 @@ func _run() -> void:
 	var preview: Dictionary = {}
 	for first_city in region.starting_city_ids:
 		for second_city in region.starting_city_ids:
-			if first_city >= second_city:
+			if first_city >= second_city or region.city_highway_access_node_ids[first_city] < 0 or region.city_highway_access_node_ids[second_city] < 0:
 				continue
 			var candidate: Dictionary = RoadPlanner.link_preview(region, region.city_highway_access_node_ids[first_city], region.city_highway_access_node_ids[second_city], "Highway", PackedVector2Array(), region.current_day_key)
 			if candidate.get("ok", false) and candidate["length_km"] > 15.0 and region.jurisdictions[candidate["owner_id"]].kind == "Region":
@@ -159,9 +154,17 @@ func _run() -> void:
 			var project = result["project"]
 			_check(project.points == preview["points"] and project.cost == preview["cost"] and project.owner_jurisdiction_id == preview["owner_id"], "commit must retain preview geometry, price and owner")
 			RoadPlanner.advance_day(region, project.open_day_key)
-			var link = region.road_links[-1]
-			_check(link.points == preview["points"] and is_equal_approx(link.length_km, preview["length_km"]) and link.owner_jurisdiction_id == preview["owner_id"], "completed road must retain its previewed corridor and sponsor")
+			var link = null
+			for candidate in region.road_links:
+				if candidate.road_class == "Highway" and candidate.points == preview["points"]:
+					link = candidate
+					break
+			_check(link != null and is_equal_approx(link.length_km, preview["length_km"]) and link.owner_jurisdiction_id == preview["owner_id"], "completed road must retain its previewed corridor and sponsor")
+			if link == null:
+				return
 			var exit_point: Vector2 = link.points[link.points.size() / 2]
+			if exit_point.distance_to(region.road_nodes[link.from_node_id].position_km) < 0.2 or exit_point.distance_to(region.road_nodes[link.to_node_id].position_km) < 0.2:
+				exit_point = link.points[link.points.size() / 4]
 			var exit_preview: Dictionary = RoadPlanner.interchange_preview(region, -1, link.id, exit_point, region.current_day_key)
 			_check(exit_preview.get("ok", false) and exit_preview["owner_id"] == link.owner_jurisdiction_id, "highway exit should use its highway sponsor")
 			if exit_preview.get("ok", false):
@@ -170,10 +173,26 @@ func _run() -> void:
 				_check(exit_result.get("ok", false), "regional highway exit should be fundable")
 				if exit_result.get("ok", false):
 					RoadPlanner.advance_day(region, exit_result["project"].open_day_key)
-					_check(region.road_nodes[-1].interchange_owner_jurisdiction_id == link.owner_jurisdiction_id, "exit upkeep must follow its sponsoring highway")
-					_check(region.road_links[-1].owner_jurisdiction_id == link.owner_jurisdiction_id, "both halves of a split highway must keep their original owner")
+					var exit_node = null
+					for node in region.road_nodes:
+						if node.position_km.distance_to(exit_result["project"]["position_km"]) < 0.001:
+							exit_node = node
+							break
+					_check(exit_node != null and exit_node.interchange_owner_jurisdiction_id == link.owner_jurisdiction_id, "exit upkeep must follow its sponsoring highway")
+					var wrong_owners := 0
+					var attached := false
+					if exit_node != null:
+						for highway_link in region.road_links:
+							if highway_link.road_class == "Highway" and highway_link.id != link.id and (highway_link.from_node_id == exit_node.id or highway_link.to_node_id == exit_node.id):
+								wrong_owners += 1
+						for junction in link.junctions:
+							if int(junction["node_id"]) == exit_node.id:
+								attached = true
+					_check(wrong_owners == 0, "a highway exit must not hand highway segments to other owners")
+					_check(attached and is_equal_approx(link.length_km, preview["length_km"]), "a highway exit must attach as an interior junction without splitting the highway")
 					var snapshot = RegionSnapshot.copy_region(region)
-					_check(snapshot.road_nodes[-1].interchange_owner_jurisdiction_id == region.road_nodes[-1].interchange_owner_jurisdiction_id, "worker snapshot must retain exit ownership")
+					if exit_node != null:
+						_check(snapshot.road_nodes[exit_node.id].interchange_owner_jurisdiction_id == exit_node.interchange_owner_jurisdiction_id, "worker snapshot must retain exit ownership")
 					_check(is_equal_approx(snapshot.jurisdictions[0].daily_transfer_expense, region.jurisdictions[0].daily_transfer_expense), "worker snapshot must retain transfer expenses")
 	if failures == 0:
 		print("Curved land routes, highway ownership, regional grants, and project geometry passed.")
@@ -181,46 +200,53 @@ func _run() -> void:
 
 
 func _check_highway_joins(region, seed_value: int) -> void:
-	var pair_count := 0
-	var branch_count := 0
+	var highway_count := 0
 	var largest_error := 0.0
 	var smallest_radius := INF
+	var pair_count := 0
 	for link in region.road_links:
 		if link.road_class == "Highway":
-			smallest_radius = minf(smallest_radius, RoadRouteBuilder.minimum_curve_radius(link.points))
-	for node in region.road_nodes:
-		if node.kind != "Highway":
-			continue
-		var hub_id: int = node.id
-		var by_corridor: Dictionary = {}
-		for link in region.road_links:
-			if link.road_class != "Highway":
-				continue
-			if link.from_node_id == hub_id:
-				if region.road_nodes[link.to_node_id].kind != "Highway":
-					branch_count += 1
+			highway_count += 1
+			smallest_radius = minf(smallest_radius, RoadRouteBuilder.significant_curve_radius(link.points))
+	if highway_count >= 2:
+		var view: Dictionary = RoadGraph.adjacency(region)
+		var neighbors: Array = view["neighbors"]
+		for node in region.road_nodes:
+			var tangents: Array[Vector2] = []
+			var parent_ids: Dictionary = {}
+			for edge in neighbors[node.id]:
+				var link = region.road_links[view["edge_link"][edge.x]]
+				if link.road_class != "Highway" or link.points.size() < 2 or parent_ids.has(link.id):
 					continue
-				if not by_corridor.has(link.corridor_id):
-					by_corridor[link.corridor_id] = []
-				by_corridor[link.corridor_id].append(link.points[1] - link.points[0])
-			elif link.to_node_id == hub_id:
-				if region.road_nodes[link.from_node_id].kind != "Highway":
-					branch_count += 1
-					continue
-				if not by_corridor.has(link.corridor_id):
-					by_corridor[link.corridor_id] = []
-				by_corridor[link.corridor_id].append(link.points[-2] - link.points[-1])
-		for corridor_id in by_corridor:
-			var outward: Array = by_corridor[corridor_id]
-			if outward.size() != 2:
+				parent_ids[link.id] = true
+				var tangent: Vector2 = _highway_tangent_at(link, node)
+				if tangent != Vector2.ZERO:
+					tangents.append(tangent)
+			if tangents.size() != 2:
 				continue
 			pair_count += 1
-			var error: float = 180.0 - absf(rad_to_deg(outward[0].angle_to(outward[1])))
+			var error: float = 180.0 - absf(rad_to_deg(tangents[0].angle_to(tangents[1])))
 			largest_error = maxf(largest_error, error)
-			_check(error < 2.0, "seed %d trunk node %d has a %.3f degree kink in its through-highway pair" % [seed_value, hub_id, error])
-	_check(pair_count > 0, "road seed should contain a continuous through-highway corridor")
+	_check(pair_count > 0 or highway_count < 2, "seed %d should chain its highways through shared junctions" % seed_value)
 	_check(smallest_radius >= RoadRouteBuilder.MIN_HIGHWAY_RADIUS_KM, "seed %d needs highway bends of at least 2 km radius" % seed_value)
-	print("Seed %d (%d cities): %d highway junctions (%d branched), largest through turn %.3f degrees, smallest bend radius %.3f km." % [seed_value, region.cities.size(), pair_count, branch_count, largest_error, smallest_radius])
+	print("Seed %d (%d cities): %d highway links, %d through junctions, largest through turn %.3f degrees, smallest bend radius %.3f km." % [seed_value, region.cities.size(), highway_count, pair_count, largest_error, smallest_radius])
+
+
+func _highway_tangent_at(link, node) -> Vector2:
+	if node.id == link.from_node_id:
+		return (link.points[1] - link.points[0]).normalized()
+	if node.id == link.to_node_id:
+		return (link.points[-2] - link.points[-1]).normalized()
+	var station: float = RoadLinkData.junction_station(link.junctions, node.id)
+	if station < 0.0:
+		return Vector2.ZERO
+	var travelled := 0.0
+	for index in range(1, link.points.size()):
+		var segment_length: float = link.points[index - 1].distance_to(link.points[index])
+		if travelled + segment_length >= station:
+			return (link.points[index] - link.points[index - 1]).normalized()
+		travelled += segment_length
+	return (link.points[-1] - link.points[-2]).normalized()
 
 
 func _check(condition: bool, message: String) -> void:

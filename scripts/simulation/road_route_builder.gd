@@ -177,7 +177,7 @@ static func build(region, from_id: int, to_id: int, road_class: String, waypoint
 					continue
 				if not highway:
 					return route
-				var radius: float = minimum_curve_radius(route)
+				var radius: float = significant_curve_radius(route)
 				if radius >= MIN_HIGHWAY_RADIUS_KM:
 					return route
 				if radius > best_radius:
@@ -198,6 +198,40 @@ static func minimum_curve_radius(points: PackedVector2Array) -> float:
 			continue
 		minimum = minf(minimum, before.length() * after.length() * (before + after).length() / (2.0 * cross))
 	return minimum
+
+
+# Curvature of the genuine alignment rather than its polyline sampling: curves
+# flatter than the 2 m chord tolerance are absorbed by simplification first.
+static func significant_curve_radius(points: PackedVector2Array) -> float:
+	return minimum_curve_radius(_simplify(points, 0.002))
+
+
+static func _simplify(points: PackedVector2Array, epsilon: float) -> PackedVector2Array:
+	if points.size() < 3:
+		return points
+	var keep := PackedByteArray()
+	keep.resize(points.size())
+	keep[0] = 1
+	keep[points.size() - 1] = 1
+	var stack: Array[Vector2i] = [Vector2i(0, points.size() - 1)]
+	while not stack.is_empty():
+		var span: Vector2i = stack.pop_back()
+		var index := -1
+		var distance := 0.0
+		for middle in range(span.x + 1, span.y):
+			var trial: float = Geometry2D.get_closest_point_to_segment(points[middle], points[span.x], points[span.y]).distance_to(points[middle])
+			if trial > distance:
+				distance = trial
+				index = middle
+		if distance > epsilon and index >= 0:
+			keep[index] = 1
+			stack.append(Vector2i(span.x, index))
+			stack.append(Vector2i(index, span.y))
+	var result := PackedVector2Array()
+	for index in range(points.size()):
+		if keep[index] != 0:
+			result.append(points[index])
+	return result
 
 
 static func _inset_coastal_detour(land: PackedVector2Array, path: PackedVector2Array, inset_km: float) -> PackedVector2Array:
