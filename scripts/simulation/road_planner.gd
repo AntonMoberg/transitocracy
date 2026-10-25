@@ -532,78 +532,72 @@ static func _connect_surface_crossings(region, corridor_id: int) -> void:
 				probes.append(last)
 	var iterate_started: int = Time.get_ticks_usec()
 	# Attachments never move road geometry, so the spatial cache built above
-	# stays valid for the whole pass; only node bookkeeping changes per fix.
-	var phase_mark: int = iterate_started
-	for attempt in range(4096):
-		var crossing: Dictionary = {}
-		for cell in corridor_cells:
-			var entries: PackedInt32Array = index["segments"][cell]
-			var bounds: PackedFloat32Array = index["segment_bounds"][cell]
-			var probes: Array = corridor_cells[cell]
-			for pair in range(0, entries.size(), 2):
-				var base: int = pair * 2
-				var other_index: int = entries[pair]
-				if corridor_links.has(other_index):
+	# stays valid: collect every crossing in one scan, then fix them in order.
+	# Already-served crossings are re-checked at fix time as earlier fixes may
+	# have attached a node there.
+	var crossings: Array = []
+	for cell in corridor_cells:
+		var entries: PackedInt32Array = index["segments"][cell]
+		var bounds: PackedFloat32Array = index["segment_bounds"][cell]
+		var probes: Array = corridor_cells[cell]
+		for pair in range(0, entries.size(), 2):
+			var base: int = pair * 2
+			var other_index: int = entries[pair]
+			if corridor_links.has(other_index):
+				continue
+			var other = region.road_links[other_index]
+			if other.road_class == RoadLinkData.HIGHWAY:
+				continue
+			var other_segment: int = entries[pair + 1]
+			if other_segment < 1 or other_segment >= other.points.size():
+				continue
+			var other_first: Vector2 = other.points[other_segment - 1]
+			var other_last: Vector2 = other.points[other_segment]
+			for probe in range(0, probes.size(), 3):
+				var probe_link: int = probes[probe]
+				var first: Vector2 = probes[probe + 1]
+				var last: Vector2 = probes[probe + 2]
+				if bounds[base] > maxf(first.x, last.x) or bounds[base + 1] > maxf(first.y, last.y) or bounds[base + 2] < minf(first.x, last.x) or bounds[base + 3] < minf(first.y, last.y):
 					continue
-				var other = region.road_links[other_index]
-				if other.road_class == RoadLinkData.HIGHWAY:
+				var point = Geometry2D.segment_intersects_segment(first, last, other_first, other_last)
+				if point == null:
 					continue
-				var other_segment: int = entries[pair + 1]
-				if other_segment < 1 or other_segment >= other.points.size():
-					continue
-				var other_first: Vector2 = other.points[other_segment - 1]
-				var other_last: Vector2 = other.points[other_segment]
-				for probe in range(0, probes.size(), 3):
-					var probe_link: int = probes[probe]
-					var first: Vector2 = probes[probe + 1]
-					var last: Vector2 = probes[probe + 2]
-					if bounds[base] > maxf(first.x, last.x) or bounds[base + 1] > maxf(first.y, last.y) or bounds[base + 2] < minf(first.x, last.x) or bounds[base + 3] < minf(first.y, last.y):
-						continue
-					var point = Geometry2D.segment_intersects_segment(first, last, other_first, other_last)
-					if point == null:
-						continue
-					var link = region.road_links[probe_link]
-					var first_node: int = _node_at(region, link, point)
-					var second_node: int = _node_at(region, other, point)
-					if first_node >= 0 and first_node == second_node:
-						continue
-					crossing = {"first": link, "second": other, "point": point, "first_node": first_node, "second_node": second_node}
-					break
-				if not crossing.is_empty():
-					break
-			if not crossing.is_empty():
-				break
-		if crossing.is_empty():
-			surface_phase_us["scan"] = int(surface_phase_us.get("scan", 0)) + iterate_started - scan_started
-			surface_phase_us["iterate"] = int(surface_phase_us.get("iterate", 0)) + Time.get_ticks_usec() - phase_mark
-			return
-		var fix_started: int = Time.get_ticks_usec()
-		var node_id: int = crossing["second_node"] if crossing["second_node"] >= 0 else crossing["first_node"]
+				crossings.append({"first": region.road_links[probe_link], "second": other, "point": point})
+	surface_phase_us["scan"] = int(surface_phase_us.get("scan", 0)) + iterate_started - scan_started
+	var fix_started: int = Time.get_ticks_usec()
+	for crossing in crossings:
+		var link = crossing["first"]
+		var other = crossing["second"]
+		var point: Vector2 = crossing["point"]
+		var first_node: int = _node_at(region, link, point)
+		var second_node: int = _node_at(region, other, point)
+		if first_node >= 0 and first_node == second_node:
+			continue
+		var node_id: int = second_node if second_node >= 0 else first_node
 		if node_id < 0:
 			var node = RoadNodeData.new()
 			node.id = region.road_nodes.size()
-			node.position_km = crossing["point"]
+			node.position_km = point
 			node.city_id = region.city_id_at_point(node.position_km)
 			region.road_nodes.append(node)
 			node_id = node.id
-		for side in ["first", "second"]:
-			var link = crossing[side]
-			var endpoint: int = crossing["%s_node" % side]
+		for pair_data in [[link, first_node], [other, second_node]]:
+			var side = pair_data[0]
+			var endpoint: int = pair_data[1]
 			if endpoint < 0:
-				attach_junction(region, link.id, node_id)
+				attach_junction(region, side.id, node_id)
 			elif endpoint != node_id:
-				if link.from_node_id == endpoint:
-					link.from_node_id = node_id
-				elif link.to_node_id == endpoint:
-					link.to_node_id = node_id
+				if side.from_node_id == endpoint:
+					side.from_node_id = node_id
+				elif side.to_node_id == endpoint:
+					side.to_node_id = node_id
 				else:
-					for junction in link.junctions:
+					for junction in side.junctions:
 						if int(junction["node_id"]) == endpoint:
 							junction["node_id"] = node_id
 							break
-		surface_phase_us["iterate"] = int(surface_phase_us.get("iterate", 0)) + fix_started - phase_mark
-		surface_phase_us["fix"] = int(surface_phase_us.get("fix", 0)) + Time.get_ticks_usec() - fix_started
-		phase_mark = Time.get_ticks_usec()
+	surface_phase_us["iterate"] = int(surface_phase_us.get("iterate", 0)) + fix_started - iterate_started
+	surface_phase_us["fix"] = int(surface_phase_us.get("fix", 0)) + Time.get_ticks_usec() - fix_started
 
 
 # Node already serving a link at this position: a true endpoint or an

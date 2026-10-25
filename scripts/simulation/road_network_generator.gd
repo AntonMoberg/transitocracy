@@ -52,10 +52,16 @@ static func generate(region) -> void:
 	var generation_started: int = Time.get_ticks_msec()
 	print("Regional road sites: ", sites.size())
 	if sites.size() >= 2:
+		# Layered phases: trunk corridors first, then the rural web spreads
+		# from their interchanges and the city gates, avoiding trunk valleys.
 		var candidates: Array[Dictionary] = _proximity_edges(region, sites)
-		_build_countryside(region, planner, sites, candidates)
+		var highways: Dictionary = _build_highways(region, planner, sites)
+		if not highways.is_empty():
+			planner.set_avoidance(highways["avoid_costs"], highways["avoid_origin"], highways["avoid_step"], highways["avoid_size"])
+		_build_countryside(region, planner, sites, candidates, highways)
 		print("Countryside roads: %d links in %d ms" % [region.road_links.size(), Time.get_ticks_msec() - generation_started])
-		_build_highways(region, planner, sites)
+		_assign_highway_access(region, planner, highways.get("gate_cities", {}), highways.get("attached_targets", {}))
+		_promote_access_spurs(region)
 		print("Regional roads complete: %d ms" % (Time.get_ticks_msec() - generation_started))
 	for link in region.road_links:
 		if link.road_class != Roads.COLLECTOR:
@@ -143,9 +149,9 @@ static func _root(parents: PackedInt32Array, id: int) -> int:
 	return cursor
 
 
-static func _build_countryside(region, planner, sites: Array[Dictionary], candidates: Array[Dictionary]) -> void:
+static func _build_countryside(region, planner, sites: Array[Dictionary], candidates: Array[Dictionary], highways: Dictionary = {}) -> void:
 	var route_started: int = Time.get_ticks_usec()
-	var alignments := _precompute_routes(region, sites, candidates)
+	var alignments := _precompute_routes(region, sites, candidates, highways)
 	print("Countryside routes: %d candidates in %d ms" % [candidates.size(), (Time.get_ticks_usec() - route_started) / 1000])
 	var parents := PackedInt32Array()
 	var degrees := PackedInt32Array()
@@ -165,6 +171,22 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 			neighbors[city_roots[city_id]][index] = 1.0
 		else:
 			city_roots[city_id] = index
+	# Sites that sit on the trunk network are already connected: skip the
+	# rural candidates that would just parallel the highway between them.
+	var view: Dictionary = RoadGraph.adjacency(region)
+	var trunk_root := -1
+	for index in range(sites.size()):
+		var on_trunk := false
+		for edge in view["neighbors"][sites[index]["node"]]:
+			if region.road_links[view["edge_link"][edge.x]].road_class == Roads.HIGHWAY:
+				on_trunk = true
+				break
+		if not on_trunk:
+			continue
+		if trunk_root < 0:
+			trunk_root = index
+		elif _root(parents, index) != _root(parents, trunk_root):
+			parents[_root(parents, index)] = _root(parents, trunk_root)
 	var installed: Dictionary = {}
 	var install_us := 0
 	# Connect geographic components first; then add useful lowland loops.
@@ -222,10 +244,16 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 			if link.length_km < 18.0:
 				link.road_class = Roads.ARTERIAL
 
-
 # Routes never depend on installed roads, so every proximity candidate can be
 # searched in parallel before the sequential union-find passes pick installs.
-static func _precompute_routes(region, sites: Array[Dictionary], candidates: Array[Dictionary]) -> Array:
+static func _avoidance_planner(region, highways: Dictionary):
+	var local = Planner.new(region)
+	if highways.has("avoid_costs") and not highways["avoid_costs"].is_empty():
+		local.set_avoidance(highways["avoid_costs"], highways["avoid_origin"], highways["avoid_step"], highways["avoid_size"])
+	return local
+
+
+static func _precompute_routes(region, sites: Array[Dictionary], candidates: Array[Dictionary], highways: Dictionary = {}) -> Array:
 	var results: Array = []
 	results.resize(candidates.size())
 	var routed := 0
@@ -237,7 +265,7 @@ static func _precompute_routes(region, sites: Array[Dictionary], candidates: Arr
 	var workers: int = maxi(1, mini(8, OS.get_processor_count() - 1))
 	var started: int = Time.get_ticks_usec()
 	if workers == 1 or jobs.size() < 8:
-		var local = Planner.new(region)
+		var local = _avoidance_planner(region, highways)
 		for index in jobs:
 			results[index] = _route_candidate(local, sites, candidates[index])
 			routed += 1
@@ -259,7 +287,7 @@ static func _precompute_routes(region, sites: Array[Dictionary], candidates: Arr
 	for chunk in range(chunk_count):
 		chunk_slots[chunk] = []
 	var route_chunk := func(chunk: int) -> void:
-		var local = Planner.new(region)
+		var local = _avoidance_planner(region, highways)
 		var slot: Array = chunk_slots[chunk]
 		var start: int = chunk * chunk_size
 		var finish: int = mini(start + chunk_size, order.size())
@@ -456,7 +484,7 @@ static func _install(region, first: int, last: int, road_class: String, alignmen
 	return link
 
 
-static func _build_highways(region, planner, sites: Array[Dictionary]) -> void:
+static func _build_highways(region, planner, sites: Array[Dictionary]) -> Dictionary:
 	var majors: Array[Dictionary] = []
 	var gate_cities: Dictionary = {}
 	var used: Dictionary = {}
@@ -489,7 +517,7 @@ static func _build_highways(region, planner, sites: Array[Dictionary]) -> void:
 			majors.append(sites[best])
 			used[sites[best]["node"]] = true
 	if majors.size() < 2:
-		return
+		return {}
 	var highway_stats := {"lines": 0, "legs": 0, "short": 0, "alignment_failed": 0, "attempts": 0}
 	# Trunk corridors: a few long chained lines crossing the state through the
 	# major gate sites, instead of a pocketed mesh of short Delaunay hops.
@@ -570,8 +598,64 @@ static func _build_highways(region, planner, sites: Array[Dictionary]) -> void:
 		if joined == 0:
 			break
 	print("Highway candidates: ", highway_stats)
-	_assign_highway_access(region, planner, gate_cities, attached_targets)
-	_promote_access_spurs(region)
+	var avoidance: Dictionary = _highway_avoidance(region)
+	return {
+		"gate_cities": gate_cities,
+		"attached_targets": attached_targets,
+		"avoid_costs": avoidance.get("costs", PackedFloat32Array()),
+		"avoid_origin": avoidance.get("origin", Vector2i.ZERO),
+		"avoid_step": avoidance.get("step", 4.0),
+		"avoid_size": avoidance.get("size", Vector2i.ZERO),
+	}
+
+
+const AVOID_STEP_KM := 4.0
+const AVOID_RADIUS_KM := 3.5
+const AVOID_STRENGTH := 2.0
+
+
+# Cost grid stamped from the trunk corridors: routes nearby pay extra per km so
+# the rural web prefers neighbouring valleys over braiding along a highway.
+static func _highway_avoidance(region) -> Dictionary:
+	var polylines: Array[PackedVector2Array] = []
+	for link in region.road_links:
+		if link.road_class == Roads.HIGHWAY:
+			polylines.append(link.points)
+	if polylines.is_empty():
+		return {}
+	return _stamp_avoidance(region, polylines, AVOID_STRENGTH, AVOID_RADIUS_KM)
+
+
+static func _stamp_avoidance(region, polylines, strength: float, radius: float) -> Dictionary:
+	var bounds: Rect2 = region.jurisdictions[0].bounds_km
+	var origin := Vector2i(floori(bounds.position.x / AVOID_STEP_KM), floori(bounds.position.y / AVOID_STEP_KM))
+	var size := Vector2i(ceili(bounds.end.x / AVOID_STEP_KM) - origin.x, ceili(bounds.end.y / AVOID_STEP_KM) - origin.y)
+	if size.x <= 0 or size.y <= 0:
+		return {}
+	var costs := PackedFloat32Array()
+	costs.resize(size.x * size.y)
+	for points in polylines:
+		if points.size() < 2:
+			continue
+		for index in range(1, points.size()):
+			var segment: float = points[index - 1].distance_to(points[index])
+			var steps: int = maxi(1, roundi(segment / 2.0))
+			for step in range(steps + 1):
+				var sample: Vector2 = points[index - 1].lerp(points[index], float(step) / float(steps))
+				var cell := Vector2i(floori(sample.x / AVOID_STEP_KM) - origin.x, floori(sample.y / AVOID_STEP_KM) - origin.y)
+				for dy in range(-1, 2):
+					for dx in range(-1, 2):
+						var x: int = cell.x + dx
+						var y: int = cell.y + dy
+						if x < 0 or y < 0 or x >= size.x or y >= size.y:
+							continue
+						var center: Vector2 = Vector2(origin.x + x + 0.5, origin.y + y + 0.5) * AVOID_STEP_KM
+						var falloff: float = strength * (1.0 - center.distance_to(sample) / radius)
+						if falloff <= 0.0:
+							continue
+						var slot: int = y * size.x + x
+						costs[slot] = maxf(costs[slot], falloff)
+	return {"costs": costs, "origin": origin, "step": AVOID_STEP_KM, "size": size}
 
 
 # A settlement's whole approach to its highway interchange is arterial: walk

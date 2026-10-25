@@ -24,6 +24,13 @@ var edge_computed: PackedByteArray = PackedByteArray()
 var edge_costs: PackedFloat32Array = PackedFloat32Array()
 var tunnel_cache: Dictionary = {}
 var fine_planner
+# Read-only penalty grid stamped from already-built trunk corridors, so later
+# routes prefer their own valley instead of braiding alongside a highway.
+var avoid_costs: PackedFloat32Array = PackedFloat32Array()
+var avoid_origin := Vector2i.ZERO
+var avoid_step: float = 4.0
+var avoid_size := Vector2i.ZERO
+var avoid_endpoints: Array[Vector2] = [Vector2.ZERO, Vector2.ZERO]
 
 # Per-search state; a planner instance runs one search at a time.
 var heap_states := PackedInt32Array()
@@ -55,16 +62,48 @@ func _init(source, spacing: float = 4.0) -> void:
 	edge_costs.resize(cells * 8)
 
 
+func set_avoidance(costs: PackedFloat32Array, origin: Vector2i, step: float, size: Vector2i) -> void:
+	avoid_costs = costs
+	avoid_origin = origin
+	avoid_step = step
+	avoid_size = size
+	if not edge_computed.is_empty():
+		edge_computed.fill(0)
+
+
+func _avoid_at(point: Vector2) -> float:
+	if avoid_costs.is_empty():
+		return 0.0
+	var cell := Vector2i(floori(point.x / avoid_step) - avoid_origin.x, floori(point.y / avoid_step) - avoid_origin.y)
+	if cell.x < 0 or cell.y < 0 or cell.x >= avoid_size.x or cell.y >= avoid_size.y:
+		return 0.0
+	return avoid_costs[cell.y * avoid_size.x + cell.x]
+
+
+func _avoid_penalty_km(a: Vector2, b: Vector2) -> float:
+	if avoid_costs.is_empty():
+		return 0.0
+	var middle: Vector2 = (a + b) * 0.5
+	var fade := 1.0
+	for endpoint in avoid_endpoints:
+		fade = minf(fade, middle.distance_to(endpoint) / 4.0)
+	fade = clampf(fade, 0.0, 1.0)
+	if fade <= 0.0:
+		return 0.0
+	return _avoid_at(middle) * fade * a.distance_to(b)
+
+
 func route(first: Vector2, last: Vector2, road_class: String, start_tangent: Vector2 = Vector2.ZERO, end_tangent: Vector2 = Vector2.ZERO, allow_fine: bool = true, long_range: bool = false) -> Dictionary:
 	if first.distance_to(last) < 0.05:
 		return {}
+	avoid_endpoints = [first, last]
 	var lead: float = minf(0.35, first.distance_to(last) * 0.1)
 	var start: Vector2 = first + start_tangent.normalized() * lead
 	var finish: Vector2 = last - end_tangent.normalized() * lead
 	var gentle := true
 	for index in range(9):
 		var point: Vector2 = first.lerp(last, float(index) / 8.0)
-		if not region.jurisdictions[0].contains_point(point) or region.terrain.slope_at(point) > 0.028 or region.terrain.water_at(point):
+		if not region.jurisdictions[0].contains_point(point) or region.terrain.slope_at(point) > 0.028 or region.terrain.water_at(point) or _avoid_at(point) > 0.15:
 			gentle = false
 			break
 	if gentle:
@@ -98,6 +137,7 @@ func route(first: Vector2, last: Vector2, road_class: String, start_tangent: Vec
 	if allow_fine and step_km > 1.0 and not long_range:
 		if fine_planner == null:
 			fine_planner = get_script().new(region, 1.0)
+			fine_planner.set_avoidance(avoid_costs, avoid_origin, avoid_step, avoid_size)
 		return fine_planner.route(first, last, road_class, start_tangent, end_tangent)
 	return {}
 
@@ -146,7 +186,7 @@ func _travel_cost(first_cell: Vector2i, last_cell: Vector2i, direction: int, gra
 				water_length = water_length + a.distance_to(b) / float(parts) if region.terrain.water_at(point) else 0.0
 				longest_water = maxf(longest_water, water_length)
 			if maximum <= grade_limit * 1.25 and longest_water <= 2.0:
-				cost = Vector2(first_cell - last_cell).length() * step_km * (1.0 + maximum * maximum * 180.0 + (cell_slope[first_index] + cell_slope[last_index]) * 2.0) + longest_water * 8.0
+				cost = Vector2(first_cell - last_cell).length() * step_km * (1.0 + maximum * maximum * 180.0 + (cell_slope[first_index] + cell_slope[last_index]) * 2.0) + longest_water * 8.0 + _avoid_penalty_km(a, b)
 	edge_costs[slot] = cost
 	edge_computed[slot] = 1
 	var reverse_slot: int = last_index * 8 + (direction + 4) % 8
