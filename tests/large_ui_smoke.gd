@@ -22,10 +22,10 @@ func _run() -> void:
 	main.map_view.queue_redraw()
 	await process_frame
 	await process_frame
-	var neighborhood_draw_ms: float = float(main.map_view.last_draw_us) / 1000.0
-	print("Large neighborhood draw stages (µs): ", main.map_view.last_draw_stages_us)
+	var neighborhood_draw_ms: float = float(main.map_view.last_overlay_us) / 1000.0
+	print("Large neighborhood frame (µs): overlay ", main.map_view.last_overlay_us, " bake ", main.map_view.last_draw_us, " stages ", main.map_view.last_draw_stages_us)
 	if neighborhood_draw_ms >= 100.0:
-		errors.append("Neighborhood map draw took %.1f ms." % neighborhood_draw_ms)
+		errors.append("Neighborhood map frame took %.1f ms." % neighborhood_draw_ms)
 	if main.region.neighborhoods.size() != 286:
 		errors.append("Large region was not selected by default.")
 	if main.map_view.region != main.region:
@@ -69,7 +69,7 @@ func _run() -> void:
 		errors.append("Large day mode blocked a UI frame for %.1f ms." % longest_frame)
 	print("Large UI mode switch: %.1f ms; longest day frame: %.1f ms (%s)" % [mode_switch_ms, longest_frame, longest_detail])
 	print("Longest day frame draw stages (µs): ", main.map_view.last_draw_stages_us)
-	print("Large neighborhood map draw: %.1f ms" % neighborhood_draw_ms)
+	print("Large neighborhood map frame: %.1f ms" % neighborhood_draw_ms)
 	print("Large UI handoff breakdown (µs): ", main.last_handoff_breakdown)
 	print("Large UI: %d neighborhoods, %d buffered days" % [main.region.neighborhoods.size(), 0 if main.week_buffer == null else int(main.week_buffer.status()["produced"])])
 	if not errors.is_empty():

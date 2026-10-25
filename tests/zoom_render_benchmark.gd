@@ -36,14 +36,18 @@ func _run() -> void:
 	for magnification in [1.0, 2.0, 3.0, 4.0, 8.0, 16.0, 64.0, 256.0, 1024.0, street_zoom]:
 		map.zoom = magnification
 		map.pan = -(city["center_km"] - map._world_center()) * map._map_scale() * magnification
-		map.queue_redraw()
+		map._sync_view()
 		await process_frame
 		await process_frame
-		print("Zoom %.0f: %d µs, stages %s" % [magnification, map.last_draw_us, map.last_draw_stages_us])
-		map.queue_redraw()
+		print("Zoom %.0f: bake %d µs, stages %s" % [magnification, map.last_draw_us, map.last_draw_stages_us])
+		map.refresh_dynamic()
 		await process_frame
 		await process_frame
-		print("Zoom %.0f warm: %d µs, stages %s, urban blocks %d µs, urban streets %d µs, visible buildings %d" % [magnification, map.last_draw_us, map.last_draw_stages_us, map.urban_layer.last_block_draw_us, map.urban_layer.last_street_draw_us, map.urban_layer.last_building_count])
+		print("Zoom %.0f pan frame: overlay %d µs (bake %d µs), stages %s, urban blocks %d µs, urban streets %d µs, visible buildings %d" % [magnification, map.last_overlay_us, map.last_draw_us, map.last_draw_stages_us, map.urban_layer.last_block_draw_us, map.urban_layer.last_street_draw_us, map.urban_layer.last_building_count])
+		if map.last_overlay_us > 20000:
+			push_error("Pan frame overlay draw %.1f ms is too slow for smooth panning at zoom %.0f" % [float(map.last_overlay_us) / 1000.0, magnification])
+			quit(1)
+			return
 		if magnification == 3.0:
 			# The countryside web stays LOD-skipped below zoom 2 and the
 			# overview renderer owns zoom 3; the batched lane/arrow mesh only

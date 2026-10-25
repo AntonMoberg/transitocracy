@@ -89,8 +89,31 @@ var aggregate_cache_level: String = ""
 var aggregate_neighborhood_groups: PackedInt32Array = PackedInt32Array()
 var aggregate_node_groups: PackedInt32Array = PackedInt32Array()
 var aggregate_flow_cache: Dictionary = {}
-var zoom: float = 1.0
-var pan: Vector2 = Vector2.ZERO
+var zoom: float = 1.0:
+	set(value):
+		zoom = value
+		view_zoom = value
+var pan: Vector2 = Vector2.ZERO:
+	set(value):
+		pan = value
+		view_pan = value
+# Bake-view state: static content is recorded once per zoom band at (bake_pan,
+# bake_zoom) covering an extended viewport; pans and zooms between rebakes only
+# move that canvas item via a transform.
+const ZOOM_BAND_RATIO := 1.5
+const BAKE_MARGIN_PX := 256.0
+var view_pan: Vector2 = Vector2.ZERO
+var view_zoom: float = 1.0
+var view_origin: Vector2 = Vector2.ZERO
+var view_size: Vector2 = Vector2.ZERO
+var bake_pan: Vector2 = Vector2.ZERO
+var bake_zoom: float = 1.0
+var bake_key: String = ""
+var static_layer: Control
+var dynamic_overlay: Control
+var last_overlay_us: int = 0
+var crossing_marks: Array = []
+var crossing_marks_revision: int = -1
 var pointer_down: bool = false
 var pointer_dragged: bool = false
 var pointer_double_clicked: bool = false
@@ -145,11 +168,30 @@ var terrain_detail_active: Dictionary = {}
 
 
 func _ready() -> void:
-	set_process(false)
+	set_process(true)
 	clip_contents = true
-	mouse_filter = Control.MOUSE_FILTER_STOP
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	custom_minimum_size = Vector2(480, 320)
-	resized.connect(queue_redraw)
+	resized.connect(refresh_static)
+	view_pan = pan
+	view_zoom = zoom
+	view_origin = Vector2.ZERO
+	view_size = size
+	# Static geometry bakes onto its own canvas item so it can be moved with
+	# a transform during pan/zoom; per-frame state draws above it. Both sit
+	# below the navigation and layer controls.
+	static_layer = MapStaticLayer.new()
+	static_layer.map = self
+	static_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	static_layer.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	add_child(static_layer)
+	move_child(static_layer, 0)
+	dynamic_overlay = MapOverlay.new()
+	dynamic_overlay.map = self
+	dynamic_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	dynamic_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(dynamic_overlay)
+	move_child(dynamic_overlay, 1)
 	var navigation := HBoxContainer.new()
 	navigation.name = "MapNavigation"
 	navigation.position = Vector2(12, 10)
@@ -190,7 +232,7 @@ func _ready() -> void:
 	terrain_toggle_button.focus_mode = Control.FOCUS_NONE
 	terrain_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_terrain_overlay = enabled
-		queue_redraw()
+		refresh_static()
 	)
 	layers.add_child(terrain_toggle_button)
 	slope_toggle_button = Button.new()
@@ -200,7 +242,7 @@ func _ready() -> void:
 	slope_toggle_button.focus_mode = Control.FOCUS_NONE
 	slope_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_slope_overlay = enabled
-		queue_redraw()
+		refresh_static()
 	)
 	layers.add_child(slope_toggle_button)
 	contour_toggle_button = Button.new()
@@ -210,7 +252,7 @@ func _ready() -> void:
 	contour_toggle_button.focus_mode = Control.FOCUS_NONE
 	contour_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_contours = enabled
-		queue_redraw()
+		refresh_static()
 	)
 	layers.add_child(contour_toggle_button)
 	traffic_toggle_button = Button.new()
@@ -221,7 +263,7 @@ func _ready() -> void:
 	traffic_toggle_button.focus_mode = Control.FOCUS_NONE
 	traffic_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_traffic_overlay = enabled
-		queue_redraw()
+		refresh_static()
 	)
 	layers.add_child(traffic_toggle_button)
 	transit_toggle_button = Button.new()
@@ -231,7 +273,7 @@ func _ready() -> void:
 	transit_toggle_button.focus_mode = Control.FOCUS_NONE
 	transit_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_transit_overlay = enabled
-		queue_redraw()
+		refresh_static()
 	)
 	layers.add_child(transit_toggle_button)
 
@@ -273,7 +315,7 @@ func set_region(new_region) -> void:
 	hovered_id = -1
 	zoom = 1.0
 	pan = Vector2.ZERO
-	queue_redraw()
+	refresh_static()
 
 
 func _exit_tree() -> void:
@@ -283,6 +325,16 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
+	view_pan = pan
+	view_zoom = zoom
+	view_origin = Vector2.ZERO
+	view_size = size
+	_static_update()
+	view_pan = pan
+	view_zoom = zoom
+	view_origin = Vector2.ZERO
+	view_size = size
+	_static_update()
 	var completed := false
 	var publish_deadline: int = Time.get_ticks_usec() + 4000
 	for worker_index in range(terrain_detail_workers.size() - 1, -1, -1):
@@ -311,7 +363,7 @@ func _process(_delta: float) -> void:
 		completed = true
 	if completed:
 		_trim_terrain_detail_cache()
-		queue_redraw()
+		refresh_static()
 	var worker_limit: int = mini(TERRAIN_DETAIL_MAX_WORKERS, maxi(1, OS.get_processor_count() - 1))
 	while terrain_detail_workers.size() < worker_limit and not terrain_detail_queue.is_empty():
 		var key: Vector3i = terrain_detail_queue.pop_front()
@@ -331,8 +383,6 @@ func _process(_delta: float) -> void:
 			continue
 		terrain_detail_active.erase(key)
 		push_warning("Could not start terrain detail worker: %s" % error_string(error))
-	if terrain_detail_workers.is_empty() and terrain_detail_queue.is_empty():
-		set_process(false)
 
 
 func _cartographic_mesh(result: Dictionary) -> ArrayMesh:
@@ -363,12 +413,12 @@ func _trim_terrain_detail_cache() -> void:
 func set_flow_profile(new_profile) -> void:
 	flow_profile = new_profile
 	aggregate_flow_cache.clear()
-	queue_redraw()
+	refresh_static()
 
 
 func set_next_day_profile(new_profile) -> void:
 	next_day_profile = new_profile
-	queue_redraw()
+	refresh_static()
 
 
 func set_traffic_profile(new_profile) -> void:
@@ -376,12 +426,12 @@ func set_traffic_profile(new_profile) -> void:
 	if new_profile == null:
 		road_history_previous_hour = -1
 		road_history_current_hour = -1
-	queue_redraw()
+	refresh_static()
 
 
 func set_map_mode(mode: String) -> void:
 	map_mode = mode
-	queue_redraw()
+	refresh_static()
 
 
 func set_base_map_style(style: String) -> void:
@@ -394,38 +444,38 @@ func set_base_map_style(style: String) -> void:
 		slope_toggle_button.disabled = style == "Satellite"
 	if contour_toggle_button != null:
 		contour_toggle_button.disabled = style == "Satellite"
-	queue_redraw()
+	refresh_static()
 
 
 func set_transit_overlay(enabled: bool) -> void:
 	show_transit_overlay = enabled
 	if transit_toggle_button != null:
 		transit_toggle_button.set_pressed_no_signal(enabled)
-	queue_redraw()
+	refresh_static()
 
 
 func set_selected_candidate(candidate_id: int) -> void:
 	selected_candidate_id = candidate_id
-	queue_redraw()
+	refresh_static()
 
 
 func set_detail_level(level: String) -> void:
 	detail_level = level
 	aggregate_cache_level = ""
 	aggregate_flow_cache.clear()
-	queue_redraw()
+	refresh_static()
 
 
 func set_road_tool(tool_name: String) -> void:
 	road_tool = tool_name
-	queue_redraw()
+	refresh_dynamic()
 
 
 func set_road_input_mode(mode: String, snap_enabled: bool, length_snap_enabled: bool = false) -> void:
 	road_draw_mode = mode
 	road_snap_enabled = snap_enabled
 	road_length_snap_enabled = length_snap_enabled
-	queue_redraw()
+	refresh_dynamic()
 
 
 func set_road_preview(start_node: int, waypoints: PackedVector2Array, preview: Dictionary) -> void:
@@ -433,18 +483,18 @@ func set_road_preview(start_node: int, waypoints: PackedVector2Array, preview: D
 	preview_waypoints = waypoints
 	road_preview = preview
 	preview_frozen_route = RoadPlanner.frozen_multi_curve(region, start_node, waypoints, road_tool) if region != null and start_node >= 0 and road_draw_mode == RoadRouteBuilder.MULTIPOINT else PackedVector2Array()
-	queue_redraw()
+	refresh_dynamic()
 
 
 func set_planning_preview(start_point: Vector2, kind: String = "") -> void:
 	planning_preview_start = start_point
 	planning_preview_kind = kind
-	queue_redraw()
+	refresh_dynamic()
 
 
 func set_selected_road_link(link_id: int) -> void:
 	selected_road_link_id = link_id
-	queue_redraw()
+	refresh_static()
 
 
 func set_hour(hour: int) -> void:
@@ -459,7 +509,7 @@ func set_time(hour: int, fraction: float, request_redraw: bool = true) -> void:
 	selected_hour = next_hour
 	hour_fraction = next_fraction
 	if request_redraw and (map_mode == "Trips" or show_traffic_overlay and road_traffic_mode == ROAD_HISTORY):
-		queue_redraw()
+		refresh_static()
 
 
 func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
@@ -468,7 +518,7 @@ func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
 	recorded_bin = bin_index
 	first_recorded_bin = first_bin
 	if show_traffic_overlay and road_traffic_mode == ROAD_HISTORY:
-		queue_redraw()
+		refresh_static()
 
 
 func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: float) -> void:
@@ -479,7 +529,7 @@ func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: fl
 	road_history_current_hour = current_hour
 	road_history_fraction = next_fraction
 	if show_traffic_overlay and road_traffic_mode == ROAD_HOUR:
-		queue_redraw()
+		refresh_static()
 
 
 func set_road_traffic_mode(mode: int, state) -> void:
@@ -487,29 +537,29 @@ func set_road_traffic_mode(mode: int, state) -> void:
 		return
 	road_traffic_mode = mode
 	live_traffic_state = state
-	queue_redraw()
+	refresh_static()
 
 
 func set_hour_carry_summary(summary: Dictionary) -> void:
 	hour_carry_summary = summary
-	queue_redraw()
+	refresh_static()
 
 
 func set_current_day_road_summary(summary: Dictionary) -> void:
 	current_day_road_summary = summary
-	queue_redraw()
+	refresh_static()
 
 
 func promote_day_road_summary() -> void:
 	previous_day_road_summary = current_day_road_summary
 	current_day_road_summary = {}
-	queue_redraw()
+	refresh_static()
 
 
 func clear_day_road_summaries() -> void:
 	previous_day_road_summary = {}
 	current_day_road_summary = {}
-	queue_redraw()
+	refresh_static()
 
 
 func set_day_road_fraction(fraction: float) -> void:
@@ -518,22 +568,22 @@ func set_day_road_fraction(fraction: float) -> void:
 		return
 	day_road_fraction = next_fraction
 	if show_traffic_overlay and road_traffic_mode == ROAD_DAY:
-		queue_redraw()
+		refresh_static()
 
 
 func set_purpose(purpose: String) -> void:
 	selected_purpose = purpose
-	queue_redraw()
+	refresh_static()
 
 
 func set_selected(neighborhood_id: int) -> void:
 	selected_id = neighborhood_id
-	queue_redraw()
+	refresh_dynamic()
 
 
 func set_selected_jurisdiction(jurisdiction_id: int) -> void:
 	selected_jurisdiction_id = jurisdiction_id
-	queue_redraw()
+	refresh_static()
 
 
 func _aggregate_kind() -> String:
@@ -650,23 +700,23 @@ func _show_local_road_detail() -> bool:
 	# Individual street-grid links only matter once a road is a couple of
 	# pixels wide; below that the urban layer's own street rendering and the
 	# neighbourhood batches carry the picture.
-	return not region.is_large_scale or _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 40.0
+	return not region.is_large_scale or _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM >= 40.0
 
 
-func _draw_aggregate_roads() -> void:
+func _draw_aggregate_roads(pen) -> void:
 	_ensure_spatial_index()
 	var local_km: float = spatial_local_road_km
 	var physical_roads: bool = _pixels_per_meter() >= 0.3
-	if not region.is_large_scale or detail_level == "County" and zoom >= 4.0 or physical_roads:
+	if not region.is_large_scale or detail_level == "County" and view_zoom >= 4.0 or physical_roads:
 		var nearby_indices: Array[int] = _spatial_visible_indices(spatial_road_links, _road_cull_margin(), true) if region.is_large_scale else _all_indices(region.road_links.size())
 		for index in nearby_indices:
 			var local_link = region.road_links[index]
 			if not _is_strategic_road(local_link) and _polyline_visible(local_link.points):
 				var local_points: PackedVector2Array = _screen_polyline(local_link.points)
 				if physical_roads:
-					_draw_active_road(local_points, local_link.lanes_per_direction, local_link.road_class, Color("526474", 0.35), Color("526474", 0.35), false)
+					_draw_active_road(pen, local_points, local_link.lanes_per_direction, local_link.road_class, Color("526474", 0.35), Color("526474", 0.35), false)
 				else:
-					draw_polyline(local_points, Color("526474", 0.30), 1.0, true)
+					pen.draw_polyline(local_points, Color("526474", 0.30), 1.0, true)
 	for index in spatial_strategic_links:
 		var link = region.road_links[index]
 		if not _polyline_visible(link.points):
@@ -681,37 +731,37 @@ func _draw_aggregate_roads() -> void:
 			forward_color.a = 0.23
 			reverse_color.a = 0.23
 		var points: PackedVector2Array = _screen_polyline(link.points)
-		if _map_scale() * zoom < 60.0:
-			_draw_overview_road(points, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+		if _map_scale() * view_zoom < 60.0:
+			_draw_overview_road(pen, points, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 		else:
-			_draw_active_road(points, link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+			_draw_active_road(pen, points, link.lanes_per_direction, link.road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 	var font := get_theme_default_font()
-	draw_string(font, Vector2(18, size.y - 18), "%s view  •  %.0f km of local roads subdued" % [detail_level, local_km], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("aec5d4"))
+	pen.draw_string(font, Vector2(18, size.y - 18), "%s view  •  %.0f km of local roads subdued" % [detail_level, local_km], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("aec5d4"))
 
 
-func _draw_aggregate_road_projects() -> void:
+func _draw_aggregate_road_projects(pen) -> void:
 	for project in region.road_projects:
 		match project.kind:
 			"New road":
 				if _is_strategic_road_nodes(project.from_node_id, project.to_node_id, project.road_class):
-					if _map_scale() * zoom < 60.0:
-						_draw_dashed_polyline(_screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
+					if _map_scale() * view_zoom < 60.0:
+						_draw_dashed_polyline(pen, _screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
 					else:
-						_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
+						_draw_dashed_road(pen, _screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
 			"Widen":
 				for link in region.road_links:
 					if link.id == project.target_link_id and _is_strategic_road(link):
 						var screen_points: PackedVector2Array = _screen_polyline(link.points)
 						for direction in range(2):
 							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction, link.road_class))
-							_draw_dashed_polyline(new_lane, Color("f0d38d", 0.9), _road_lane_width(link.road_class))
+							_draw_dashed_polyline(pen, new_lane, Color("f0d38d", 0.9), _road_lane_width(link.road_class))
 			"Interchange junction":
-				draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+				pen.draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 			"Highway exit":
-				draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+				pen.draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 
 
-func _draw_aggregate_flows() -> void:
+func _draw_aggregate_flows(pen) -> void:
 	if flow_profile == null:
 		return
 	_ensure_aggregate_cache()
@@ -751,12 +801,12 @@ func _draw_aggregate_flows() -> void:
 		var strength: float = sqrt(float(flow["trips"]) / maxf(1.0, peak))
 		var color: Color = _purpose_color(flow["purpose"])
 		color.a = 0.2 + 0.65 * strength
-		_draw_flow_stroke(start_point, end_point, color, 1.0 + 5.0 * strength, flow["from"] == selected_jurisdiction_id)
+		_draw_flow_stroke(pen, start_point, end_point, color, 1.0 + 5.0 * strength, flow["from"] == selected_jurisdiction_id)
 		var side: Vector2 = Vector2(-direction.y, direction.x) * (2.0 + 2.0 * strength)
-		draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
+		pen.draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
 
 
-func _draw_aggregate_nodes() -> void:
+func _draw_aggregate_nodes(pen) -> void:
 	var font := get_theme_default_font()
 	for area in _visible_areas():
 		var center: Vector2 = _world_to_screen(area.center_km)
@@ -764,12 +814,12 @@ func _draw_aggregate_nodes() -> void:
 		for neighborhood_id in area.neighborhood_ids:
 			population += region.neighborhoods[neighborhood_id].population
 		var radius: float = clampf(8.0 + sqrt(float(population)) * 0.03, 12.0, 23.0)
-		draw_circle(center, radius + 3.0, Color("0b1421"))
-		draw_circle(center, radius, Color("4b9fbd"))
-		draw_arc(center, radius + 3.0, 0.0, TAU, 32, Color("f5d482") if area.id == selected_jurisdiction_id else Color("b7d6e5"), 2.0, true)
+		pen.draw_circle(center, radius + 3.0, Color("0b1421"))
+		pen.draw_circle(center, radius, Color("4b9fbd"))
+		pen.draw_arc(center, radius + 3.0, 0.0, TAU, 32, Color("f5d482") if area.id == selected_jurisdiction_id else Color("b7d6e5"), 2.0, true)
 		var label: String = area.name
 		var label_width: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-		draw_string(font, center + Vector2(-label_width * 0.5, -radius - 9.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("d9e9f2"))
+		pen.draw_string(font, center + Vector2(-label_width * 0.5, -radius - 9.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("d9e9f2"))
 
 
 func _hit_aggregate_node(screen_position: Vector2) -> int:
@@ -790,49 +840,75 @@ func _hit_aggregate_node(screen_position: Vector2) -> int:
 
 
 func _draw() -> void:
-	var draw_started: int = Time.get_ticks_usec()
-	draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
+	# Static map geometry is baked onto static_layer and per-frame state lives
+	# on dynamic_overlay; this item paints nothing. External queue_redraw()
+	# calls keep the overlay in sync through this hook while _process checks
+	# whether the static bake signature changed.
+	if dynamic_overlay != null:
+		dynamic_overlay.queue_redraw()
+
+
+func _draw_static_content(pen) -> void:
+	# Runs inside static_layer._draw() with the bake view swapped in.
 	if region == null:
-		last_draw_us = Time.get_ticks_usec() - draw_started
+		pen.draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
 		return
-	_draw_boundaries()
+	var draw_started: int = Time.get_ticks_usec()
+	view_pan = bake_pan
+	view_zoom = bake_zoom
+	view_origin = Vector2(-BAKE_MARGIN_PX, -BAKE_MARGIN_PX)
+	view_size = size + Vector2(BAKE_MARGIN_PX, BAKE_MARGIN_PX) * 2.0
+	pen.draw_rect(view_rect(), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
+	_draw_boundaries(pen)
 	last_draw_stages_us["boundaries"] = Time.get_ticks_usec() - draw_started
-	_draw_cities()
+	_draw_cities(pen)
 	last_draw_stages_us["cities"] = Time.get_ticks_usec() - draw_started
-	urban_layer.draw(self)
+	urban_layer.draw(self, pen)
 	last_draw_stages_us["urban"] = Time.get_ticks_usec() - draw_started
-	_draw_road_corridors()
-	_draw_roads()
+	_draw_road_corridors(pen)
+	_draw_roads(pen)
 	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
-	_draw_grade_crossings()
+	_draw_grade_crossings(pen)
 	if show_transit_overlay:
-		_draw_transit_overlay()
+		_draw_transit_overlay(pen)
 	if map_mode == "Zoning":
-		_draw_zoning_candidates()
+		_draw_zoning_candidates(pen)
 	if map_mode == "Trips":
-		_draw_hourly_flows()
+		_draw_hourly_flows(pen)
+	view_pan = pan
+	view_zoom = zoom
+	view_origin = Vector2.ZERO
+	view_size = size
+	last_draw_us = Time.get_ticks_usec() - draw_started
+	last_draw_stages_us["done"] = last_draw_us
+
+
+func _draw_dynamic_content(pen) -> void:
+	if region == null:
+		return
+	var draw_started: int = Time.get_ticks_usec()
 	if map_mode != "Zoning":
-		_draw_neighborhoods()
+		_draw_neighborhoods(pen)
 	last_draw_stages_us["neighborhoods"] = Time.get_ticks_usec() - draw_started
-	_draw_jurisdiction_labels()
+	_ensure_jurisdiction_labels()
+	_draw_jurisdiction_labels(pen)
 	last_draw_stages_us["labels"] = Time.get_ticks_usec() - draw_started
-	_draw_jurisdiction_key()
+	_draw_jurisdiction_key(pen)
 	if map_mode == "Roads":
-		_draw_road_nodes()
-		_draw_road_preview()
-		_draw_road_legend()
+		_draw_road_nodes(pen)
+		_draw_road_preview(pen)
+		_draw_road_legend(pen)
 	elif map_mode == "Trips":
-		_draw_legend()
+		_draw_legend(pen)
 	else:
-		_draw_zoning_legend()
-	_draw_map_scale()
+		_draw_zoning_legend(pen)
+	_draw_map_scale(pen)
 	var font := get_theme_default_font()
 	var hint: String = "Pinch / wheel: zoom  •  Two fingers / drag: pan"
 	var hint_width: float = font.get_string_size(hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
 	var hint_y: float = 55.0 if size.x < 800.0 else size.y - 12.0
-	draw_string(font, Vector2(size.x - hint_width - 14.0, hint_y), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
-	last_draw_stages_us["done"] = Time.get_ticks_usec() - draw_started
-	last_draw_us = Time.get_ticks_usec() - draw_started
+	pen.draw_string(font, Vector2(size.x - hint_width - 14.0, hint_y), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+	last_overlay_us = Time.get_ticks_usec() - draw_started
 
 
 func _spatial_cell(point: Vector2) -> Vector2i:
@@ -897,7 +973,7 @@ func _ensure_spatial_index() -> void:
 
 
 func _spatial_visible_indices(buckets: Dictionary, margin: float, unique: bool = false) -> Array[int]:
-	return _spatial_rect_indices(buckets, Vector2(-margin, -margin), size + Vector2(margin, margin), unique)
+	return _spatial_rect_indices(buckets, view_rect().position - Vector2(margin, margin), view_rect().end + Vector2(margin, margin), unique)
 
 
 func _spatial_near_indices(buckets: Dictionary, screen_point: Vector2, radius: float, unique: bool = false) -> Array[int]:
@@ -932,14 +1008,14 @@ func _all_indices(count: int) -> Array[int]:
 	return indices
 
 
-func _draw_roads() -> void:
+func _draw_roads(pen) -> void:
 	if detail_level != "Neighborhood":
-		_draw_aggregate_roads()
-		_draw_aggregate_road_projects()
+		_draw_aggregate_roads(pen)
+		_draw_aggregate_road_projects(pen)
 		return
-	var overview: bool = _map_scale() * zoom < 60.0
-	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, _road_cull_margin(), true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
-	var batch_roads: bool = region.is_large_scale and zoom >= 2.0 and _pixels_per_meter() < 0.025
+	var overview: bool = _map_scale() * view_zoom < 60.0
+	var road_indices: Array[int] = _spatial_visible_indices(spatial_road_links, _road_cull_margin(), true) if region.is_large_scale and view_zoom >= 2.0 else _all_indices(region.road_links.size())
+	var batch_roads: bool = region.is_large_scale and view_zoom >= 2.0 and _pixels_per_meter() < 0.025
 	var show_local_roads: bool = _show_local_road_detail()
 	var casing_lines: Dictionary = {}
 	var lane_lines := PackedVector2Array()
@@ -956,8 +1032,8 @@ func _draw_roads() -> void:
 	for link_index in road_indices:
 		var link = region.road_links[link_index]
 		# The rural web is far too dense to draw wholesale; it appears once the
-		# spatial culling zoom is active.
-		if region.is_large_scale and zoom < 2.0 and _countryside_road(link):
+		# spatial culling view_zoom is active.
+		if region.is_large_scale and view_zoom < 2.0 and _countryside_road(link):
 			continue
 		# Countryside collectors keep the lighter rural styling; the class
 		# hierarchy no longer carries a separate Rural type.
@@ -987,7 +1063,7 @@ func _draw_roads() -> void:
 						local_lines.append(screen_points[segment])
 						local_colors.append(color)
 				else:
-					draw_polyline(screen_points, color, 0.8, true)
+					pen.draw_polyline(screen_points, color, 0.8, true)
 			elif road_class == "Rural" and batch_roads:
 				var rural_color: Color = forward_color.lerp(reverse_color, 0.5) if show_traffic_overlay else Color("a5aeb4")
 				if map_mode == "Trips":
@@ -999,11 +1075,11 @@ func _draw_roads() -> void:
 					local_lines.append(screen_points[segment])
 					local_colors.append(rural_color)
 			else:
-				_draw_overview_road(screen_points, road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+				_draw_overview_road(pen, screen_points, road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 			continue
 		if road_class == "Local":
 			if not batch_roads:
-				_draw_active_road(screen_points, link.lanes_per_direction, road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+				_draw_active_road(pen, screen_points, link.lanes_per_direction, road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 			else:
 				if selected_road_link_id == link.id and map_mode == "Roads":
 					selected_local_points = screen_points
@@ -1016,7 +1092,7 @@ func _draw_roads() -> void:
 						local_casing_lines.append(screen_points[segment])
 			continue
 		if not batch_roads:
-			_draw_active_road(screen_points, link.lanes_per_direction, road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
+			_draw_active_road(pen, screen_points, link.lanes_per_direction, road_class, forward_color, reverse_color, selected_road_link_id == link.id and map_mode == "Roads")
 			continue
 		if selected_road_link_id == link.id and map_mode == "Roads":
 			selected_points = screen_points
@@ -1040,17 +1116,17 @@ func _draw_roads() -> void:
 	if batch_roads:
 		var local_width: float = 0.8 if overview else maxf(1.8, 6.0 * _pixels_per_meter())
 		if not selected_local_points.is_empty():
-			draw_polyline(selected_local_points, Color("f7f0bf"), local_width + 4.0, true)
+			pen.draw_polyline(selected_local_points, Color("f7f0bf"), local_width + 4.0, true)
 		if not local_casing_lines.is_empty():
-			draw_multiline(local_casing_lines, Color("17252c"), local_width + 1.5, true)
+			pen.draw_multiline(local_casing_lines, Color("17252c"), local_width + 1.5, true)
 		if not local_lines.is_empty():
-			draw_multiline_colors(local_lines, local_colors, local_width, true)
+			pen.draw_multiline_colors(local_lines, local_colors, local_width, true)
 		if not selected_points.is_empty():
-			draw_polyline(selected_points, Color("f7f0bf"), _road_outer_half_width(selected_lanes, "Highway") * 2.0 + 3.0, true)
+			pen.draw_polyline(selected_points, Color("f7f0bf"), _road_outer_half_width(selected_lanes, "Highway") * 2.0 + 3.0, true)
 		for lane_count in casing_lines:
-			draw_multiline(casing_lines[lane_count], Color("091321"), _road_outer_half_width(lane_count, "Highway") * 2.0, true)
+			pen.draw_multiline(casing_lines[lane_count], Color("091321"), _road_outer_half_width(lane_count, "Highway") * 2.0, true)
 		if not lane_lines.is_empty():
-			draw_multiline_colors(lane_lines, lane_colors, _road_lane_width("Highway"), true)
+			pen.draw_multiline_colors(lane_lines, lane_colors, _road_lane_width("Highway"), true)
 		if not arrow_vertices.is_empty():
 			var arrays: Array = []
 			arrays.resize(Mesh.ARRAY_MAX)
@@ -1058,7 +1134,7 @@ func _draw_roads() -> void:
 			arrays[Mesh.ARRAY_COLOR] = arrow_colors
 			road_arrow_mesh = ArrayMesh.new()
 			road_arrow_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-			draw_mesh(road_arrow_mesh, null)
+			pen.draw_mesh(road_arrow_mesh, null)
 	if _pixels_per_meter() >= 0.035:
 		for link_index in road_indices:
 			var link = region.road_links[link_index]
@@ -1067,25 +1143,25 @@ func _draw_roads() -> void:
 					continue
 				var path: PackedVector2Array = span.get("points", PackedVector2Array([span["from"], span["to"]]))
 				if path.size() >= 2 and _polyline_visible(path):
-					draw_polyline(_screen_polyline(path), Color("a9d9e2", 0.82) if span["kind"] == "Bridge" else Color("b4a2cc", 0.72), 2.2, true)
+					pen.draw_polyline(_screen_polyline(path), Color("a9d9e2", 0.82) if span["kind"] == "Bridge" else Color("b4a2cc", 0.72), 2.2, true)
 	for project in region.road_projects:
 		match project.kind:
 			"New road":
 				if overview:
-					_draw_dashed_polyline(_screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
+					_draw_dashed_polyline(pen, _screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
 				else:
-					_draw_dashed_road(_screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
+					_draw_dashed_road(pen, _screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
 			"Widen":
 				for link in region.road_links:
 					if link.id == project.target_link_id:
 						var screen_points: PackedVector2Array = _screen_polyline(link.points)
 						for direction in range(2):
 							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction, link.road_class))
-							_draw_dashed_polyline(new_lane, Color("f0d38d", 0.9), _road_lane_width(link.road_class))
+							_draw_dashed_polyline(pen, new_lane, Color("f0d38d", 0.9), _road_lane_width(link.road_class))
 			"Interchange junction":
-				draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+				pen.draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 			"Highway exit":
-				draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+				pen.draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 
 
 func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int, vertices: PackedVector2Array, colors: PackedColorArray) -> void:
@@ -1122,32 +1198,32 @@ func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int,
 		traveled += segment_length
 
 
-func _draw_active_road(screen_points: PackedVector2Array, lanes: int, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:
+func _draw_active_road(pen, screen_points: PackedVector2Array, lanes: int, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:
 	if screen_points.size() < 2:
 		return
 	if road_class == "Local":
 		var width: float = maxf(1.8, 6.0 * _pixels_per_meter())
 		if selected and map_mode == "Roads":
-			draw_polyline(screen_points, Color("f7f0bf"), width + 4.0, true)
+			pen.draw_polyline(screen_points, Color("f7f0bf"), width + 4.0, true)
 		if map_mode == "Roads":
-			draw_polyline(screen_points, Color("17252c"), width + 1.5, true)
-		draw_polyline(screen_points, forward_color.lerp(reverse_color, 0.5), width, true)
+			pen.draw_polyline(screen_points, Color("17252c"), width + 1.5, true)
+		pen.draw_polyline(screen_points, forward_color.lerp(reverse_color, 0.5), width, true)
 		return
 	if map_mode == "Roads":
 		var casing_width: float = _road_outer_half_width(lanes, road_class) * 2.0
 		if selected:
-			draw_polyline(screen_points, Color("f7f0bf"), casing_width + 3.0, true)
-		draw_polyline(screen_points, Color("091321"), casing_width, true)
+			pen.draw_polyline(screen_points, Color("f7f0bf"), casing_width + 3.0, true)
+		pen.draw_polyline(screen_points, Color("091321"), casing_width, true)
 	for direction in range(2):
 		var lane_color: Color = forward_color if direction == 0 else reverse_color
 		for lane_index in range(lanes):
 			var lane_points: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index, road_class))
-			draw_polyline(lane_points, lane_color, _road_lane_width(road_class), true)
+			pen.draw_polyline(lane_points, lane_color, _road_lane_width(road_class), true)
 	if map_mode == "Roads":
-		_draw_road_direction_arrows(screen_points, lanes, road_class)
+		_draw_road_direction_arrows(pen, screen_points, lanes, road_class)
 
 
-func _draw_overview_road(screen_points: PackedVector2Array, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:
+func _draw_overview_road(pen, screen_points: PackedVector2Array, road_class: String, forward_color: Color, reverse_color: Color, selected: bool) -> void:
 	if screen_points.size() < 2:
 		return
 	var highway: bool = road_class == "Highway"
@@ -1162,12 +1238,12 @@ func _draw_overview_road(screen_points: PackedVector2Array, road_class: String, 
 	if map_mode == "Trips":
 		route_color.a = 0.25
 	if selected:
-		draw_polyline(screen_points, Color("f3cd70"), outer_width + 4.0, true)
-	draw_polyline(screen_points, Color("fbfaf5", route_color.a), outer_width, true)
-	draw_polyline(screen_points, route_color, inner_width, true)
+		pen.draw_polyline(screen_points, Color("f3cd70"), outer_width + 4.0, true)
+	pen.draw_polyline(screen_points, Color("fbfaf5", route_color.a), outer_width, true)
+	pen.draw_polyline(screen_points, route_color, inner_width, true)
 
 
-func _draw_road_direction_arrows(screen_points: PackedVector2Array, lanes: int, road_class: String) -> void:
+func _draw_road_direction_arrows(pen, screen_points: PackedVector2Array, lanes: int, road_class: String) -> void:
 	if road_class in ["Collector", "Rural"] and _pixels_per_meter() >= 0.025:
 		return
 	var lane_width: float = _road_lane_width(road_class)
@@ -1200,11 +1276,11 @@ func _draw_road_direction_arrows(screen_points: PackedVector2Array, lanes: int, 
 				var arrow_length: float = maxf(6.0, lane_width * 0.45)
 				var arrow_base: Vector2 = tip_position - travel * arrow_length
 				var wing: Vector2 = travel.orthogonal() * maxf(2.2, lane_width * 0.18)
-				draw_colored_polygon(PackedVector2Array([tip_position, arrow_base + wing, arrow_base - wing]), Color("f1f7fa", 0.88))
+				pen.draw_colored_polygon(PackedVector2Array([tip_position, arrow_base + wing, arrow_base - wing]), Color("f1f7fa", 0.88))
 
 
 func _visible_segment_offsets(start_point: Vector2, tangent: Vector2, segment_length: float, margin: float) -> Vector2:
-	var viewport: Rect2 = Rect2(Vector2.ZERO, size).grow(margin)
+	var viewport: Rect2 = view_rect().grow(margin)
 	var min_offset: float = INF
 	var max_offset: float = -INF
 	for corner in [viewport.position, Vector2(viewport.end.x, viewport.position.y), viewport.end, Vector2(viewport.position.x, viewport.end.y)]:
@@ -1219,8 +1295,8 @@ func _screen_polyline(world_points: PackedVector2Array) -> PackedVector2Array:
 
 
 func _screen_transform() -> Transform2D:
-	var scale: float = _map_scale() * zoom
-	return Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), size * 0.5 + pan - _world_center() * scale)
+	var scale: float = _map_scale() * view_zoom
+	return Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), size * 0.5 + view_pan - _world_center() * scale)
 
 
 func _offset_polyline(screen_points: PackedVector2Array, offset: float) -> PackedVector2Array:
@@ -1241,28 +1317,28 @@ func _offset_polyline(screen_points: PackedVector2Array, offset: float) -> Packe
 
 
 func _pixels_per_meter() -> float:
-	return _map_scale() * zoom / 1000.0
+	return _map_scale() * view_zoom / 1000.0
 
 
 func _road_lane_spacing(road_class: String) -> float:
 	var lane_meters: float = 3.6 if road_class == "Highway" else 3.25
 	if road_class in ["Collector", "Rural"] and _pixels_per_meter() >= 0.025:
 		return maxf(0.9, lane_meters * _pixels_per_meter())
-	return maxf(clampf(2.7 * sqrt(zoom), 2.3, 4.2), lane_meters * _pixels_per_meter())
+	return maxf(clampf(2.7 * sqrt(view_zoom), 2.3, 4.2), lane_meters * _pixels_per_meter())
 
 
 func _road_lane_width(road_class: String) -> float:
 	var lane_meters: float = 3.5 if road_class == "Highway" else 3.15
 	if road_class in ["Collector", "Rural"] and _pixels_per_meter() >= 0.025:
 		return maxf(0.8, lane_meters * _pixels_per_meter())
-	return maxf(clampf(1.8 * sqrt(zoom), 1.5, 2.5), lane_meters * _pixels_per_meter())
+	return maxf(clampf(1.8 * sqrt(view_zoom), 1.5, 2.5), lane_meters * _pixels_per_meter())
 
 
 func _road_median_half_gap(road_class: String) -> float:
 	var half_meters: float = 1.5 if road_class == "Highway" else 0.35
 	if road_class in ["Collector", "Rural"] and _pixels_per_meter() >= 0.025:
 		return half_meters * _pixels_per_meter()
-	return maxf(clampf(1.6 * sqrt(zoom), 1.4, 2.4), half_meters * _pixels_per_meter())
+	return maxf(clampf(1.6 * sqrt(view_zoom), 1.4, 2.4), half_meters * _pixels_per_meter())
 
 
 func _road_lane_offset(_lanes: int, direction: int, lane_index: int, road_class: String) -> float:
@@ -1280,14 +1356,14 @@ func _road_outer_half_width(lanes: int, road_class: String) -> float:
 
 
 func _road_cull_margin() -> float:
-	return maxf(25.0, _road_outer_half_width(5, "Highway") + 4.0)
+	return maxf(25.0, _road_outer_half_width(5, "Highway") + 4.0) - view_origin.x - view_origin.x
 
 
-func _draw_dashed_polyline(screen_points: PackedVector2Array, color: Color, width: float) -> void:
+func _draw_dashed_polyline(pen, screen_points: PackedVector2Array, color: Color, width: float) -> void:
 	var dash_length: float = maxf(10.0, width * 1.5)
 	var period: float = dash_length + maxf(6.0, width * 0.6)
 	var traveled := 0.0
-	var viewport := Rect2(Vector2.ZERO, size).grow(width)
+	var viewport := view_rect().grow(width)
 	for index in range(1, screen_points.size()):
 		var first: Vector2 = screen_points[index - 1]
 		var last: Vector2 = screen_points[index]
@@ -1306,18 +1382,18 @@ func _draw_dashed_polyline(screen_points: PackedVector2Array, color: Color, widt
 				var start_point: Vector2 = first + direction * cursor
 				var end_point: Vector2 = first + direction * (cursor + run)
 				if viewport.intersects(Rect2(start_point, Vector2.ZERO).expand(end_point)):
-					draw_line(start_point, end_point, color, width, true)
+					pen.draw_line(start_point, end_point, color, width, true)
 			cursor += run
 		traveled += length
 
 
-func _draw_dashed_road(screen_points: PackedVector2Array, lanes: int, road_class: String, color: Color) -> void:
+func _draw_dashed_road(pen, screen_points: PackedVector2Array, lanes: int, road_class: String, color: Color) -> void:
 	if road_class == "Local":
-		_draw_dashed_polyline(screen_points, color, maxf(1.8, 6.0 * _pixels_per_meter()))
+		_draw_dashed_polyline(pen, screen_points, color, maxf(1.8, 6.0 * _pixels_per_meter()))
 		return
 	for direction in range(2):
 		for lane_index in range(lanes):
-			_draw_dashed_polyline(_offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index, road_class)), color, _road_lane_width(road_class))
+			_draw_dashed_polyline(pen, _offset_polyline(screen_points, _road_lane_offset(lanes, direction, lane_index, road_class)), color, _road_lane_width(road_class))
 
 
 func _congestion_color(ratio: float) -> Color:
@@ -1547,7 +1623,7 @@ func get_road_traffic_metrics(link_index: int, link) -> Dictionary:
 	return {"demand": demand, "served": Vector2(sample.x, sample.y), "queue": Vector2(sample.z, sample.w), "time": time, "label": label}
 
 
-func _draw_road_nodes() -> void:
+func _draw_road_nodes(pen) -> void:
 	var show_local_roads: bool = _show_local_road_detail()
 	var node_indices: Array[int] = _spatial_visible_indices(spatial_road_nodes, 16.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_id in node_indices:
@@ -1562,7 +1638,7 @@ func _draw_road_nodes() -> void:
 		if not _screen_visible(position_on_screen, 16.0):
 			continue
 		if detail_level != "Neighborhood" and node.neighborhood_id >= 0 and not node.is_interchange:
-			draw_circle(position_on_screen, 2.0, Color("8ea3b1", 0.48))
+			pen.draw_circle(position_on_screen, 2.0, Color("8ea3b1", 0.48))
 			continue
 		var overview: bool = _map_scale() * zoom < 60.0
 		var radius := (3.0 if overview else 5.0) if node.is_interchange else (2.5 if overview else 3.5)
@@ -1570,19 +1646,19 @@ func _draw_road_nodes() -> void:
 		if node.kind == "City":
 			dormant = region.city_development_state(region.city_jurisdiction_ids[node.city_id]) == "Dormant"
 		if dormant:
-			draw_arc(position_on_screen, 3.5, 0.0, TAU, 12, Color("718899", 0.65), 1.0, true)
+			pen.draw_arc(position_on_screen, 3.5, 0.0, TAU, 12, Color("718899", 0.65), 1.0, true)
 			continue
-		draw_circle(position_on_screen, radius + (1.0 if overview else 2.0), Color("f7f6f1") if overview else Color("091321"))
-		draw_circle(position_on_screen, radius, Color("f2d786") if node.is_interchange else Color("c8d5df"))
+		pen.draw_circle(position_on_screen, radius + (1.0 if overview else 2.0), Color("f7f6f1") if overview else Color("091321"))
+		pen.draw_circle(position_on_screen, radius, Color("f2d786") if node.is_interchange else Color("c8d5df"))
 		if node.is_interchange and not overview:
-			draw_arc(position_on_screen, radius + 4.0, 0.0, TAU, 24, Color("f2d786", 0.8), 1.0, true)
+			pen.draw_arc(position_on_screen, radius + 4.0, 0.0, TAU, 24, Color("f2d786", 0.8), 1.0, true)
 
 
-func _draw_road_preview() -> void:
+func _draw_road_preview(pen) -> void:
 	if planning_preview_start.is_finite():
 		var guide_color: Color = Color("9fc7f0") if planning_preview_kind == "Rail corridor" else Color("ecc679")
-		draw_circle(_world_to_screen(planning_preview_start), 5.0, guide_color)
-		draw_dashed_line(_world_to_screen(planning_preview_start), _world_to_screen(hover_world_position), guide_color, 2.0, 7.0, true)
+		pen.draw_circle(_world_to_screen(planning_preview_start), 5.0, guide_color)
+		pen.draw_dashed_line(_world_to_screen(planning_preview_start), _world_to_screen(hover_world_position), guide_color, 2.0, 7.0, true)
 	if preview_start_node >= 0:
 		var points: PackedVector2Array = road_preview["points"] if road_preview.get("ok", false) else PackedVector2Array([region.road_nodes[preview_start_node].position_km])
 		if not road_preview.get("ok", false):
@@ -1595,12 +1671,12 @@ func _draw_road_preview() -> void:
 			var guide_origin: Vector2 = preview_waypoints[-1] if not preview_waypoints.is_empty() else region.road_nodes[preview_start_node].position_km
 			var ray: Vector2 = ghost - guide_origin
 			if ray.length() > 0.001:
-				draw_dashed_line(_world_to_screen(guide_origin), _world_to_screen(ghost), Color("a9d4ee", 0.6), 1.0, 6.0, true)
+				pen.draw_dashed_line(_world_to_screen(guide_origin), _world_to_screen(ghost), Color("a9d4ee", 0.6), 1.0, 6.0, true)
 				if road_snap_enabled or road_length_snap_enabled:
 					if road_snap_enabled and snap_guide["has_reference"] and (preview_waypoints.is_empty() or multi_curve):
 						var reference: Vector2 = snap_guide["reference"]
-						draw_line(_world_to_screen(guide_origin - reference * 0.12), _world_to_screen(guide_origin), Color("85d4ff"), 3.0, true)
-					draw_string(get_theme_default_font(), _world_to_screen(ghost) + Vector2(10, -8), snap_guide["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d1eaff"))
+						pen.draw_line(_world_to_screen(guide_origin - reference * 0.12), _world_to_screen(guide_origin), Color("85d4ff"), 3.0, true)
+					pen.draw_string(get_theme_default_font(), _world_to_screen(ghost) + Vector2(10, -8), snap_guide["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d1eaff"))
 			if (multi_curve and not awaiting_guide) or (road_draw_mode == RoadRouteBuilder.CURVED and not preview_waypoints.is_empty()):
 				var curved: PackedVector2Array = RoadPlanner.multi_curve_preview(region, preview_start_node, preview_waypoints, ghost, road_tool, preview_frozen_route) if multi_curve else RoadPlanner.player_route(region, preview_start_node, ghost, road_tool, preview_waypoints, road_draw_mode)
 				if not curved.is_empty():
@@ -1611,79 +1687,69 @@ func _draw_road_preview() -> void:
 			elif not multi_curve:
 				points.append(ghost)
 		var preview_lanes: int = int(road_preview.get("lanes", 2 if road_tool == "Highway" else 1))
-		_draw_dashed_road(_screen_polyline(points), preview_lanes, road_tool, Color("f4dd91"))
+		_draw_dashed_road(pen, _screen_polyline(points), preview_lanes, road_tool, Color("f4dd91"))
 		for span in road_preview.get("terrain_impact", {}).get("spans", []):
 			var color: Color = Color("8ed6e8") if span["kind"] == "Bridge" else (Color("bd9ee9") if span["kind"] == "Tunnel" else Color("e7b984"))
-			draw_polyline(_screen_polyline(span["points"]), color, 5.0, true)
+			pen.draw_polyline(_screen_polyline(span["points"]), color, 5.0, true)
 		if road_draw_mode == RoadRouteBuilder.MULTIPOINT and not road_preview.get("ok", false):
 			for index in range(preview_waypoints.size()):
-				draw_circle(_world_to_screen(preview_waypoints[index]), 4.0, Color("85d4ff") if index % 2 == 0 else Color("f4dd91"))
+				pen.draw_circle(_world_to_screen(preview_waypoints[index]), 4.0, Color("85d4ff") if index % 2 == 0 else Color("f4dd91"))
 		for crossing in road_preview.get("crossings", []):
 			var screen_point: Vector2 = _world_to_screen(crossing["point"])
-			draw_circle(screen_point, 8.0, Color("20354b"))
-			draw_string(get_theme_default_font(), screen_point + Vector2(12, 4), "Above" if crossing["above"] else "Below", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("fff0b0"))
+			pen.draw_circle(screen_point, 8.0, Color("20354b"))
+			pen.draw_string(get_theme_default_font(), screen_point + Vector2(12, 4), "Above" if crossing["above"] else "Below", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("fff0b0"))
 	elif road_preview.get("ok", false) and road_preview.get("kind", "") == "Highway exit":
-		draw_arc(_world_to_screen(road_preview["position_km"]), 10.0, 0.0, TAU, 24, Color("f4dd91"), 2.0, true)
+		pen.draw_arc(_world_to_screen(road_preview["position_km"]), 10.0, 0.0, TAU, 24, Color("f4dd91"), 2.0, true)
 	elif road_preview.get("ok", false) and road_preview.get("kind", "") == "Demolish":
 		for link in region.road_links:
 			if link.id == road_preview["target_link_id"]:
-				_draw_dashed_road(_screen_polyline(link.points), link.lanes_per_direction, link.road_class, Color("f06464"))
+				_draw_dashed_road(pen, _screen_polyline(link.points), link.lanes_per_direction, link.road_class, Color("f06464"))
 
 
-func _draw_road_corridors() -> void:
+func _draw_road_corridors(pen) -> void:
 	for corridor in region.urban_corridors:
 		var line: PackedVector2Array = _screen_polyline(corridor["points"])
 		if line.size() >= 2 and _screen_visible((line[0] + line[-1]) * 0.5, line[0].distance_to(line[-1]) * 0.5 + 20.0):
-			_draw_dashed_polyline(line, Color("ecc679", 0.9), 2.0)
+			_draw_dashed_polyline(pen, line, Color("ecc679", 0.9), 2.0)
 	if _pixels_per_meter() < 0.025:
 		return
 	for reservation in region.road_reservations:
 		var bounds: Rect2 = reservation["bounds"]
-		if not _screen_visible(_world_to_screen(bounds.get_center()), maxf(bounds.size.x, bounds.size.y) * _map_scale() * zoom + 20.0):
+		if not _screen_visible(_world_to_screen(bounds.get_center()), maxf(bounds.size.x, bounds.size.y) * _map_scale() * view_zoom + 20.0):
 			continue
 		for mask in reservation["masks"]:
 			if mask.size() >= 3:
-				draw_colored_polygon(_screen_polyline(mask), Color("24343b", 0.98))
+				pen.draw_colored_polygon(_screen_polyline(mask), Color("24343b", 0.98))
 
 
-func _draw_transit_overlay() -> void:
+func _draw_transit_overlay(pen) -> void:
 	for corridor in region.rail_reservations:
 		var line: PackedVector2Array = _screen_polyline(corridor["points"])
 		if line.size() >= 2 and _screen_visible((line[0] + line[-1]) * 0.5, line[0].distance_to(line[-1]) * 0.5 + 20.0):
-			_draw_dashed_polyline(line, Color("364f73", 0.9), 4.0)
-			_draw_dashed_polyline(line, Color("a9d0f2"), 2.0)
+			_draw_dashed_polyline(pen, line, Color("364f73", 0.9), 4.0)
+			_draw_dashed_polyline(pen, line, Color("a9d0f2"), 2.0)
 	for station in region.station_sites:
 		var marker: Vector2 = _world_to_screen(station["point"])
 		if _screen_visible(marker, 12.0):
-			draw_circle(marker, 7.0, Color("364f73"))
-			draw_circle(marker, 4.5, Color("a9d0f2"))
-			draw_circle(marker, 1.5, Color("253c55"))
+			pen.draw_circle(marker, 7.0, Color("364f73"))
+			pen.draw_circle(marker, 4.5, Color("a9d0f2"))
+			pen.draw_circle(marker, 1.5, Color("253c55"))
 
 
-func _draw_grade_crossings() -> void:
-	if _map_scale() * zoom < 60.0:
+func _draw_grade_crossings(pen) -> void:
+	if _map_scale() * view_zoom < 60.0:
 		return
-	for link in region.road_links:
-		for crossing in link.crossings:
-			var over_link = link if crossing["above"] else _link_near_crossing(int(crossing["link_id"]), crossing["point"], link.id)
-			if over_link == null:
-				continue
-			var point: Vector2 = crossing["point"]
-			var direction := Vector2.RIGHT
-			var best := INF
-			for segment in range(1, over_link.points.size()):
-				var nearest: Vector2 = Geometry2D.get_closest_point_to_segment(point, over_link.points[segment - 1], over_link.points[segment])
-				if nearest.distance_squared_to(point) < best:
-					best = nearest.distance_squared_to(point)
-					direction = (over_link.points[segment] - over_link.points[segment - 1]).normalized()
-			var center: Vector2 = _world_to_screen(point)
-			if not _screen_visible(center, 30.0):
-				continue
-			var half_span: float = maxf(9.0, 0.055 * _map_scale() * zoom)
-			var offset: Vector2 = direction * half_span
-			var width: float = maxf(6.0, _road_outer_half_width(over_link.lanes_per_direction, over_link.road_class) * 2.0)
-			draw_line(center - offset, center + offset, Color("101e29"), width + 4.0, true)
-			draw_line(center - offset, center + offset, Color("b8cad3"), width, true)
+	# The over/under resolution scans the whole web per crossing; cache the
+	# resolved marks per geometry revision and only project them here.
+	for mark in _grade_crossing_marks():
+		var center: Vector2 = _world_to_screen(mark["point"])
+		if not _screen_visible(center, 30.0):
+			continue
+		var half_span: float = maxf(9.0, 0.055 * _map_scale() * view_zoom)
+		var offset: Vector2 = mark["direction"] * half_span
+		var width: float = maxf(6.0, _road_outer_half_width(mark["lanes"], mark["road_class"]) * 2.0)
+		pen.draw_line(center - offset, center + offset, Color("101e29"), width + 4.0, true)
+		pen.draw_line(center - offset, center + offset, Color("b8cad3"), width, true)
 
 
 func _link_near_crossing(preferred_id: int, point: Vector2, excluded_id: int):
@@ -1696,33 +1762,33 @@ func _link_near_crossing(preferred_id: int, point: Vector2, excluded_id: int):
 	return null
 
 
-func _draw_road_legend() -> void:
+func _draw_road_legend(pen) -> void:
 	var font := get_theme_default_font()
 	var base := Vector2(18.0, size.y - 16.0)
-	draw_rect(Rect2(base - Vector2(9, 95), Vector2(440, 116)), Color(0.04, 0.09, 0.16, 0.90))
-	draw_string(font, base + Vector2(0, -76), "ROAD FLOW / CAPACITY + QUEUES" if show_traffic_overlay else "ROAD NETWORK", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
+	pen.draw_rect(Rect2(base - Vector2(9, 95), Vector2(440, 116)), Color(0.04, 0.09, 0.16, 0.90))
+	pen.draw_string(font, base + Vector2(0, -76), "ROAD FLOW / CAPACITY + QUEUES" if show_traffic_overlay else "ROAD NETWORK", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
 	if show_traffic_overlay:
 		for index in range(12):
-			draw_rect(Rect2(base + Vector2(index * 18.0, -64), Vector2(17, 9)), _congestion_color(float(index) / 7.0))
-		draw_string(font, base + Vector2(0, -39), "clear", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-		draw_string(font, base + Vector2(164, -39), "saturated / queued", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+			pen.draw_rect(Rect2(base + Vector2(index * 18.0, -64), Vector2(17, 9)), _congestion_color(float(index) / 7.0))
+		pen.draw_string(font, base + Vector2(0, -39), "clear", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_string(font, base + Vector2(164, -39), "saturated / queued", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	else:
-		draw_string(font, base + Vector2(0, -39), "Traffic overlay off · Use the Traffic button to show flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, base + Vector2(0, 4), "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+		pen.draw_string(font, base + Vector2(0, -39), "Traffic overlay off · Use the Traffic button to show flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, base + Vector2(0, 4), "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 
-func _draw_zoning_legend() -> void:
+func _draw_zoning_legend(pen) -> void:
 	var font := get_theme_default_font()
 	var base := Vector2(18.0, size.y - 16.0)
-	draw_rect(Rect2(base - Vector2(9, 60), Vector2(440, 81)), Color(0.04, 0.09, 0.16, 0.90))
-	draw_string(font, base + Vector2(0, -42), "ZONING · SUGGESTED DISTRICTS", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
-	draw_string(font, base + Vector2(0, -17), "Amber dots or outlines = suggested · Green = developed", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, base + Vector2(0, 4), "Zoom toward a city, then click a suggestion to approve", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+	pen.draw_rect(Rect2(base - Vector2(9, 60), Vector2(440, 81)), Color(0.04, 0.09, 0.16, 0.90))
+	pen.draw_string(font, base + Vector2(0, -42), "ZONING · SUGGESTED DISTRICTS", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
+	pen.draw_string(font, base + Vector2(0, -17), "Amber dots or outlines = suggested · Green = developed", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, base + Vector2(0, 4), "Zoom toward a city, then click a suggestion to approve", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 
-func _draw_zoning_candidates() -> void:
-	var detailed: bool = _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 4.0
+func _draw_zoning_candidates(pen) -> void:
+	var detailed: bool = _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM >= 4.0
 	if not detailed:
 		for candidate in region.development_candidates:
 			if int(candidate["neighborhood_id"]) >= 0:
@@ -1730,7 +1796,7 @@ func _draw_zoning_candidates() -> void:
 			var marker: Vector2 = _world_to_screen(candidate["center_km"])
 			if not _screen_visible(marker, 8.0):
 				continue
-			draw_circle(marker, 5.0 if int(candidate["id"]) == selected_candidate_id else 3.5, Color("fff0b0"))
+			pen.draw_circle(marker, 5.0 if int(candidate["id"]) == selected_candidate_id else 3.5, Color("fff0b0"))
 		if selected_candidate_id < 0:
 			return
 	if region.development_candidates.is_empty():
@@ -1738,8 +1804,8 @@ func _draw_zoning_candidates() -> void:
 	var visible_ids: Array[int] = []
 	var visible_seen: Dictionary = {}
 	if detailed:
-		var first: Vector2 = _screen_to_world(Vector2(-30.0, -30.0))
-		var last: Vector2 = _screen_to_world(size + Vector2(30.0, 30.0))
+		var first: Vector2 = _screen_to_world(view_rect().position - Vector2(30.0, 30.0))
+		var last: Vector2 = _screen_to_world(view_rect().end + Vector2(30.0, 30.0))
 		var minimum := Vector2(INF, INF)
 		var maximum := Vector2(-INF, -INF)
 		for corner in [first, Vector2(last.x, first.y), last, Vector2(first.x, last.y)]:
@@ -1770,9 +1836,9 @@ func _draw_zoning_candidates() -> void:
 			color = Color("7d888d")
 		color.a = 0.24 if id == selected_candidate_id else (0.18 if neighborhood_id < 0 else 0.10)
 		if not Geometry2D.triangulate_polygon(polygon).is_empty():
-			draw_colored_polygon(polygon, color)
+			pen.draw_colored_polygon(polygon, color)
 		polygon.append(polygon[0])
-		draw_polyline(polygon, Color("fff0b0") if id == selected_candidate_id else Color(color.r, color.g, color.b, 0.90 if neighborhood_id < 0 else 0.65), 2.5 if id == selected_candidate_id else (1.5 if neighborhood_id < 0 else 1.0), true)
+		pen.draw_polyline(polygon, Color("fff0b0") if id == selected_candidate_id else Color(color.r, color.g, color.b, 0.90 if neighborhood_id < 0 else 0.65), 2.5 if id == selected_candidate_id else (1.5 if neighborhood_id < 0 else 1.0), true)
 		if id == selected_candidate_id and neighborhood_id < 0:
 			var layout = candidate["layout"]
 			for edge_id in range(layout.edges.size()):
@@ -1780,7 +1846,7 @@ func _draw_zoning_candidates() -> void:
 				var path: PackedVector2Array = layout.edge_paths.get(edge_id, PackedVector2Array([layout.nodes[int(edge.x)], layout.nodes[int(edge.y)]]))
 				if path.size() < 2:
 					continue
-				draw_polyline(_screen_polyline(path), Color("f9d78e", 0.82) if layout.classes[edge_id] == Roads.COLLECTOR else Color("e6eef1", 0.60), 2.2 if layout.classes[edge_id] == Roads.COLLECTOR else 1.2, true)
+				pen.draw_polyline(_screen_polyline(path), Color("f9d78e", 0.82) if layout.classes[edge_id] == Roads.COLLECTOR else Color("e6eef1", 0.60), 2.2 if layout.classes[edge_id] == Roads.COLLECTOR else 1.2, true)
 
 
 func _visible_zoning_candidate_at(point: Vector2) -> int:
@@ -1810,50 +1876,50 @@ func _visible_zoning_candidate_at(point: Vector2) -> int:
 	return built_id
 
 
-func _draw_boundaries() -> void:
+func _draw_boundaries(pen) -> void:
 	var state_polygon: PackedVector2Array = _screen_polyline(region.jurisdictions[0].polygon_km)
 	if state_polygon.size() >= 3:
-		draw_colored_polygon(state_polygon, Color("829576") if base_map_style == "Satellite" else Color("c7e9d6"))
+		pen.draw_colored_polygon(state_polygon, Color("829576") if base_map_style == "Satellite" else Color("c7e9d6"))
 		if terrain_texture != null:
 			var bounds: Rect2 = region.terrain.bounds
 			var base_texture: ImageTexture = satellite_texture if base_map_style == "Satellite" else (terrain_relief_texture if show_terrain_overlay else terrain_texture)
-			draw_texture_rect(base_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * zoom), false)
+			pen.draw_texture_rect(base_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * view_zoom), false)
 			if base_map_style == "Map" and show_slope_overlay and terrain_slope_texture != null:
-				draw_texture_rect(terrain_slope_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * zoom), false)
+				pen.draw_texture_rect(terrain_slope_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * view_zoom), false)
 			if base_map_style == "Map" and show_contours and terrain_contour_texture != null:
-				draw_texture_rect(terrain_contour_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * zoom), false)
-			_draw_terrain_detail()
-		_draw_terrain_water()
-		_draw_polygon_border(region.jurisdictions[0], Color("9eaca2"), 3.0)
+				pen.draw_texture_rect(terrain_contour_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * view_zoom), false)
+			_draw_terrain_detail(pen)
+		_draw_terrain_water(pen)
+		_draw_polygon_border(pen, region.jurisdictions[0], Color("9eaca2"), 3.0)
 	if selected_jurisdiction_id >= 0:
 		var selected = region.jurisdictions[selected_jurisdiction_id]
 		if selected.kind in ["Region", "County", "City", "Neighborhood"]:
-			draw_colored_polygon(_screen_polyline(selected.polygon_km), Color("e5d69a", 0.055))
-	_draw_neighborhood_boundaries()
+			pen.draw_colored_polygon(_screen_polyline(selected.polygon_km), Color("e5d69a", 0.055))
+	_draw_neighborhood_boundaries(pen)
 	# Draw the smaller divisions first so the broader borders stay legible where they coincide.
 	for kind in ["City", "County", "Region"]:
-		if region.is_large_scale and zoom < 3.0 and kind == "City":
+		if region.is_large_scale and view_zoom < 3.0 and kind == "City":
 			continue
 		for area in region.jurisdictions:
 			if area.kind != kind:
 				continue
-			if not _jurisdiction_screen_rect(area).intersects(Rect2(Vector2.ZERO, size)):
+			if not _jurisdiction_screen_rect(area).intersects(view_rect()):
 				continue
 			var color: Color = _jurisdiction_color(kind)
 			color.a = {"City": 0.46, "County": 0.72, "Region": 0.92}[kind]
 			if base_map_style == "Map" and map_mode != "Zoning":
 				color.a = 0.12
-			if region.is_large_scale and zoom < 2.0:
+			if region.is_large_scale and view_zoom < 2.0:
 				color.a = 0.11 if kind == "County" else 0.31
-			_draw_polygon_border(area, color, {"City": 1.0, "County": 1.5, "Region": 2.0}[kind])
+			_draw_polygon_border(pen, area, color, {"City": 1.0, "County": 1.5, "Region": 2.0}[kind])
 	if selected_jurisdiction_id >= 0:
 		var selected = region.jurisdictions[selected_jurisdiction_id]
 		if selected.kind in ["Region", "County", "City", "Neighborhood"]:
-			_draw_polygon_border(selected, Color("fff0b0", 0.95), 3.5)
+			_draw_polygon_border(pen, selected, Color("fff0b0", 0.95), 3.5)
 
 
-func _draw_terrain_detail() -> void:
-	var pixels_per_km: float = _map_scale() * zoom
+func _draw_terrain_detail(pen) -> void:
+	var pixels_per_km: float = _map_scale() * view_zoom
 	var level := -1
 	if pixels_per_km >= 2.0:
 		var target_texel_pixels := 4.0
@@ -1876,8 +1942,8 @@ func _draw_terrain_detail() -> void:
 	var terrain = region.terrain
 	var step_km: float = TERRAIN_DETAIL_STEPS[level]
 	var tile_km: float = step_km * TerrainDetailTile.PIXELS
-	var first: Vector2 = _screen_to_world(Vector2.ZERO)
-	var last: Vector2 = _screen_to_world(size)
+	var first: Vector2 = _screen_to_world(view_rect().position)
+	var last: Vector2 = _screen_to_world(view_rect().end)
 	var visible_world: Rect2 = Rect2(first, last - first).intersection(terrain.bounds)
 	terrain_detail_visible.clear()
 	if not visible_world.has_area():
@@ -1898,14 +1964,14 @@ func _draw_terrain_detail() -> void:
 				ready_count += 1
 			elif not terrain_detail_requested.has(key) and not terrain_detail_active.has(key):
 				missing.append(key)
-	# Keep the previous zoom's tiles until this viewport's new level is ready.
+	# Keep the previous view_zoom's tiles until this viewport's new level is ready.
 	# After that, short pans may show a small unfinished strip at the edge.
 	for fallback_level in range(level):
-		_draw_cached_terrain_level(terrain, fallback_level, visible_world, pixels_per_km)
+		_draw_cached_terrain_level(pen, terrain, fallback_level, visible_world, pixels_per_km)
 	if tile_count > 0 and ready_count == tile_count:
 		terrain_detail_published_level = level
 	if ready_count > 0:
-		_draw_cached_terrain_level(terrain, level, visible_world, pixels_per_km)
+		_draw_cached_terrain_level(pen, terrain, level, visible_world, pixels_per_km)
 	if not missing.is_empty():
 		var center: Vector2 = (visible_world.get_center() - terrain.bounds.position) / tile_km
 		missing.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
@@ -1917,7 +1983,7 @@ func _draw_terrain_detail() -> void:
 		set_process(true)
 
 
-func _draw_cached_terrain_level(terrain, level: int, visible_world: Rect2, pixels_per_km: float) -> void:
+func _draw_cached_terrain_level(pen, terrain, level: int, visible_world: Rect2, pixels_per_km: float) -> void:
 	var tile_km: float = TERRAIN_DETAIL_STEPS[level] * TerrainDetailTile.PIXELS
 	var left: int = maxi(0, floori((visible_world.position.x - terrain.bounds.position.x) / tile_km))
 	var top: int = maxi(0, floori((visible_world.position.y - terrain.bounds.position.y) / tile_km))
@@ -1934,13 +2000,13 @@ func _draw_cached_terrain_level(terrain, level: int, visible_world: Rect2, pixel
 			var texture_key: String = "satellite" if base_map_style == "Satellite" else ("terrain" if show_terrain_overlay else "color")
 			if base_map_style == "Map" and not show_terrain_overlay and tile.get("map_mesh") != null:
 				var transform := Transform2D(Vector2(pixels_per_km, 0.0), Vector2(0.0, pixels_per_km), screen_rect.position)
-				draw_mesh(tile["map_mesh"], null, transform)
+				pen.draw_mesh(tile["map_mesh"], null, transform)
 			else:
-				draw_texture_rect(tile[texture_key], screen_rect, false)
+				pen.draw_texture_rect(tile[texture_key], screen_rect, false)
 			if base_map_style == "Map" and show_slope_overlay:
-				draw_texture_rect(tile["slope"], screen_rect, false)
+				pen.draw_texture_rect(tile["slope"], screen_rect, false)
 			if base_map_style == "Map" and show_contours:
-				draw_texture_rect(tile["contours"], screen_rect, false)
+				pen.draw_texture_rect(tile["contours"], screen_rect, false)
 
 
 func _make_terrain_texture(source) -> ImageTexture:
@@ -1987,28 +2053,28 @@ func _make_terrain_texture(source) -> ImageTexture:
 	return ImageTexture.create_from_image(image)
 
 
-func _draw_terrain_water() -> void:
+func _draw_terrain_water(pen) -> void:
 	if region.terrain == null:
 		return
 	var terrain = region.terrain
 	for lake in terrain.lakes:
 		var center: Vector2 = lake["center"]
 		var radius: Vector2 = lake["radius"]
-		if minf(radius.x, radius.y) * _map_scale() * zoom < 1.0:
+		if minf(radius.x, radius.y) * _map_scale() * view_zoom < 1.0:
 			continue
-		if not _screen_visible(_world_to_screen(center), radius.length() * 1.25 * _map_scale() * zoom):
+		if not _screen_visible(_world_to_screen(center), radius.length() * 1.25 * _map_scale() * view_zoom):
 			continue
 		var polygon := PackedVector2Array()
 		for point in lake["polygon"]:
 			polygon.append(_world_to_screen(point))
-		draw_colored_polygon(polygon, Color("477d8c") if base_map_style == "Satellite" else Color("79cde2"))
+		pen.draw_colored_polygon(polygon, Color("477d8c") if base_map_style == "Satellite" else Color("79cde2"))
 	for river in terrain.rivers:
-		if _map_scale() * zoom < 2.0 and float(river["width_km"]) < 0.12:
+		if _map_scale() * view_zoom < 2.0 and float(river["width_km"]) < 0.12:
 			continue
 		var river_bounds: Rect2 = river["bounds"]
 		var visible_a: Vector2 = _world_to_screen(river_bounds.position)
 		var visible_b: Vector2 = _world_to_screen(river_bounds.end)
-		if not Rect2(visible_a, Vector2.ZERO).expand(visible_b).intersects(Rect2(Vector2.ZERO, size)):
+		if not Rect2(visible_a, Vector2.ZERO).expand(visible_b).intersects(view_rect()):
 			continue
 		var line: PackedVector2Array = river["points"]
 		var widths: PackedFloat32Array = river.get("widths_km", PackedFloat32Array())
@@ -2016,26 +2082,26 @@ func _draw_terrain_water() -> void:
 		for i in range(1, line.size()):
 			var a: Vector2 = _world_to_screen(line[i - 1])
 			var b: Vector2 = _world_to_screen(line[i])
-			if not Rect2(a, Vector2.ZERO).expand(b).grow(10.0).intersects(Rect2(Vector2.ZERO, size)):
+			if not Rect2(a, Vector2.ZERO).expand(b).grow(10.0).intersects(view_rect()):
 				continue
 			var width_km: float = (widths[i - 1] + widths[i]) * 0.5 if widths.size() == line.size() else float(river["width_km"])
-			var screen_width: float = maxf(1.0, width_km * _map_scale() * zoom)
-			draw_line(a, b, water_color, screen_width, true)
+			var screen_width: float = maxf(1.0, width_km * _map_scale() * view_zoom)
+			pen.draw_line(a, b, water_color, screen_width, true)
 			if screen_width >= 3.0:
-				draw_circle(b, screen_width * 0.5, water_color, true, -1.0, true)
+				pen.draw_circle(b, screen_width * 0.5, water_color, true, -1.0, true)
 
 
 func _neighborhood_borders_visible(city) -> bool:
-	if region.is_large_scale and (zoom < 3.0 or _map_scale() * zoom * StateGeography.CELL_SIZE_KM < 12.0):
+	if region.is_large_scale and (view_zoom < 3.0 or _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM < 12.0):
 		return false
 	var bounds: Rect2 = _jurisdiction_screen_rect(city)
-	if not bounds.intersects(Rect2(Vector2.ZERO, size)):
+	if not bounds.intersects(view_rect()):
 		return false
 	var parcel_extent: float = sqrt(bounds.get_area() / float(maxi(1, city.neighborhood_ids.size())))
 	return maxf(bounds.size.x, bounds.size.y) >= 55.0 and parcel_extent >= 16.0
 
 
-func _draw_neighborhood_boundaries() -> void:
+func _draw_neighborhood_boundaries(pen) -> void:
 	last_drawn_neighborhood_borders = 0
 	for city_id in region.city_jurisdiction_ids:
 		var city = region.jurisdictions[city_id]
@@ -2046,7 +2112,7 @@ func _draw_neighborhood_boundaries() -> void:
 			if neighborhood.street_layout == null:
 				continue
 			var district = region.jurisdictions[neighborhood.jurisdiction_id]
-			if not _jurisdiction_screen_rect(district).intersects(Rect2(Vector2.ZERO, size)):
+			if not _jurisdiction_screen_rect(district).intersects(view_rect()):
 				continue
 			var inhabited: bool = neighborhood.population > 0 or neighborhood.jobs > 0
 			var color: Color = CITY_COLORS[neighborhood.city_id % CITY_COLORS.size()]
@@ -2069,19 +2135,19 @@ func _draw_neighborhood_boundaries() -> void:
 				district_fill_meshes[layout_id] = mesh
 			var cached_mesh: ArrayMesh = district_fill_meshes[layout_id]
 			if cached_mesh != null:
-				var world_scale: float = _map_scale() * zoom
+				var world_scale: float = _map_scale() * view_zoom
 				var transform := Transform2D(Vector2(world_scale, 0.0), Vector2(0.0, world_scale), _world_to_screen(district.bounds_km.position))
-				draw_mesh(cached_mesh, null, transform, color)
-			_draw_polygon_border(district, Color("c1d0b3", 0.65 if inhabited else 0.34), 1.0)
+				pen.draw_mesh(cached_mesh, null, transform, color)
+			_draw_polygon_border(pen, district, Color("c1d0b3", 0.65 if inhabited else 0.34), 1.0)
 			last_drawn_neighborhood_borders += 1
 
 
-func _draw_polygon_border(area, color: Color, width: float) -> void:
+func _draw_polygon_border(pen, area, color: Color, width: float) -> void:
 	var points: PackedVector2Array = _screen_polyline(area.polygon_km)
 	if points.size() < 3:
 		return
 	points.append(points[0])
-	draw_polyline(points, color, width, true)
+	pen.draw_polyline(points, color, width, true)
 
 
 func _jurisdiction_screen_rect(area) -> Rect2:
@@ -2127,7 +2193,10 @@ func _jurisdiction_label_text(area) -> String:
 
 func _jurisdiction_label_rect(area) -> Rect2:
 	_ensure_jurisdiction_labels()
-	return jurisdiction_label_rects.get(area.id, Rect2())
+	var entry: Dictionary = jurisdiction_label_rects.get(area.id, {})
+	if entry.is_empty():
+		return Rect2()
+	return Rect2(_world_to_screen(entry["anchor"]) + entry["offset"], entry["size"])
 
 
 func _jurisdiction_label_visible(area) -> bool:
@@ -2153,7 +2222,11 @@ func _jurisdiction_label_eligible(area) -> bool:
 
 
 func _ensure_jurisdiction_labels() -> void:
-	var key: String = "%s:%s:%s:%s:%s:%s" % [region.get_instance_id(), size, zoom, pan, detail_level, selected_jurisdiction_id]
+	# Layout is stable for a whole zoom band: anchors are stored in world
+	# space and re-projected every frame, so pans and sub-band zooms never
+	# re-run the collision pass.
+	var band := _zoom_band()
+	var key: String = "%d:%s:%d:%s:%d" % [region.get_instance_id(), size, band, detail_level, selected_jurisdiction_id]
 	if key == jurisdiction_layout_key:
 		return
 	jurisdiction_layout_key = key
@@ -2170,10 +2243,12 @@ func _ensure_jurisdiction_labels() -> void:
 		city_label_points[city["jurisdiction_id"]] = city["center_km"]
 	var occupied: Array[Rect2] = []
 	var font := get_theme_default_font()
+	var band_scale: float = _map_scale() * _band_zoom(band)
 	for area in ordered:
 		var font_size := 13 if area.kind == "City" and base_map_style == "Map" else (11 if area.kind == "Region" else (10 if area.kind == "County" else 9))
 		var width: float = maxf(20.0, font.get_string_size(_jurisdiction_label_text(area), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + 8.0)
-		var center: Vector2 = _world_to_screen(city_label_points.get(area.id, area.center_km))
+		var anchor: Vector2 = city_label_points.get(area.id, area.center_km)
+		var center: Vector2 = size * 0.5 + pan + (anchor - _world_center()) * band_scale
 		var top: float = -30.0 if area.kind == "City" else (8.0 if area.kind == "County" else -12.0)
 		for offset in [Vector2.ZERO, Vector2(0, -20), Vector2(0, 20), Vector2(0, -40), Vector2(0, 40), Vector2(-30, 0), Vector2(30, 0)]:
 			var candidate := Rect2(center + Vector2(-width * 0.5, top) + offset, Vector2(width, 14.0 if area.kind == "City" else 18.0))
@@ -2185,17 +2260,17 @@ func _ensure_jurisdiction_labels() -> void:
 					overlaps = true
 					break
 			if not overlaps:
-				jurisdiction_label_rects[area.id] = candidate
+				jurisdiction_label_rects[area.id] = {"anchor": anchor, "offset": candidate.position - center, "size": candidate.size}
 				occupied.append(candidate)
 				break
 
 
-func _draw_jurisdiction_labels() -> void:
+func _draw_jurisdiction_labels(pen) -> void:
 	var font := get_theme_default_font()
 	for kind in ["Region", "County", "City"]:
-		if region.is_large_scale and detail_level == "State" and zoom < 4.0 and kind != "Region":
+		if region.is_large_scale and detail_level == "State" and view_zoom < 4.0 and kind != "Region":
 			continue
-		if region.is_large_scale and detail_level == "Region" and zoom < 4.0 and kind == "City":
+		if region.is_large_scale and detail_level == "Region" and view_zoom < 4.0 and kind == "City":
 			continue
 		for area in region.jurisdictions:
 			if area.kind != kind:
@@ -2207,24 +2282,24 @@ func _draw_jurisdiction_labels() -> void:
 			var selected: bool = area.id == selected_jurisdiction_id
 			if kind == "City" and base_map_style == "Map":
 				var position: Vector2 = rect.position + Vector2(4.0, 12.0)
-				draw_string_outline(font, position, area.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, 3, Color("f5f6ef"))
-				draw_string(font, position, area.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("4b5b60"))
+				pen.draw_string_outline(font, position, area.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, 3, Color("f5f6ef"))
+				pen.draw_string(font, position, area.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("4b5b60"))
 				continue
-			draw_rect(rect, Color("0b1927", 0.82 if kind == "City" else 0.94))
-			draw_rect(Rect2(rect.position, Vector2(3.0, rect.size.y)), Color("fff0b0") if selected else color)
+			pen.draw_rect(rect, Color("0b1927", 0.82 if kind == "City" else 0.94))
+			pen.draw_rect(Rect2(rect.position, Vector2(3.0, rect.size.y)), Color("fff0b0") if selected else color)
 			if selected:
-				draw_rect(rect, Color("fff0b0"), false, 1.0)
+				pen.draw_rect(rect, Color("fff0b0"), false, 1.0)
 			var label: String = _jurisdiction_label_text(area)
 			var font_size := 11 if kind == "Region" else (10 if kind == "County" else 9)
 			while label.length() > 2 and font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x > rect.size.x - 8.0:
 				label = label.substr(0, label.length() - 2) + "…"
-			draw_string(font, rect.position + Vector2(6.0, 10.0 if kind == "City" else 13.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color("fff0b0") if selected else color)
+			pen.draw_string(font, rect.position + Vector2(6.0, 10.0 if kind == "City" else 13.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color("fff0b0") if selected else color)
 
 
-func _draw_jurisdiction_key() -> void:
+func _draw_jurisdiction_key(pen) -> void:
 	var font := get_theme_default_font()
 	var start := Vector2(size.x - 362.0, 42.0 if size.x < 720.0 else 10.0)
-	draw_rect(Rect2(start, Vector2(352.0, 25.0)), Color("0b1927", 0.94))
+	pen.draw_rect(Rect2(start, Vector2(352.0, 25.0)), Color("0b1927", 0.94))
 	for item in [
 		{"kind": "Region", "label": "Region", "offset": 9.0},
 		{"kind": "County", "label": "County", "offset": 85.0},
@@ -2233,8 +2308,8 @@ func _draw_jurisdiction_key() -> void:
 	]:
 		var x: float = start.x + item["offset"]
 		var color: Color = _jurisdiction_color(item["kind"])
-		draw_line(Vector2(x, start.y + 13.0), Vector2(x + 12.0, start.y + 13.0), color, 3.0, true)
-		draw_string(font, Vector2(x + 17.0, start.y + 17.0), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 11, color)
+		pen.draw_line(Vector2(x, start.y + 13.0), Vector2(x + 12.0, start.y + 13.0), color, 3.0, true)
+		pen.draw_string(font, Vector2(x + 17.0, start.y + 17.0), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 11, color)
 
 
 func _is_recorded_time() -> bool:
@@ -2242,18 +2317,18 @@ func _is_recorded_time() -> bool:
 	return requested_bin >= first_recorded_bin and requested_bin < recorded_bin
 
 
-func _draw_cities() -> void:
+func _draw_cities(pen) -> void:
 	if base_map_style == "Map" and map_mode != "Zoning":
 		return
 	for city in region.cities:
 		var area = region.jurisdictions[city["jurisdiction_id"]]
 		var bounds: Rect2 = _jurisdiction_screen_rect(area)
-		if not bounds.intersects(Rect2(Vector2.ZERO, size)):
+		if not bounds.intersects(view_rect()):
 			continue
 		var color: Color = CITY_COLORS[int(city["id"]) % CITY_COLORS.size()]
 		if maxf(bounds.size.x, bounds.size.y) >= 8.0:
 			color.a = 0.035
-			draw_colored_polygon(_screen_polyline(area.polygon_km), color)
+			pen.draw_colored_polygon(_screen_polyline(area.polygon_km), color)
 
 
 func _circle_mesh(inner_radius: float) -> ArrayMesh:
@@ -2302,10 +2377,10 @@ func _set_neighborhood_batch(batch: MultiMesh, index: int, center: Vector2, radi
 	batch.set_instance_color(index, color)
 
 
-func _draw_neighborhoods() -> void:
-	if region.is_large_scale and _map_scale() * zoom * StateGeography.CELL_SIZE_KM < 8.0:
+func _draw_neighborhoods(pen) -> void:
+	if region.is_large_scale and _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM < 8.0:
 		return
-	var neighborhood_indices: Array[int] = _spatial_visible_indices(spatial_neighborhoods, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.neighborhoods.size())
+	var neighborhood_indices: Array[int] = _spatial_visible_indices(spatial_neighborhoods, 25.0) if region.is_large_scale and view_zoom >= 2.0 else _all_indices(region.neighborhoods.size())
 	if detail_level != "Neighborhood":
 		if region.is_large_scale and detail_level in ["State", "Region"]:
 			return
@@ -2314,8 +2389,8 @@ func _draw_neighborhoods() -> void:
 			if neighborhood.street_layout == null:
 				continue
 			var point: Vector2 = _world_to_screen(neighborhood.position_km)
-			if _screen_visible(point, 3.0) and (not region.is_large_scale or zoom >= 2.0):
-				draw_circle(point, 2.5, Color("718899", 0.45))
+			if _screen_visible(point, 3.0) and (not region.is_large_scale or view_zoom >= 2.0):
+				pen.draw_circle(point, 2.5, Color("718899", 0.45))
 		return
 	if region.accessibility.is_empty():
 		return
@@ -2350,9 +2425,9 @@ func _draw_neighborhoods() -> void:
 		if neighborhood.development_state == "Dormant":
 			if region.is_large_scale and zoom < 2.0 and neighborhood.id != selected_id and neighborhood.id != hovered_id:
 				continue
-			draw_arc(screen_position, 3.0, 0.0, TAU, 12, Color("82938e", 0.65), 1.0, true)
+			pen.draw_arc(screen_position, 3.0, 0.0, TAU, 12, Color("82938e", 0.65), 1.0, true)
 			if neighborhood.id == selected_id or neighborhood.id == hovered_id:
-				draw_arc(screen_position, 7.0, 0.0, TAU, 16, Color("f5d482"), 1.5, true)
+				pen.draw_arc(screen_position, 7.0, 0.0, TAU, 16, Color("f5d482"), 1.5, true)
 			continue
 		var color := _access_color((region.accessibility[neighborhood.id] - min_access) / maxf(1.0, max_access - min_access))
 		var desirability_color := Color("cf6075").lerp(Color("61c99a"), neighborhood.desirability / 100.0)
@@ -2363,32 +2438,32 @@ func _draw_neighborhoods() -> void:
 			_set_neighborhood_batch(neighborhood_batches[3], batch_count, screen_position, radius + 2.5, desirability_color)
 			batch_count += 1
 		else:
-			draw_circle(screen_position, radius + 3.0, Color("0b1421"))
-			draw_circle(screen_position, radius, color)
-			draw_arc(screen_position, radius, 0.0, TAU, 32, Color(1, 1, 1, 0.42), 1.0, true)
-			draw_arc(screen_position, radius + 2.0, 0.0, TAU, 32, desirability_color, 2.0, true)
+			pen.draw_circle(screen_position, radius + 3.0, Color("0b1421"))
+			pen.draw_circle(screen_position, radius, color)
+			pen.draw_arc(screen_position, radius, 0.0, TAU, 32, Color(1, 1, 1, 0.42), 1.0, true)
+			pen.draw_arc(screen_position, radius + 2.0, 0.0, TAU, 32, desirability_color, 2.0, true)
 			if neighborhood.id == selected_id:
-				draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("ffffff"), 2.5, true)
+				pen.draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("ffffff"), 2.5, true)
 			elif neighborhood.id == hovered_id:
-				draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("a9d7ff"), 2.0, true)
+				pen.draw_arc(screen_position, radius + 5.0, 0.0, TAU, 48, Color("a9d7ff"), 2.0, true)
 	if batch_nodes:
 		for batch in neighborhood_batches:
 			batch.visible_instance_count = batch_count
 			if batch_count > 0:
-				draw_multimesh(batch, null)
+				pen.draw_multimesh(batch, null)
 		for highlighted_id in [selected_id, hovered_id]:
 			if highlighted_id < 0:
 				continue
 			var highlighted = region.neighborhoods[highlighted_id]
 			var center: Vector2 = _world_to_screen(highlighted.position_km)
 			if _screen_visible(center, 20.0):
-				draw_arc(center, _node_radius(highlighted.population) + 5.0, 0.0, TAU, 48, Color("ffffff") if highlighted_id == selected_id else Color("a9d7ff"), 2.5 if highlighted_id == selected_id else 2.0, true)
+				pen.draw_arc(center, _node_radius(highlighted.population) + 5.0, 0.0, TAU, 48, Color("ffffff") if highlighted_id == selected_id else Color("a9d7ff"), 2.5 if highlighted_id == selected_id else 2.0, true)
 	var label_order: Array[int] = []
 	if selected_id >= 0:
 		label_order.append(selected_id)
 	if hovered_id >= 0 and hovered_id != selected_id:
 		label_order.append(hovered_id)
-	if zoom >= 1.8 and (base_map_style != "Map" or _pixels_per_meter() >= 0.15) and (not region.is_large_scale or _map_scale() * zoom * StateGeography.CELL_SIZE_KM >= 20.0):
+	if view_zoom >= 1.8 and (base_map_style != "Map" or _pixels_per_meter() >= 0.15) and (not region.is_large_scale or _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM >= 20.0):
 		for neighborhood_index in neighborhood_indices:
 			var neighborhood = region.neighborhoods[neighborhood_index]
 			if neighborhood.id != selected_id and neighborhood.id != hovered_id and _screen_visible(_world_to_screen(neighborhood.position_km), 25.0) and neighborhood.id % stride == 0:
@@ -2410,16 +2485,16 @@ func _draw_neighborhoods() -> void:
 			if overlaps:
 				continue
 		label_boxes.append(label_box)
-		draw_string(font, label_position + Vector2(1.0, 1.0), neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("07111e"))
-		draw_string(font, label_position, neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("e8f0f7"))
+		pen.draw_string(font, label_position + Vector2(1.0, 1.0), neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("07111e"))
+		pen.draw_string(font, label_position, neighborhood.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("e8f0f7"))
 
 
-func _draw_hourly_flows() -> void:
+func _draw_hourly_flows(pen) -> void:
 	if region.is_large_scale and detail_level == "Neighborhood":
-		_draw_compact_city_flows()
+		_draw_compact_city_flows(pen)
 		return
 	if detail_level != "Neighborhood":
-		_draw_aggregate_flows()
+		_draw_aggregate_flows(pen)
 		return
 	if flow_profile == null:
 		return
@@ -2454,18 +2529,18 @@ func _draw_hourly_flows() -> void:
 		else:
 			flow_color.a = 0.18 + 0.49 * strength if selected_id < 0 else 0.12 + 0.35 * strength
 		var line_width: float = 1.0 + 5.0 * strength
-		_draw_flow_stroke(start_point, end_point, flow_color, line_width, _is_outgoing_from_selected(flow))
+		_draw_flow_stroke(pen, start_point, end_point, flow_color, line_width, _is_outgoing_from_selected(flow))
 		var arrow_tip: Vector2 = end_point
 		var arrow_base: Vector2 = end_point - direction * (6.0 + 5.0 * strength)
 		var side: Vector2 = Vector2(-direction.y, direction.x) * (3.0 + 2.0 * strength)
-		draw_colored_polygon(PackedVector2Array([arrow_tip, arrow_base + side, arrow_base - side]), flow_color)
+		pen.draw_colored_polygon(PackedVector2Array([arrow_tip, arrow_base + side, arrow_base - side]), flow_color)
 
 
-func _draw_compact_city_flows() -> void:
+func _draw_compact_city_flows(pen) -> void:
 	if flow_profile == null:
 		return
-	if zoom < 2.0:
-		_draw_compact_region_flows()
+	if view_zoom < 2.0:
+		_draw_compact_region_flows(pen)
 		return
 	var purposes: Array = [FlowProfile.WORK, FlowProfile.COMMERCIAL, FlowProfile.SOCIAL] if selected_purpose == FlowProfile.ALL else [selected_purpose]
 	var flows: Array[Dictionary] = []
@@ -2495,12 +2570,12 @@ func _draw_compact_city_flows() -> void:
 		var strength: float = sqrt(float(flow["trips"]) / maxf(1.0, peak))
 		var color: Color = _purpose_color(flow["purpose"])
 		color.a = 0.2 + 0.65 * strength
-		_draw_flow_stroke(start_point + direction * 5.0, end_point - direction * 8.0, color, 1.0 + 5.0 * strength, selected_id >= 0 and region.neighborhoods[selected_id].city_id == flow["from"])
+		_draw_flow_stroke(pen, start_point + direction * 5.0, end_point - direction * 8.0, color, 1.0 + 5.0 * strength, selected_id >= 0 and region.neighborhoods[selected_id].city_id == flow["from"])
 		var side: Vector2 = direction.orthogonal() * (2.0 + 2.0 * strength)
-		draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
+		pen.draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
 
 
-func _draw_compact_region_flows() -> void:
+func _draw_compact_region_flows(pen) -> void:
 	var purposes: Array = [FlowProfile.WORK, FlowProfile.COMMERCIAL, FlowProfile.SOCIAL] if selected_purpose == FlowProfile.ALL else [selected_purpose]
 	var next_profile = next_day_profile if selected_hour == 23 and next_day_profile != null else flow_profile
 	var next_hour: int = (selected_hour + 1) % 24
@@ -2525,9 +2600,9 @@ func _draw_compact_region_flows() -> void:
 		var strength: float = sqrt(float(flow["trips"]) / maxf(1.0, peak))
 		var color: Color = _purpose_color(flow["purpose"])
 		color.a = 0.2 + 0.65 * strength
-		_draw_flow_stroke(start_point + direction * 12.0, end_point - direction * 12.0, color, 1.0 + 5.0 * strength, false)
+		_draw_flow_stroke(pen, start_point + direction * 12.0, end_point - direction * 12.0, color, 1.0 + 5.0 * strength, false)
 		var side: Vector2 = direction.orthogonal() * (2.0 + 2.0 * strength)
-		draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
+		pen.draw_colored_polygon(PackedVector2Array([end_point, end_point - direction * 10.0 + side, end_point - direction * 10.0 - side]), color)
 
 
 func _purpose_color(purpose: String) -> Color:
@@ -2560,16 +2635,16 @@ func _is_outgoing_from_selected(flow: Dictionary) -> bool:
 	return selected_id >= 0 and flow["origin"] == selected_id
 
 
-func _draw_flow_stroke(start_point: Vector2, end_point: Vector2, color: Color, width: float, dashed: bool) -> void:
+func _draw_flow_stroke(pen, start_point: Vector2, end_point: Vector2, color: Color, width: float, dashed: bool) -> void:
 	if not dashed:
-		draw_line(start_point, end_point, color, width, true)
+		pen.draw_line(start_point, end_point, color, width, true)
 		return
 	var displacement: Vector2 = end_point - start_point
 	var length: float = displacement.length()
 	if length <= 0.0:
 		return
 	var direction: Vector2 = displacement / length
-	if not Rect2(start_point, Vector2.ZERO).expand(end_point).grow(width).intersects(Rect2(Vector2.ZERO, size)):
+	if not Rect2(start_point, Vector2.ZERO).expand(end_point).grow(width).intersects(view_rect()):
 		return
 	var visible_offsets: Vector2 = _visible_segment_offsets(start_point, direction, length, width)
 	var dash_length: float = maxf(10.0, width * 1.5)
@@ -2577,7 +2652,7 @@ func _draw_flow_stroke(start_point: Vector2, end_point: Vector2, color: Color, w
 	var offset: float = floorf(visible_offsets.x / dash_period) * dash_period
 	while offset < visible_offsets.y:
 		var dash_end: float = minf(offset + dash_length, length)
-		draw_line(start_point + direction * offset, start_point + direction * dash_end, color, width, true)
+		pen.draw_line(start_point + direction * offset, start_point + direction * dash_end, color, width, true)
 		offset += dash_period
 
 
@@ -2720,9 +2795,9 @@ func _flows_for_purpose(purpose: String) -> Array[Dictionary]:
 	return net_flows
 
 
-func _draw_legend() -> void:
+func _draw_legend(pen) -> void:
 	var origin := Vector2(18, size.y - 44)
-	draw_rect(Rect2(origin - Vector2(9, 110), Vector2(420, 139)), Color(0.04, 0.09, 0.16, 0.90))
+	pen.draw_rect(Rect2(origin - Vector2(9, 110), Vector2(420, 139)), Color(0.04, 0.09, 0.16, 0.90))
 	var font := get_theme_default_font()
 	for item in [
 		{"purpose": FlowProfile.WORK, "label": "Work", "x": 0.0},
@@ -2733,25 +2808,25 @@ func _draw_legend() -> void:
 		var swatch_color: Color = _purpose_color(item["purpose"])
 		if selected_purpose != FlowProfile.ALL and selected_purpose != item["purpose"]:
 			swatch_color.a = 0.35
-		draw_line(origin + Vector2(x, -84), origin + Vector2(x + 15.0, -84), swatch_color, 3.0, true)
-		draw_string(font, origin + Vector2(x + 21.0, -80), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_line(origin + Vector2(x, -84), origin + Vector2(x + 15.0, -84), swatch_color, 3.0, true)
+		pen.draw_string(font, origin + Vector2(x + 21.0, -80), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	if selected_id >= 0:
-		_draw_flow_stroke(origin + Vector2(0, -62), origin + Vector2(28, -62), Color("dce8f2"), 2.0, true)
-		draw_string(font, origin + Vector2(35, -58), "OUT from selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-		draw_line(origin + Vector2(191, -62), origin + Vector2(219, -62), Color("dce8f2"), 2.0, true)
-		draw_string(font, origin + Vector2(226, -58), "IN to selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		_draw_flow_stroke(pen, origin + Vector2(0, -62), origin + Vector2(28, -62), Color("dce8f2"), 2.0, true)
+		pen.draw_string(font, origin + Vector2(35, -58), "OUT from selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_line(origin + Vector2(191, -62), origin + Vector2(219, -62), Color("dce8f2"), 2.0, true)
+		pen.draw_string(font, origin + Vector2(226, -58), "IN to selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	else:
-		draw_string(font, origin + Vector2(0, -58), "Select a neighborhood for direction styles", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, origin + Vector2(0, -39), "Arrow width and opacity = route flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("9db3c5"))
-	draw_string(font, origin + Vector2(0, -14), "JOB ACCESSIBILITY", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, origin + Vector2(205, -14), "Node ring = desirability", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_string(font, origin + Vector2(0, -58), "Select a neighborhood for direction styles", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, origin + Vector2(0, -39), "Arrow width and opacity = route flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("9db3c5"))
+	pen.draw_string(font, origin + Vector2(0, -14), "JOB ACCESSIBILITY", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, origin + Vector2(205, -14), "Node ring = desirability", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	for step in range(8):
-		draw_rect(Rect2(origin + Vector2(step * 17.0, 0), Vector2(16, 9)), _access_color(float(step) / 7.0))
-	draw_string(font, origin + Vector2(0, 26), "lower", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	draw_string(font, origin + Vector2(102, 26), "higher", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_rect(Rect2(origin + Vector2(step * 17.0, 0), Vector2(16, 9)), _access_color(float(step) / 7.0))
+	pen.draw_string(font, origin + Vector2(0, 26), "lower", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, origin + Vector2(102, 26), "higher", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 
 
-func _draw_map_scale() -> void:
+func _draw_map_scale(pen) -> void:
 	var pixels_per_km: float = _map_scale() * zoom
 	if pixels_per_km <= 0.0:
 		return
@@ -2764,19 +2839,20 @@ func _draw_map_scale() -> void:
 			break
 	var origin := Vector2(size.x - 150.0, 94.0 if size.x < 800.0 else size.y - 48.0)
 	var width: float = distance_km * pixels_per_km
-	draw_rect(Rect2(origin - Vector2(10, 24), Vector2(140, 38)), Color("0b1927", 0.9))
+	pen.draw_rect(Rect2(origin - Vector2(10, 24), Vector2(140, 38)), Color("0b1927", 0.9))
 	var label: String = "%.0f km" % distance_km if distance_km >= 1.0 else "%.0f m" % (distance_km * 1000.0)
-	draw_string(get_theme_default_font(), origin + Vector2(0, -7), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("d7e7f1"))
-	draw_line(origin, origin + Vector2(width, 0), Color("d7e7f1"), 2.0)
+	pen.draw_string(get_theme_default_font(), origin + Vector2(0, -7), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("d7e7f1"))
+	pen.draw_line(origin, origin + Vector2(width, 0), Color("d7e7f1"), 2.0)
 	for offset in [0.0, width]:
-		draw_line(origin + Vector2(offset, -3), origin + Vector2(offset, 3), Color("d7e7f1"), 2.0)
+		pen.draw_line(origin + Vector2(offset, -3), origin + Vector2(offset, 3), Color("d7e7f1"), 2.0)
 
 
 func reset_view() -> void:
 	zoom = 1.0
 	pan = Vector2.ZERO
 	pointer_down = false
-	queue_redraw()
+	_sync_view()
+	refresh_dynamic()
 
 
 func _zoom_at(screen_position: Vector2, factor: float) -> void:
@@ -2788,8 +2864,9 @@ func _zoom_at(screen_position: Vector2, factor: float) -> void:
 	pan = screen_position - size * 0.5 - (screen_position - size * 0.5 - pan) * ratio
 	if pointer_down:
 		pointer_dragged = true
+	_sync_view()
 	hover_world_position = _screen_to_world(screen_position)
-	queue_redraw()
+	refresh_dynamic()
 
 
 func _gui_input(event: InputEvent) -> void:
@@ -2803,8 +2880,9 @@ func _gui_input(event: InputEvent) -> void:
 			pan -= event.delta * TRACKPAD_PAN_PIXELS
 			if pointer_down:
 				pointer_dragged = true
+			_sync_view()
 			hover_world_position = _screen_to_world(event.position)
-			queue_redraw()
+			refresh_dynamic()
 		accept_event()
 	elif event is InputEventMouseButton:
 		var mouse_button := event as InputEventMouseButton
@@ -2883,13 +2961,15 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 	elif event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
+		_sync_view()
 		hover_world_position = _screen_to_world(motion.position)
 		if pointer_down:
 			if motion.position.distance_to(pointer_start) > 4.0:
 				pointer_dragged = true
 			if pointer_dragged:
 				pan += motion.relative
-				queue_redraw()
+				_sync_view()
+				refresh_dynamic()
 		else:
 			var new_hover: int = -1 if map_mode == "Zoning" else _hit_test(motion.position)
 			var candidate_hover: int = _visible_zoning_candidate_at(_screen_to_world(motion.position)) if map_mode == "Zoning" and region != null else -1
@@ -2899,9 +2979,9 @@ func _gui_input(event: InputEvent) -> void:
 			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if hovered_area_id >= 0 or new_hover >= 0 or candidate_hover >= 0 else Control.CURSOR_ARROW
 			if new_hover != hovered_id:
 				hovered_id = new_hover
-				queue_redraw()
+				refresh_dynamic()
 			elif preview_start_node >= 0 or planning_preview_start.is_finite():
-				queue_redraw()
+				refresh_dynamic()
 
 
 func _hit_road_node(screen_position: Vector2) -> int:
@@ -2910,7 +2990,7 @@ func _hit_road_node(screen_position: Vector2) -> int:
 	var closest := -1
 	var best := INF
 	var show_local_roads: bool = _show_local_road_detail()
-	var node_indices: Array[int] = _spatial_near_indices(spatial_road_nodes, screen_position, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
+	var node_indices: Array[int] = _spatial_near_indices(spatial_road_nodes, screen_position, 25.0) if region.is_large_scale and view_zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_index in node_indices:
 		var node = region.road_nodes[node_index]
 		if node.managed_neighborhood_id >= 0 and road_tool == "Inspect":
@@ -2969,11 +3049,11 @@ func _hit_road_link(screen_position: Vector2) -> int:
 func _hit_test(screen_position: Vector2) -> int:
 	if region == null:
 		return -1
-	if region.is_large_scale and _map_scale() * zoom * StateGeography.CELL_SIZE_KM < 8.0:
+	if region.is_large_scale and _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM < 8.0:
 		return -1
 	var closest_id := -1
 	var closest_distance := INF
-	var neighborhood_indices: Array[int] = _spatial_near_indices(spatial_neighborhoods, screen_position, 25.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.neighborhoods.size())
+	var neighborhood_indices: Array[int] = _spatial_near_indices(spatial_neighborhoods, screen_position, 25.0) if region.is_large_scale and view_zoom >= 2.0 else _all_indices(region.neighborhoods.size())
 	for neighborhood_index in neighborhood_indices:
 		var neighborhood = region.neighborhoods[neighborhood_index]
 		if neighborhood.street_layout == null:
@@ -3044,7 +3124,7 @@ func _world_center() -> Vector2:
 
 
 func _screen_visible(point: Vector2, margin: float = 0.0) -> bool:
-	return point.x >= -margin and point.y >= -margin and point.x <= size.x + margin and point.y <= size.y + margin
+	return point.x >= view_origin.x - margin and point.y >= view_origin.y - margin and point.x <= view_origin.x + view_size.x + margin and point.y <= view_origin.y + view_size.y + margin
 
 
 func _polyline_visible(points: PackedVector2Array) -> bool:
@@ -3055,20 +3135,177 @@ func _polyline_visible(points: PackedVector2Array) -> bool:
 		bounds = bounds.expand(point)
 	var xform := _screen_transform()
 	var screen_bounds := Rect2(xform * bounds.position, Vector2.ZERO).expand(xform * bounds.end)
-	return screen_bounds.grow(_road_cull_margin()).intersects(Rect2(Vector2.ZERO, size))
+	return screen_bounds.grow(_road_cull_margin()).intersects(view_rect())
 
 
 func _world_to_screen(world_position: Vector2) -> Vector2:
-	return size * 0.5 + pan + (world_position - _world_center()) * _map_scale() * zoom
+	return size * 0.5 + view_pan + (world_position - _world_center()) * _map_scale() * view_zoom
 
 
 func _screen_to_world(screen_position: Vector2) -> Vector2:
-	return _world_center() + (screen_position - size * 0.5 - pan) / (_map_scale() * zoom)
+	return _world_center() + (screen_position - size * 0.5 - view_pan) / (_map_scale() * view_zoom)
 
 
 func _node_radius(population: int) -> float:
-	return clampf(4.0 + sqrt(float(population)) * 0.05, 6.0, 11.0) * clampf(sqrt(zoom), 0.9, 1.35)
+	return clampf(4.0 + sqrt(float(population)) * 0.05, 6.0, 11.0) * clampf(sqrt(view_zoom), 0.9, 1.35)
 
 
 func _access_color(t: float) -> Color:
 	return Color("3bb5c8").lerp(Color("f5a45d"), clampf(t, 0.0, 1.0))
+
+
+func view_rect() -> Rect2:
+	return Rect2(view_origin, view_size)
+
+
+func refresh_static() -> void:
+	if static_layer != null:
+		static_layer.queue_redraw()
+	refresh_dynamic()
+
+
+func refresh_dynamic() -> void:
+	if dynamic_overlay != null:
+		dynamic_overlay.queue_redraw()
+
+
+func _sync_view() -> void:
+	view_pan = pan
+	view_zoom = zoom
+
+
+func _zoom_band() -> int:
+	return maxi(0, floori(log(maxf(zoom, 0.0001)) / log(ZOOM_BAND_RATIO)))
+
+
+func _band_zoom(band: int) -> float:
+	return pow(ZOOM_BAND_RATIO, float(band)) * sqrt(ZOOM_BAND_RATIO)
+
+
+func _static_bake_key(band: int) -> String:
+	if region == null:
+		return "none"
+	var phase_digest := 0
+	var approved_digest := 0
+	for neighborhood in region.neighborhoods:
+		if neighborhood.development_plan != null:
+			phase_digest += neighborhood.development_plan.completed_phase
+		if neighborhood.development_approved:
+			approved_digest += 1
+	var live_bucket := 0
+	if show_traffic_overlay and road_traffic_mode == ROAD_LIVE:
+		live_bucket = int(Time.get_ticks_msec() / 1000.0)
+	var key := "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%s|%s|%s" % [
+		region.generation_seed,
+		region.road_geometry_revision,
+		region.road_links.size(),
+		region.road_nodes.size(),
+		region.neighborhoods.size(),
+		region.jurisdictions.size(),
+		region.development_candidates.size(),
+		region.urban_corridors.size(),
+		region.road_reservations.size(),
+		region.rail_reservations.size(),
+		region.station_sites.size(),
+		phase_digest,
+		approved_digest,
+		band,
+		live_bucket,
+		detail_level,
+		map_mode,
+		base_map_style,
+	]
+	key += "|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%s" % [
+		1 if show_terrain_overlay else 0,
+		1 if show_slope_overlay else 0,
+		1 if show_contours else 0,
+		1 if show_traffic_overlay else 0,
+		1 if show_transit_overlay else 0,
+		road_traffic_mode,
+		selected_jurisdiction_id,
+		selected_road_link_id,
+		selected_candidate_id,
+		recorded_bin,
+		size,
+	]
+	key += "|%d|%d|%d|%d|%s|%d|%d" % [
+		terrain_texture_source.get_instance_id() if terrain_texture_source != null else 0,
+		selected_hour,
+		selected_local_street.x,
+		selected_local_street.y,
+		selected_purpose,
+		road_history_previous_hour,
+		road_history_current_hour,
+	]
+	return key
+
+
+func _static_update() -> void:
+	# Every-frame gate: rebake when the zoom band, the bake signature, or the
+	# live view escapes the margin the baked content covers.
+	if region == null:
+		return
+	var band := _zoom_band()
+	var key := _static_bake_key(band)
+	var ratio: float = zoom / bake_zoom if bake_zoom > 0.0 else 1.0
+	var origin: Vector2 = (Vector2.ONE - Vector2(ratio, ratio)) * size * 0.5 + pan - bake_pan * ratio
+	var needed: Rect2 = Rect2(-origin / ratio, size / ratio)
+	var coverage: Rect2 = Rect2(Vector2(-BAKE_MARGIN_PX, -BAKE_MARGIN_PX), size + Vector2(BAKE_MARGIN_PX, BAKE_MARGIN_PX) * 2.0).grow(-BAKE_MARGIN_PX * 0.25)
+	if key != bake_key or not coverage.encloses(needed):
+		bake_key = key
+		bake_zoom = _band_zoom(band)
+		# pan is a screen-pixel offset for the live zoom; re-anchor it for the
+		# band zoom so the bake shows the same world point at the center.
+		bake_pan = pan * (bake_zoom / maxf(zoom, 0.0001))
+		if static_layer != null:
+			static_layer.queue_redraw()
+	_apply_static_transform()
+
+
+func _apply_static_transform() -> void:
+	if static_layer == null or bake_zoom <= 0.0:
+		return
+	var ratio: float = zoom / bake_zoom
+	var origin: Vector2 = (Vector2.ONE - Vector2(ratio, ratio)) * size * 0.5 + pan - bake_pan * ratio
+	RenderingServer.canvas_item_set_transform(static_layer.get_canvas_item(), Transform2D(Vector2(ratio, 0.0), Vector2(0.0, ratio), origin))
+
+
+func _grade_crossing_marks() -> Array:
+	if crossing_marks_revision == region.road_geometry_revision and not crossing_marks.is_empty():
+		return crossing_marks
+	crossing_marks.clear()
+	for link in region.road_links:
+		for crossing in link.crossings:
+			var over_link = link if crossing["above"] else _link_near_crossing(int(crossing["link_id"]), crossing["point"], link.id)
+			if over_link == null:
+				continue
+			var point: Vector2 = crossing["point"]
+			var direction := Vector2.RIGHT
+			var best := INF
+			for segment in range(1, over_link.points.size()):
+				var nearest: Vector2 = Geometry2D.get_closest_point_to_segment(point, over_link.points[segment - 1], over_link.points[segment])
+				if nearest.distance_squared_to(point) < best:
+					best = nearest.distance_squared_to(point)
+					direction = (over_link.points[segment] - over_link.points[segment - 1]).normalized()
+			crossing_marks.append({"point": point, "direction": direction, "lanes": over_link.lanes_per_direction, "road_class": over_link.road_class})
+	crossing_marks_revision = region.road_geometry_revision
+	return crossing_marks
+
+
+class MapStaticLayer:
+	extends Control
+	var map
+	func _draw() -> void:
+		if map != null:
+			map._draw_static_content(self)
+
+
+class MapOverlay:
+	extends Control
+	var map
+	func _draw() -> void:
+		if map != null:
+			map._draw_dynamic_content(self)
+	func _gui_input(event: InputEvent) -> void:
+		if map != null:
+			map._gui_input(event)

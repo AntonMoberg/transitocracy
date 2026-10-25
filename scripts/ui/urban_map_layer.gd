@@ -55,7 +55,7 @@ func hit_street(map, point: Vector2) -> Vector2i:
 	return best
 
 
-func draw(map) -> void:
+func draw(map, pen) -> void:
 	last_street_count = 0
 	last_building_count = 0
 	last_block_draw_us = 0
@@ -63,7 +63,7 @@ func draw(map) -> void:
 	var meters: float = map._pixels_per_meter()
 	if meters < 0.003:
 		return
-	var viewport := Rect2(Vector2.ZERO, map.size)
+	var viewport: Rect2 = map.view_rect()
 	var first_world: Vector2 = map._screen_to_world(viewport.position)
 	var last_world: Vector2 = map._screen_to_world(viewport.end)
 	var world_viewport := Rect2(first_world.min(last_world), (last_world - first_world).abs())
@@ -85,12 +85,12 @@ func draw(map) -> void:
 		if not screen_bounds.intersects(viewport):
 			continue
 		if map.base_map_style == "Map" and map.map_mode != "Zoning":
-			pending_buildings = _draw_footprint(map, neighborhood, building_deadline_us) or pending_buildings
+			pending_buildings = _draw_footprint(map, pen, neighborhood, building_deadline_us) or pending_buildings
 		if meters < 0.025:
 			continue
 		if meters >= BUILDING_DETAIL_PPM:
 			var block_started: int = Time.get_ticks_usec()
-			pending_buildings = _draw_blocks(map, neighborhood, viewport, meters, building_deadline_us) or pending_buildings
+			pending_buildings = _draw_blocks(map, pen, neighborhood, viewport, meters, building_deadline_us) or pending_buildings
 			last_block_draw_us += Time.get_ticks_usec() - block_started
 		var record: Dictionary = {}
 		if map.live_traffic_state != null:
@@ -111,9 +111,9 @@ func draw(map) -> void:
 				if map.map_mode == "Zoning" or plan.constructing_phase == layout.phases[edge_id]:
 					if curved:
 						for segment in range(1, path.size()):
-							map.draw_dashed_line(path[segment - 1], path[segment], Color("c3ac78", 0.5), 1.0, 5.0, true)
+							pen.draw_dashed_line(path[segment - 1], path[segment], Color("c3ac78", 0.5), 1.0, 5.0, true)
 					else:
-						map.draw_dashed_line(first, last, Color("c3ac78", 0.5), 1.0, 5.0, true)
+						pen.draw_dashed_line(first, last, Color("c3ac78", 0.5), 1.0, 5.0, true)
 				continue
 			if layout.classes[edge_id] != Roads.LOCAL:
 				continue
@@ -149,10 +149,10 @@ func draw(map) -> void:
 		last_street_draw_us += Time.get_ticks_usec() - street_started
 	if not casing_lines.is_empty():
 		var batch_started: int = Time.get_ticks_usec()
-		map.draw_multiline(casing_lines, Color("c4ced0") if map.base_map_style == "Map" else Color("17252c"), casing_width, true)
-		map.draw_multiline_colors(street_lines, street_colors, street_width, true)
+		pen.draw_multiline(casing_lines, Color("c4ced0") if map.base_map_style == "Map" else Color("17252c"), casing_width, true)
+		pen.draw_multiline_colors(street_lines, street_colors, street_width, true)
 		for index in range(0, dashed_streets.size(), 2):
-			map.draw_dashed_line(dashed_streets[index], dashed_streets[index + 1], Color("b5baa1", 0.5), maxf(0.6, meters * 0.12), meters * 3.0, true)
+			pen.draw_dashed_line(dashed_streets[index], dashed_streets[index + 1], Color("b5baa1", 0.5), maxf(0.6, meters * 0.12), meters * 3.0, true)
 		last_street_draw_us += Time.get_ticks_usec() - batch_started
 	if map.selected_candidate_id >= 0 and map.map_mode == "Zoning":
 		var candidate: Dictionary = map.region.development_candidates[map.selected_candidate_id]
@@ -169,15 +169,15 @@ func draw(map) -> void:
 					if curved:
 						var path: PackedVector2Array = _screen_edge_path(map, layout, edge_id)
 						for segment in range(1, path.size()):
-							map.draw_dashed_line(path[segment - 1], path[segment], Color("dbc38a", 0.65), 1.3, 5.0, true)
+							pen.draw_dashed_line(path[segment - 1], path[segment], Color("dbc38a", 0.65), 1.3, 5.0, true)
 					else:
-						map.draw_dashed_line(first, last, Color("dbc38a", 0.65), 1.3, 5.0, true)
+						pen.draw_dashed_line(first, last, Color("dbc38a", 0.65), 1.3, 5.0, true)
 	if pending_buildings and not building_update_scheduled:
 		building_update_scheduled = true
 		map.get_tree().create_timer(BUILDING_UPDATE_INTERVAL_S).timeout.connect(func() -> void:
 			building_update_scheduled = false
 			if is_instance_valid(map):
-				map.queue_redraw()
+				map.refresh_static()
 		, CONNECT_ONE_SHOT)
 
 
@@ -192,7 +192,7 @@ func _screen_edge_path(map, layout, edge_id: int) -> PackedVector2Array:
 	return screen
 
 
-func _draw_footprint(map, neighborhood, deadline: int) -> bool:
+func _draw_footprint(map, pen, neighborhood, deadline: int) -> bool:
 	if neighborhood.built_fraction <= 0.01:
 		return false
 	var layout = neighborhood.street_layout
@@ -226,11 +226,11 @@ func _draw_footprint(map, neighborhood, deadline: int) -> bool:
 	if footprint_cache[key] != null:
 		var scale: float = map._map_scale() * map.zoom
 		var transform := Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), map._world_to_screen(layout.bounds.position))
-		map.draw_mesh(footprint_cache[key], null, transform)
+		pen.draw_mesh(footprint_cache[key], null, transform)
 	return false
 
 
-func _draw_blocks(map, neighborhood, viewport: Rect2, meters: float, building_deadline_us: int) -> bool:
+func _draw_blocks(map, pen, neighborhood, viewport: Rect2, meters: float, building_deadline_us: int) -> bool:
 	var layout = neighborhood.street_layout
 	var plan = neighborhood.development_plan
 	var pending := false
@@ -272,8 +272,8 @@ func _draw_blocks(map, neighborhood, viewport: Rect2, meters: float, building_de
 		if cached["mesh"] == null:
 			continue
 		if meters >= 0.3:
-			map.draw_mesh(cached["mesh"], null, shadow_transform, Color("14252a", 0.7))
-		map.draw_mesh(cached["mesh"], null, transform)
+			pen.draw_mesh(cached["mesh"], null, shadow_transform, Color("14252a", 0.7))
+		pen.draw_mesh(cached["mesh"], null, transform)
 		last_building_count += int(cached["count"])
 	return pending
 

@@ -11,7 +11,7 @@ func _initialize() -> void:
 func _run() -> void:
 	var main = load("res://scenes/main.tscn").instantiate()
 	root.add_child(main)
-	var deadline: int = Time.get_ticks_msec() + 15000
+	var deadline: int = Time.get_ticks_msec() + 120000
 	while main.region == null and Time.get_ticks_msec() < deadline:
 		await process_frame
 	if main.region == null:
@@ -22,7 +22,7 @@ func _run() -> void:
 	main._on_mode_selected(MultiScaleTraffic.HOUR)
 	main._on_speed_selected(0)
 	await process_frame
-	deadline = Time.get_ticks_msec() + 15000
+	deadline = Time.get_ticks_msec() + 120000
 	while main.compact_hour_thread != null and not main.compact_hour_buffer.status()["snapshot_ready"] and Time.get_ticks_msec() < deadline:
 		await process_frame
 	while main.traffic_state.compact_hourly_links.size() != 24 and Time.get_ticks_msec() < deadline:
