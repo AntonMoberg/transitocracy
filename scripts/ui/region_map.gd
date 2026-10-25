@@ -109,6 +109,11 @@ var view_size: Vector2 = Vector2.ZERO
 var bake_pan: Vector2 = Vector2.ZERO
 var bake_zoom: float = 1.0
 var bake_key: String = ""
+var pending_bake_key: String = ""
+var pending_bake_pan: Vector2 = Vector2.ZERO
+var pending_bake_zoom: float = 1.0
+var static_bake_queued := false
+var static_bake_count := 0
 var static_layer: Control
 var dynamic_overlay: Control
 var last_overlay_us: int = 0
@@ -853,6 +858,15 @@ func _draw_static_content(pen) -> void:
 	if region == null:
 		pen.draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
 		return
+	static_bake_queued = false
+	# Commit the pending bake values; the transform in _process uses these
+	# so it always matches the content actually on this layer.
+	if pending_bake_key != "":
+		bake_key = pending_bake_key
+		bake_pan = pending_bake_pan
+		bake_zoom = pending_bake_zoom
+		pending_bake_key = ""
+	static_bake_count += 1
 	var draw_started: int = Time.get_ticks_usec()
 	view_pan = bake_pan
 	view_zoom = bake_zoom
@@ -3179,7 +3193,9 @@ func _zoom_band() -> int:
 
 
 func _band_zoom(band: int) -> float:
-	return pow(ZOOM_BAND_RATIO, float(band)) * sqrt(ZOOM_BAND_RATIO)
+	# Baking at the band base keeps ratio = zoom / bake_zoom >= 1.0, so the
+	# live viewport always fits inside the baked content between rebakes.
+	return pow(ZOOM_BAND_RATIO, float(band))
 
 
 func _static_bake_key(band: int) -> String:
@@ -3241,8 +3257,11 @@ func _static_bake_key(band: int) -> String:
 
 
 func _static_update() -> void:
-	# Every-frame gate: rebake when the zoom band, the bake signature, or the
-	# live view escapes the margin the baked content covers.
+	# Every-frame gate: schedule a rebake when the zoom band, the bake
+	# signature, or the live view escapes the margin the baked content
+	# covers. Pending values only become the committed bake state once the
+	# static layer actually redraws, so the transform never runs ahead of
+	# the drawn content.
 	if region == null:
 		return
 	var band := _zoom_band()
@@ -3250,14 +3269,15 @@ func _static_update() -> void:
 	var ratio: float = zoom / bake_zoom if bake_zoom > 0.0 else 1.0
 	var origin: Vector2 = (Vector2.ONE - Vector2(ratio, ratio)) * size * 0.5 + pan - bake_pan * ratio
 	var needed: Rect2 = Rect2(-origin / ratio, size / ratio)
-	var coverage: Rect2 = Rect2(Vector2(-BAKE_MARGIN_PX, -BAKE_MARGIN_PX), size + Vector2(BAKE_MARGIN_PX, BAKE_MARGIN_PX) * 2.0).grow(-BAKE_MARGIN_PX * 0.25)
+	var coverage: Rect2 = Rect2(Vector2(-BAKE_MARGIN_PX, -BAKE_MARGIN_PX), size + Vector2(BAKE_MARGIN_PX, BAKE_MARGIN_PX) * 2.0).grow(-32.0)
 	if key != bake_key or not coverage.encloses(needed):
-		bake_key = key
-		bake_zoom = _band_zoom(band)
+		pending_bake_key = key
+		pending_bake_zoom = _band_zoom(band)
 		# pan is a screen-pixel offset for the live zoom; re-anchor it for the
 		# band zoom so the bake shows the same world point at the center.
-		bake_pan = pan * (bake_zoom / maxf(zoom, 0.0001))
-		if static_layer != null:
+		pending_bake_pan = pan * (pending_bake_zoom / maxf(zoom, 0.0001))
+		if static_layer != null and not static_bake_queued:
+			static_bake_queued = true
 			static_layer.queue_redraw()
 	_apply_static_transform()
 
