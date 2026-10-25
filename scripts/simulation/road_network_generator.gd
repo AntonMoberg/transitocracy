@@ -243,6 +243,191 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 		if link.road_class == Roads.COLLECTOR and (city_gate_nodes.has(link.from_node_id) or city_gate_nodes.has(link.to_node_id)):
 			if link.length_km < 18.0:
 				link.road_class = Roads.ARTERIAL
+	_de_braid(region)
+
+
+const BRAID_SAMPLE_KM := 2.0
+const BRAID_NEAR_KM := 1.0
+const TRUNK_OVERLAP_REROUTE_KM := 12.0
+const PAIR_OVERLAP_REROUTE_KM := 10.0
+const REROUTE_STRENGTH := 4.0
+const REROUTE_MAX_STRETCH := 1.5
+
+
+# Routes share valleys by construction; send the worst offenders looking for
+# their own path once the whole web exists. Keeps the original geometry when
+# no reasonable alternative route exists.
+static func _de_braid(region) -> void:
+	var started: int = Time.get_ticks_msec()
+	var trunk_jobs: Array[Dictionary] = []
+	var trunk_polylines: Array[PackedVector2Array] = []
+	for link in region.road_links:
+		if link.road_class == Roads.HIGHWAY:
+			trunk_polylines.append(link.points)
+	if not trunk_polylines.is_empty():
+		var trunk_cells := _sample_cells(trunk_polylines)
+		for link in region.road_links:
+			if link.road_class != Roads.COLLECTOR or link.managed_neighborhood_id >= 0:
+				continue
+			if _overlap_km(_link_samples(link), trunk_cells) >= TRUNK_OVERLAP_REROUTE_KM:
+				trunk_jobs.append({"link": link, "polylines": trunk_polylines, "radius": AVOID_RADIUS_KM})
+	var pair_jobs: Array[Dictionary] = []
+	var by_id := {}
+	for link in region.road_links:
+		if link.road_class == Roads.COLLECTOR and link.managed_neighborhood_id < 0:
+			by_id[link.id] = link
+	if by_id.size() >= 2:
+		var pair_overlap := _pair_overlaps(by_id)
+		for pair_key in pair_overlap:
+			if float(pair_overlap[pair_key]) < PAIR_OVERLAP_REROUTE_KM:
+				continue
+			var first = by_id[pair_key.x]
+			var second = by_id[pair_key.y]
+			var victim = first if first.length_km <= second.length_km else second
+			var kept = second if victim == first else first
+			pair_jobs.append({"link": victim, "polylines": [kept.points], "radius": 2.5})
+	var stats := {"trunk": trunk_jobs.size(), "pairs": pair_jobs.size()}
+	var rerouted := _plan_and_apply_reroutes(region, trunk_jobs)
+	rerouted += _plan_and_apply_reroutes(region, pair_jobs)
+	stats["rerouted"] = rerouted
+	stats["ms"] = Time.get_ticks_msec() - started
+	print("De-braid: ", stats)
+
+
+static func _link_samples(link) -> Array[Dictionary]:
+	var samples: Array[Dictionary] = []
+	for index in range(1, link.points.size()):
+		var segment: float = link.points[index - 1].distance_to(link.points[index])
+		var steps: int = maxi(1, roundi(segment / BRAID_SAMPLE_KM))
+		for step in range(steps):
+			samples.append({"point": link.points[index - 1].lerp(link.points[index], float(step) / float(steps)), "spacing": segment / float(steps)})
+	return samples
+
+
+static func _sample_cells(polylines: Array[PackedVector2Array]) -> Dictionary:
+	var cells := {}
+	for points in polylines:
+		for index in range(1, points.size()):
+			var segment: float = points[index - 1].distance_to(points[index])
+			var steps: int = maxi(1, roundi(segment / BRAID_SAMPLE_KM))
+			for step in range(steps + 1):
+				var sample: Vector2 = points[index - 1].lerp(points[index], float(step) / float(steps))
+				var key := Vector2i(floori(sample.x / BRAID_SAMPLE_KM), floori(sample.y / BRAID_SAMPLE_KM))
+				if not cells.has(key):
+					cells[key] = PackedVector2Array()
+				cells[key].append(sample)
+	return cells
+
+
+static func _overlap_km(samples: Array[Dictionary], cells: Dictionary) -> float:
+	var total := 0.0
+	for sample in samples:
+		var point: Vector2 = sample["point"]
+		var base := Vector2i(floori(point.x / BRAID_SAMPLE_KM), floori(point.y / BRAID_SAMPLE_KM))
+		var near := false
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				if _near_any(point, cells.get(Vector2i(base.x + dx, base.y + dy), PackedVector2Array())):
+					near = true
+					break
+			if near:
+				break
+		if near:
+			total += float(sample["spacing"])
+	return total
+
+
+static func _near_any(point: Vector2, others: PackedVector2Array) -> bool:
+	var limit: float = BRAID_NEAR_KM * BRAID_NEAR_KM
+	for other in others:
+		if point.distance_squared_to(other) < limit:
+			return true
+	return false
+
+
+# Shared-overlap kilometres for every unordered pair of countryside links.
+static func _pair_overlaps(by_id: Dictionary) -> Dictionary:
+	var cells := {}
+	var samples_by_id := {}
+	for link_id in by_id:
+		var samples: Array[Dictionary] = _link_samples(by_id[link_id])
+		samples_by_id[link_id] = samples
+		for sample in samples:
+			var key := Vector2i(floori(sample["point"].x / BRAID_SAMPLE_KM), floori(sample["point"].y / BRAID_SAMPLE_KM))
+			if not cells.has(key):
+				cells[key] = []
+			cells[key].append(link_id)
+			cells[key].append(sample["point"])
+	var pair_overlap := {}
+	for link_id in by_id:
+		for sample in samples_by_id[link_id]:
+			var point: Vector2 = sample["point"]
+			var base := Vector2i(floori(point.x / BRAID_SAMPLE_KM), floori(point.y / BRAID_SAMPLE_KM))
+			var near := {}
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					var entries: Array = cells.get(Vector2i(base.x + dx, base.y + dy), [])
+					for entry_index in range(0, entries.size(), 2):
+						var other_id: int = entries[entry_index]
+						if other_id == link_id or near.has(other_id):
+							continue
+						if point.distance_to(entries[entry_index + 1]) < BRAID_NEAR_KM:
+							near[other_id] = true
+			for other_id in near:
+				if other_id < link_id:
+					continue
+				var pair_key := Vector2i(link_id, other_id)
+				pair_overlap[pair_key] = float(pair_overlap.get(pair_key, 0.0)) + float(sample["spacing"])
+	return pair_overlap
+
+
+# Re-routes are planned in parallel (read-only region access) and applied on
+# the main thread; a stretch beyond 1.5x the original keeps the original.
+static func _plan_and_apply_reroutes(region, jobs: Array[Dictionary]) -> int:
+	if jobs.is_empty():
+		return 0
+	var alignments: Array = []
+	alignments.resize(jobs.size())
+	var plan_job := func(index: int) -> void:
+		var job: Dictionary = jobs[index]
+		var local = Planner.new(region)
+		var grid: Dictionary = _stamp_avoidance(region, job["polylines"], REROUTE_STRENGTH, job["radius"])
+		if not grid.is_empty():
+			local.set_avoidance(grid["costs"], grid["origin"], grid["step"], grid["size"])
+		alignments[index] = local.route(region.road_nodes[job["link"].from_node_id].position_km, region.road_nodes[job["link"].to_node_id].position_km, job["link"].road_class, Vector2.ZERO, Vector2.ZERO, false)
+	if jobs.size() >= 8 and OS.get_processor_count() > 1:
+		var workers: int = mini(8, OS.get_processor_count() - 1)
+		var task_id: int = WorkerThreadPool.add_group_task(plan_job, jobs.size(), workers, false, "De-braid routes")
+		WorkerThreadPool.wait_for_group_task_completion(task_id)
+	else:
+		for index in range(jobs.size()):
+			plan_job.call(index)
+	var applied := 0
+	for index in range(jobs.size()):
+		var job: Dictionary = jobs[index]
+		var link = job["link"]
+		var alignment: Dictionary = alignments[index]
+		if alignment.is_empty() or float(alignment["length_km"]) > link.length_km * REROUTE_MAX_STRETCH:
+			if alignment.is_empty():
+				print("  de-braid keep %d: no alternative route" % link.id)
+			else:
+				print("  de-braid keep %d: %.1f km alternative too long" % [link.id, float(alignment["length_km"])])
+			continue
+		link.points = alignment["points"]
+		link.elevation_profile_m = alignment["elevations_m"]
+		link.terrain_spans.assign(alignment["terrain_spans"])
+		link.junctions.clear()
+		link.recalculate_length()
+		link.owner_jurisdiction_id = region.road_owner_for_points(link.points, link.road_class)
+		link.crossings = RoadPlanner._crossings_for_route(region, link.points, link.road_class, {})
+		for crossing in link.crossings:
+			crossing["above"] = link.road_class == Roads.HIGHWAY
+		applied += 1
+		# Surface attachments reference the replaced geometry; cross the
+		# corridor again so junctions re-attach where the new path meets.
+		RoadPlanner._connect_surface_crossings(region, link.corridor_id)
+	return applied
+
 
 # Routes never depend on installed roads, so every proximity candidate can be
 # searched in parallel before the sequential union-find passes pick installs.
