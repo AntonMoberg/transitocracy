@@ -141,7 +141,7 @@ func _run() -> void:
 			map.queue_redraw()
 			await process_frame
 			await process_frame
-			print("Map zoom %.0f warm draw: %.1f ms (roads %.1f ms)" % [magnification, float(map.last_draw_us) / 1000.0, float(map.last_draw_stages_us["roads"] - map.last_draw_stages_us["cities"]) / 1000.0])
+			print("Map zoom %.0f warm draw: %.1f ms (roads %.1f ms)" % [magnification, float(map.last_draw_us) / 1000.0, float(map.last_draw_stages_us.get("roads", 0)) / 1000.0])
 		if refresh_candidates:
 			map.set_map_mode("Zoning")
 			map.queue_redraw()

@@ -142,3 +142,39 @@ static func contour_color(elevation: float, gradient: Vector2, step_km: float, i
 	var strength: float = clampf(1.0 - distance_m / half_width_m, 0.0, 1.0)
 	var major: bool = posmod(int(roundf(nearest_line / interval_m)), 5) == 0
 	return Color("d4ddba", strength * (0.36 if major else 0.22))
+
+
+static func render_base(terrain, land: PackedVector2Array) -> Dictionary:
+	var image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
+	var terrain_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
+	var satellite_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
+	var slope_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
+	var contour_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
+	for y in range(terrain.height):
+		for x in range(terrain.width):
+			var point: Vector2 = terrain.bounds.position + Vector2(x, y) * terrain.GRID_KM
+			if not Geometry2D.is_point_in_polygon(point, land):
+				image.set_pixel(x, y, Color.TRANSPARENT)
+				terrain_image.set_pixel(x, y, Color.TRANSPARENT)
+				satellite_image.set_pixel(x, y, Color.TRANSPARENT)
+				slope_image.set_pixel(x, y, Color.TRANSPARENT)
+				contour_image.set_pixel(x, y, Color.TRANSPARENT)
+				continue
+			var elevation: float = terrain.elevations[y * terrain.width + x]
+			var west: float = terrain.elevations[y * terrain.width + maxi(0, x - 1)]
+			var east: float = terrain.elevations[y * terrain.width + mini(terrain.width - 1, x + 1)]
+			var north: float = terrain.elevations[maxi(0, y - 1) * terrain.width + x]
+			var south: float = terrain.elevations[mini(terrain.height - 1, y + 1) * terrain.width + x]
+			var gradient: Vector2 = Vector2(east - west, south - north) / (terrain.GRID_KM * 2000.0)
+			var cover: Vector3 = terrain.land_cover_at(point, elevation, gradient)
+			image.set_pixel(x, y, land_color(elevation, gradient, cover))
+			terrain_image.set_pixel(x, y, terrain_color(elevation, gradient, cover))
+			satellite_image.set_pixel(x, y, satellite_color(elevation, gradient, cover, terrain.ground_detail_at(point), terrain.ground_detail_at(point * 8.0)))
+			slope_image.set_pixel(x, y, slope_color(gradient))
+			contour_image.set_pixel(x, y, contour_color(elevation, gradient, terrain.GRID_KM, 500.0))
+	image.generate_mipmaps()
+	terrain_image.generate_mipmaps()
+	satellite_image.generate_mipmaps()
+	slope_image.generate_mipmaps()
+	contour_image.generate_mipmaps()
+	return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}

@@ -34,7 +34,7 @@ The simulation uses aggregate directional traffic and queues, city and neighborh
 
 - `urban_street_graph.gd` owns city street addresses, deterministic block clusters, designs, and graph edge status. `graph_growth_planner.gd` ranks adjacent districts using built access, city policies, and planning guides. `development_planner.gd` registers and approves proposals; `development_budget.gd` opens paid street phases.
 - `street_network.gd` installs collectors into the physical road graph and reuses existing junctions. `street_layout_ops.gd` supplies shared street geometry; `parcel_geometry.gd` creates building parcels. `road_land.gd` handles road clearance, acquisition, demolition, and local redevelopment.
-- `region_snapshot.gd` detaches mutable simulation state for workers. `urban_map_layer.gd` draws visible local roads and cached building meshes. `region_map.gd` draws the regional map, suggestions, planning guides, and construction previews.
+- `region_snapshot.gd` detaches mutable simulation state for workers. `map_chunk_renderer.gd` manages retained GPU chunks and traffic colors; `map_geometry.gd` prepares indexed, simplified geometry on workers. `map_terrain_layer.gd` retains terrain tiles and coarse fallback coverage. `region_map.gd` handles navigation, picking, labels, suggestions, and construction previews; `urban_map_layer.gd` retains local street picking and preview helpers.
 - `terrain_generator.gd` derives seeded elevation, drainage, lakes, and rivers; `terrain_data.gd` provides shared read-only terrain queries. `road_terrain.gd` classifies and prices road structures.
 
 ## Verification
@@ -48,3 +48,34 @@ Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\godot\transitocr
 Key checks: `graph_growth_smoke.gd` covers stable alternative designs, adjacent approvals, and shared physical collector junctions; `irregular_district_seed_smoke.gd` checks varied, nonoverlapping districts on reported seeds; `district_shape_smoke.gd` checks connected jogs, appendages, and straight streets beside curved arterials; `diagonal_grid_smoke.gd` checks straight grid continuation, rotated grids, split arterial corridors, and local crossings; `growth_policy_smoke.gd` checks manual approval and corridor priority; `district_street_spacing_smoke.gd` checks arterial clearance and road coverage; `road_redevelopment_smoke.gd` checks acquisition and replacement parcels; `urban_development_smoke.gd` checks phased funding; `zoning_ui_smoke.gd` checks map review and approval; `large_generation_smoke.gd` checks the 256 city simulation; `region_snapshot_smoke.gd` checks detached worker state and district query coverage; `compact_region_od_smoke.gd` compares sparse regional trips with the full city-pair sum; `accessibility_cache_smoke.gd` checks reused city routes against full recalculation.
 
 `terrain_smoke.gd` checks that terrain is shared across city detail levels, includes distinct slope bands and water, excludes building footprints from lakes, and carries bridge and tunnel impacts through road construction.
+
+## Map rendering
+
+The map uses world-space GPU meshes organized into a quadtree with nominal 512-pixel tiles. Camera motion transforms existing meshes immediately; two shared background workers prepare visible terrain and geometry. Roads simplify at distant zooms while retaining junction vertices. Solid colored strokes remain readable until physical lanes and arrows are large enough to resolve; local streets, parcels, and building shadows appear progressively. Visible tiles at the destination zoom are requested immediately, with roads and city blocks ahead of offscreen prefetch. A loaded ancestor stays visible until replacement coverage is ready; intermediate zoom levels are not prerequisites. Small geometry jobs are batched, and terrain can occupy at most one of the two workers. New revisions replace a chunk only after all its mesh parts have uploaded; stale worker results are discarded.
+
+Main-thread publication has a soft 1 ms budget shared by geometry and terrain. Meshes split at 12,288 vertices so a single large feature cannot monopolize an upload. The geometry cache targets 192 MiB and evicts unused chunks incrementally; terrain retains up to 160 tiles. These are cache limits, not a bound on total process memory: snapshots, in-flight results, terrain source data, and driver allocations also consume memory. Driver upload calls are indivisible, so the time budget is a scheduling target rather than a hard real-time guarantee.
+
+Traffic uses a compact directional color texture updated at most 15 times per second, interpolated in the road shader. Changing traffic, selection, or base style does not regenerate road geometry. Feature fingerprints restrict geometry invalidation to affected layers and tiles. Labels, planning previews, and small interactive overlays still use Godot's canvas drawing API.
+
+This follows the worker layout / retained GPU buffer architecture documented by [Mapbox GL JS](https://github.com/mapbox/mapbox-gl-js/blob/main/ARCHITECTURE.md). It applies the techniques of modern vector maps inside Godot; it does not embed a map service or depend on proprietary Google/Apple internals.
+
+Run geometry regression checks headlessly, and full-frame navigation checks **with a graphical renderer**:
+
+```text
+Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/map_chunk_geometry_smoke.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --path E:\Godot\transitocracy --script res://tests/map_gpu_smoke.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --path E:\Godot\transitocracy --script res://tests/map_render_frames.gd -- --cities=768 --seed=7601356 --enforce-frame-budget
+```
+
+The frame test exercises cold and cached pan/zoom across six detail levels around an occupied neighborhood, checks GPU uploads, unchanged snapshot reuse, traffic updates without geometry rebuilds, and pixel coverage during refinement. It reports p50/p95/p99/max wall-clock frame time including draw submission, plus renderer CPU time and the slowest frame's stages. `--enforce-frame-budget` checks p95 ≤16.7 ms, p99 ≤20 ms, and max ≤33.4 ms; leave it off for measurements on slower or busy machines. GPU readback checks run outside the measured section. The benchmark covers map navigation after initial loading, not world generation or simulation throughput. `large_ui_smoke.gd` separately exercises day-mode handoff in the full UI.
+
+Measured on Windows, Godot 4.7.2 Mono, D3D12 Forward+, RTX 3070, 2560×1440 viewport, seed 7601356 (360 navigation frames across cold and cached passes):
+
+| Cities | p50 | p95 | p99 | Worst frame | Geometry cache |
+| --- | --- | --- | --- | --- | --- |
+| 32 (initial chunk renderer) | 4.99 ms | 9.67 ms | 12.10 ms | 13.51 ms | 11.2 MiB |
+| 768 (direct LOD loading and revised road styling) | 4.27 ms | 6.39 ms | 9.59 ms | 15.35 ms | 11.0 MiB |
+
+Both runs passed the frame budgets and coverage/invalidation checks. The 256-city full-UI headless smoke test measured a 13.5 ms longest day-mode frame. These are repeatable test scenarios on this machine, not guarantees for every GPU, seed, overlay, or simulation workload. `map_gpu_smoke.gd` separately verifies actual pixels for lane extrusion, selected-road color and traffic texture updates without uploading geometry.
+
+`map_refinement_smoke.gd` measures the delay from zoom input to published visible roads, city blocks, and buildings, and saves screenshots at 45, 80, 300, and 1000 pixels/km. On the same RTX 3070 with 768 cities and seed 1729, roads arrived in 25–67 ms, blocks in 35–96 ms, and buildings in 233–309 ms. Thresholds are 350 ms for roads, 500 ms for blocks, and 1 s for buildings. Run it with the graphical renderer, as with the frame benchmark. This complements the frame-time checks: a responsive UI with missing detail does not pass as a responsive map.

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "nsys": {
+      "type": "local",
+      "command": ["venv/bin/python", "dev/scripts/agentic/nsys_mcp.py"],
+      "enabled": true
+    }
+  },
+  "provider": {
+    "inceptron": {
+      "models": {
+        "zai-org/GLM-5.2": {
+          "limit": {
+            "context": 256000,
+            "output": 256000
+          }
+        },
+        "zai-org/GLM-5.3": {
+          "limit": {
+            "context": 256000,
+            "output": 256000
+          },
+          "thinking": { "type": "enabled" },
+          "reasoning": true,
+          "reasoning_options": [
+            { "type": "effort", "values": ["low", "high", "max"] }
+          ],
+          "interleaved": "reasoning_content"
+        }
+      }
+    }
+  }
+}

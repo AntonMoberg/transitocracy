@@ -13,6 +13,8 @@ signal jurisdiction_selected(jurisdiction_id: int)
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
+const ChunkRenderer = preload("res://scripts/ui/map_chunk_renderer.gd")
+const TerrainLayer = preload("res://scripts/ui/map_terrain_layer.gd")
 const UrbanMapLayer = preload("res://scripts/ui/urban_map_layer.gd")
 const TerrainDetailTile = preload("res://scripts/ui/terrain_detail_tile.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
@@ -42,8 +44,8 @@ const CITY_COLORS = [
 	Color("70a4ba"),
 ]
 const TERRAIN_DETAIL_STEPS = [2.0, 1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625, 0.001953125, 0.0009765625, 0.00048828125]
-const TERRAIN_DETAIL_CACHE_LIMIT = 768
-const TERRAIN_DETAIL_MAX_WORKERS = 4
+const TERRAIN_DETAIL_CACHE_LIMIT = 160
+const TERRAIN_DETAIL_MAX_WORKERS = 2
 
 var region
 var urban_layer = UrbanMapLayer.new()
@@ -114,6 +116,11 @@ var pending_bake_pan: Vector2 = Vector2.ZERO
 var pending_bake_zoom: float = 1.0
 var static_bake_queued := false
 var static_bake_count := 0
+var chunk_renderer
+var terrain_layer
+var terrain_view_key := ""
+var overlays_dirty := true
+var last_overlay_refresh_msec := 0
 var static_layer: Control
 var dynamic_overlay: Control
 var last_overlay_us: int = 0
@@ -123,6 +130,7 @@ var pointer_down: bool = false
 var pointer_dragged: bool = false
 var pointer_double_clicked: bool = false
 var pointer_start: Vector2 = Vector2.ZERO
+var last_frame_process_us: int = 0
 var last_draw_us: int = 0
 var last_draw_stages_us: Dictionary = {}
 var spatial_region
@@ -168,6 +176,8 @@ var terrain_detail_requested: Dictionary = {}
 var terrain_detail_visible: Dictionary = {}
 var terrain_detail_level := -1
 var terrain_detail_published_level := -1
+var terrain_uploads: Array[Dictionary] = []
+var terrain_base_pending := false
 var terrain_detail_workers: Array[Dictionary] = []
 var terrain_detail_active: Dictionary = {}
 
@@ -182,23 +192,35 @@ func _ready() -> void:
 	view_zoom = zoom
 	view_origin = Vector2.ZERO
 	view_size = size
-	# Static geometry bakes onto its own canvas item so it can be moved with
-	# a transform during pan/zoom; per-frame state draws above it. Both sit
-	# below the navigation and layer controls.
+	# Terrain and world geometry retain GPU resources across camera changes.
+	# Planning overlays and interactive labels sit below navigation controls.
+	terrain_layer = TerrainLayer.new()
+	terrain_layer.map = self
+	terrain_layer.z_index = 1
+	add_child(terrain_layer)
+	move_child(terrain_layer, 0)
+	chunk_renderer = ChunkRenderer.new()
+	chunk_renderer.map = self
+	chunk_renderer.z_index = 30
+	add_child(chunk_renderer)
+	move_child(chunk_renderer, 1)
 	static_layer = MapStaticLayer.new()
 	static_layer.map = self
+	static_layer.z_index = 100
 	static_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	static_layer.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	add_child(static_layer)
-	move_child(static_layer, 0)
+	move_child(static_layer, 2)
 	dynamic_overlay = MapOverlay.new()
 	dynamic_overlay.map = self
+	dynamic_overlay.z_index = 101
 	dynamic_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	dynamic_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(dynamic_overlay)
-	move_child(dynamic_overlay, 1)
+	move_child(dynamic_overlay, 3)
 	var navigation := HBoxContainer.new()
 	navigation.name = "MapNavigation"
+	navigation.z_index = 200
 	navigation.position = Vector2(12, 10)
 	navigation.add_theme_constant_override("separation", 4)
 	add_child(navigation)
@@ -227,6 +249,7 @@ func _ready() -> void:
 	navigation.add_child(base_map_selector)
 	var layers := HBoxContainer.new()
 	layers.name = "MapLayers"
+	layers.z_index = 200
 	layers.position = Vector2(12, 44)
 	layers.add_theme_constant_override("separation", 4)
 	add_child(layers)
@@ -294,7 +317,9 @@ func set_region(new_region) -> void:
 		terrain_detail_level = -1
 		terrain_detail_published_level = -1
 		terrain_texture_source = new_region.terrain if new_region != null else null
-		terrain_texture = _make_terrain_texture(new_region) if new_region != null else null
+		terrain_texture = null
+		terrain_base_pending = new_region != null
+		terrain_uploads.clear()
 		if new_region == null:
 			terrain_relief_texture = null
 			satellite_texture = null
@@ -330,46 +355,81 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
-	view_pan = pan
-	view_zoom = zoom
+	var process_started := Time.get_ticks_usec()
+	_sync_view()
 	view_origin = Vector2.ZERO
 	view_size = size
-	_static_update()
-	view_pan = pan
-	view_zoom = zoom
-	view_origin = Vector2.ZERO
-	view_size = size
-	_static_update()
+	if region != null:
+		chunk_renderer.tick()
+		urban_layer.last_building_count = chunk_renderer.visible_buildings
+		urban_layer.last_street_count = chunk_renderer.visible_streets
+		last_drawn_neighborhood_borders = chunk_renderer.visible_districts
+		_apply_static_transform()
+		var camera_key := "%s:%s:%s:%s:%s" % [pan, zoom, size, base_map_style, show_terrain_overlay]
+		if camera_key != terrain_view_key:
+			terrain_view_key = camera_key
+			_static_update()
+			_draw_terrain_detail(null)
+			refresh_dynamic()
+		terrain_layer.sync()
+		if overlays_dirty or Time.get_ticks_msec() - last_overlay_refresh_msec >= 67 and map_mode == "Trips":
+			overlays_dirty = true
+			_static_update()
+			overlays_dirty = false
+			last_overlay_refresh_msec = Time.get_ticks_msec()
 	var completed := false
-	var publish_deadline: int = Time.get_ticks_usec() + 4000
+	var publish_deadline: int = Time.get_ticks_usec() + maxi(0, 1000 - chunk_renderer.last_publish_us)
 	for worker_index in range(terrain_detail_workers.size() - 1, -1, -1):
-		if completed and Time.get_ticks_usec() >= publish_deadline:
-			break
 		var worker: Dictionary = terrain_detail_workers[worker_index]
-		var thread: Thread = worker["thread"]
+		var thread: Thread = worker.thread
 		if thread.is_alive():
 			continue
 		var result: Dictionary = thread.wait_to_finish()
 		terrain_detail_workers.remove_at(worker_index)
-		if worker["source"] != terrain_texture_source:
+		if worker.source != terrain_texture_source:
 			continue
-		var key: Vector3i = worker["key"]
-		terrain_detail_active.erase(key)
+		var key: Vector3i = worker.key
 		if result.is_empty():
+			terrain_detail_active.erase(key)
 			continue
-		terrain_detail_tiles[key] = {
-			"color": ImageTexture.create_from_image(result["color"]),
-			"terrain": ImageTexture.create_from_image(result["terrain"]),
-			"satellite": ImageTexture.create_from_image(result["satellite"]),
-			"slope": ImageTexture.create_from_image(result["slope"]),
-			"contours": ImageTexture.create_from_image(result["contours"]),
-			"map_mesh": _cartographic_mesh(result),
-		}
+		terrain_uploads.append({"key": key, "images": result, "textures": {}, "part": 0})
+	while not terrain_uploads.is_empty() and Time.get_ticks_usec() < publish_deadline:
+		var upload: Dictionary = terrain_uploads[0]
+		var names := ["color", "terrain", "satellite", "slope", "contours", "map_mesh"]
+		var name: String = names[upload.part]
+		if name == "map_mesh":
+			upload.textures[name] = _cartographic_mesh(upload.images)
+		else:
+			upload.textures[name] = ImageTexture.create_from_image(upload.images[name])
+			upload.images.erase(name)
+		upload.part += 1
+		if upload.part < names.size():
+			continue
+		var key: Vector3i = upload.key
+		if key.x < 0:
+			terrain_texture = upload.textures.color
+			terrain_relief_texture = upload.textures.terrain
+			satellite_texture = upload.textures.satellite
+			terrain_slope_texture = upload.textures.slope
+			terrain_contour_texture = upload.textures.contours
+			terrain_layer.refresh_base()
+		else:
+			terrain_detail_tiles[key] = upload.textures
+		terrain_detail_active.erase(key)
+		terrain_uploads.pop_front()
 		completed = true
 	if completed:
 		_trim_terrain_detail_cache()
-		refresh_static()
-	var worker_limit: int = mini(TERRAIN_DETAIL_MAX_WORKERS, maxi(1, OS.get_processor_count() - 1))
+		_draw_terrain_detail(null)
+		terrain_layer.sync()
+	# Reserve capacity for interactive geometry; terrain refinement may not
+	# occupy both workers while the camera is requesting roads and buildings.
+	var worker_limit: int = maxi(0, mini(1, mini(TERRAIN_DETAIL_MAX_WORKERS, OS.get_processor_count() - 1) - chunk_renderer.workers.size()))
+	if terrain_base_pending and terrain_detail_workers.size() < worker_limit:
+		var base_thread := Thread.new()
+		if base_thread.start(Callable(TerrainDetailTile, "render_base").bind(region.terrain, region.jurisdictions[0].polygon_km), Thread.PRIORITY_LOW) == OK:
+			terrain_detail_workers.append({"thread": base_thread, "source": region.terrain, "key": Vector3i(-1, 0, 0)})
+			terrain_base_pending = false
 	while terrain_detail_workers.size() < worker_limit and not terrain_detail_queue.is_empty():
 		var key: Vector3i = terrain_detail_queue.pop_front()
 		terrain_detail_requested.erase(key)
@@ -388,6 +448,8 @@ func _process(_delta: float) -> void:
 			continue
 		terrain_detail_active.erase(key)
 		push_warning("Could not start terrain detail worker: %s" % error_string(error))
+
+	last_frame_process_us = Time.get_ticks_usec() - process_started
 
 
 func _cartographic_mesh(result: Dictionary) -> ArrayMesh:
@@ -431,7 +493,9 @@ func set_traffic_profile(new_profile) -> void:
 	if new_profile == null:
 		road_history_previous_hour = -1
 		road_history_current_hour = -1
-	refresh_static()
+	if chunk_renderer != null:
+		chunk_renderer.traffic_revision += 1
+	refresh_dynamic()
 
 
 func set_map_mode(mode: String) -> void:
@@ -441,6 +505,7 @@ func set_map_mode(mode: String) -> void:
 
 func set_base_map_style(style: String) -> void:
 	base_map_style = style
+	queue_redraw()
 	if base_map_selector != null:
 		base_map_selector.select(1 if style == "Satellite" else 0)
 	if terrain_toggle_button != null:
@@ -514,7 +579,7 @@ func set_time(hour: int, fraction: float, request_redraw: bool = true) -> void:
 	selected_hour = next_hour
 	hour_fraction = next_fraction
 	if request_redraw and (map_mode == "Trips" or show_traffic_overlay and road_traffic_mode == ROAD_HISTORY):
-		refresh_static()
+		refresh_dynamic()
 
 
 func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
@@ -523,7 +588,7 @@ func set_recorded_bin(bin_index: int, first_bin: int = 0) -> void:
 	recorded_bin = bin_index
 	first_recorded_bin = first_bin
 	if show_traffic_overlay and road_traffic_mode == ROAD_HISTORY:
-		refresh_static()
+		refresh_dynamic()
 
 
 func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: float) -> void:
@@ -534,7 +599,7 @@ func set_hourly_road_history(previous_hour: int, current_hour: int, fraction: fl
 	road_history_current_hour = current_hour
 	road_history_fraction = next_fraction
 	if show_traffic_overlay and road_traffic_mode == ROAD_HOUR:
-		refresh_static()
+		refresh_dynamic()
 
 
 func set_road_traffic_mode(mode: int, state) -> void:
@@ -542,29 +607,39 @@ func set_road_traffic_mode(mode: int, state) -> void:
 		return
 	road_traffic_mode = mode
 	live_traffic_state = state
-	refresh_static()
+	if chunk_renderer != null:
+		chunk_renderer.traffic_revision += 1
+	refresh_dynamic()
 
 
 func set_hour_carry_summary(summary: Dictionary) -> void:
 	hour_carry_summary = summary
-	refresh_static()
+	if chunk_renderer != null:
+		chunk_renderer.traffic_revision += 1
+	refresh_dynamic()
 
 
 func set_current_day_road_summary(summary: Dictionary) -> void:
 	current_day_road_summary = summary
-	refresh_static()
+	if chunk_renderer != null:
+		chunk_renderer.traffic_revision += 1
+	refresh_dynamic()
 
 
 func promote_day_road_summary() -> void:
 	previous_day_road_summary = current_day_road_summary
 	current_day_road_summary = {}
-	refresh_static()
+	if chunk_renderer != null:
+		chunk_renderer.traffic_revision += 1
+	refresh_dynamic()
 
 
 func clear_day_road_summaries() -> void:
 	previous_day_road_summary = {}
 	current_day_road_summary = {}
-	refresh_static()
+	if chunk_renderer != null:
+		chunk_renderer.traffic_revision += 1
+	refresh_dynamic()
 
 
 func set_day_road_fraction(fraction: float) -> void:
@@ -573,7 +648,7 @@ func set_day_road_fraction(fraction: float) -> void:
 		return
 	day_road_fraction = next_fraction
 	if show_traffic_overlay and road_traffic_mode == ROAD_DAY:
-		refresh_static()
+		refresh_dynamic()
 
 
 func set_purpose(purpose: String) -> void:
@@ -583,6 +658,8 @@ func set_purpose(purpose: String) -> void:
 
 func set_selected(neighborhood_id: int) -> void:
 	selected_id = neighborhood_id
+	if map_mode == "Trips":
+		overlays_dirty = true
 	refresh_dynamic()
 
 
@@ -845,10 +922,9 @@ func _hit_aggregate_node(screen_position: Vector2) -> int:
 
 
 func _draw() -> void:
-	# Static map geometry is baked onto static_layer and per-frame state lives
-	# on dynamic_overlay; this item paints nothing. External queue_redraw()
-	# calls keep the overlay in sync through this hook while _process checks
-	# whether the static bake signature changed.
+	draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
+	# The control supplies the water background. Retained terrain/geometry
+	# and interactive overlays draw above it. External redraws refresh labels.
 	if dynamic_overlay != null:
 		dynamic_overlay.queue_redraw()
 
@@ -866,23 +942,16 @@ func _draw_static_content(pen) -> void:
 		bake_pan = pending_bake_pan
 		bake_zoom = pending_bake_zoom
 		pending_bake_key = ""
+	_apply_static_transform()
 	static_bake_count += 1
 	var draw_started: int = Time.get_ticks_usec()
 	view_pan = bake_pan
 	view_zoom = bake_zoom
 	view_origin = Vector2(-BAKE_MARGIN_PX, -BAKE_MARGIN_PX)
 	view_size = size + Vector2(BAKE_MARGIN_PX, BAKE_MARGIN_PX) * 2.0
-	pen.draw_rect(view_rect(), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
-	_draw_boundaries(pen)
-	last_draw_stages_us["boundaries"] = Time.get_ticks_usec() - draw_started
-	_draw_cities(pen)
-	last_draw_stages_us["cities"] = Time.get_ticks_usec() - draw_started
-	urban_layer.draw(self, pen)
-	last_draw_stages_us["urban"] = Time.get_ticks_usec() - draw_started
 	_draw_road_corridors(pen)
-	_draw_roads(pen)
+	_draw_road_projects(pen)
 	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
-	_draw_grade_crossings(pen)
 	if show_transit_overlay:
 		_draw_transit_overlay(pen)
 	if map_mode == "Zoning":
@@ -901,6 +970,9 @@ func _draw_dynamic_content(pen) -> void:
 	if region == null:
 		return
 	var draw_started: int = Time.get_ticks_usec()
+	if selected_jurisdiction_id >= 0:
+		var selected = region.jurisdictions[selected_jurisdiction_id]
+		_draw_polygon_border(pen, selected, Color("fff0b0", 0.95), 3.5)
 	if map_mode != "Zoning":
 		_draw_neighborhoods(pen)
 	last_draw_stages_us["neighborhoods"] = Time.get_ticks_usec() - draw_started
@@ -1178,6 +1250,28 @@ func _draw_roads(pen) -> void:
 				pen.draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
 
 
+func _draw_road_projects(pen) -> void:
+	var overview: bool = _map_scale() * view_zoom < 60.0
+	for project in region.road_projects:
+		match project.kind:
+			"New road":
+				if overview:
+					_draw_dashed_polyline(pen, _screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
+				else:
+					_draw_dashed_road(pen, _screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
+			"Widen":
+				for link in region.road_links:
+					if link.id == project.target_link_id:
+						var screen_points: PackedVector2Array = _screen_polyline(link.points)
+						for direction in range(2):
+							var new_lane: PackedVector2Array = _offset_polyline(screen_points, _road_lane_offset(link.lanes_per_direction + 1, direction, link.lanes_per_direction, link.road_class))
+							_draw_dashed_polyline(pen, new_lane, Color("f0d38d", 0.9), _road_lane_width(link.road_class))
+			"Interchange junction":
+				pen.draw_arc(_world_to_screen(region.road_nodes[project.target_node_id].position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+			"Highway exit":
+				pen.draw_arc(_world_to_screen(project.position_km), 11.0, 0.0, TAU, 24, Color("f0d38d"), 2.0, true)
+
+
 func _append_road_arrow_triangles(screen_points: PackedVector2Array, lanes: int, vertices: PackedVector2Array, colors: PackedColorArray) -> void:
 	var total_length := 0.0
 	for segment in range(1, screen_points.size()):
@@ -1370,7 +1464,7 @@ func _road_outer_half_width(lanes: int, road_class: String) -> float:
 
 
 func _road_cull_margin() -> float:
-	return maxf(25.0, _road_outer_half_width(5, "Highway") + 4.0) - view_origin.x - view_origin.x
+	return maxf(25.0, _road_outer_half_width(5, "Highway") + 4.0)
 
 
 func _draw_dashed_polyline(pen, screen_points: PackedVector2Array, color: Color, width: float) -> void:
@@ -1638,7 +1732,8 @@ func get_road_traffic_metrics(link_index: int, link) -> Dictionary:
 
 
 func _draw_road_nodes(pen) -> void:
-	var show_local_roads: bool = _show_local_road_detail()
+	var overview_ppk: float = _map_scale() * view_zoom
+	var show_local_roads: bool = overview_ppk >= 25.0 or road_tool != "Inspect"
 	var node_indices: Array[int] = _spatial_visible_indices(spatial_road_nodes, 16.0) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_id in node_indices:
 		var node = region.road_nodes[node_id]
@@ -1660,6 +1755,8 @@ func _draw_road_nodes(pen) -> void:
 		if node.kind == "City":
 			dormant = region.city_development_state(region.city_jurisdiction_ids[node.city_id]) == "Dormant"
 		if dormant:
+			if road_tool == "Inspect" and overview_ppk < 25.0:
+				continue
 			pen.draw_arc(position_on_screen, 3.5, 0.0, TAU, 12, Color("718899", 0.65), 1.0, true)
 			continue
 		pen.draw_circle(position_on_screen, radius + (1.0 if overview else 2.0), Color("f7f6f1") if overview else Color("091321"))
@@ -1725,15 +1822,6 @@ func _draw_road_corridors(pen) -> void:
 		var line: PackedVector2Array = _screen_polyline(corridor["points"])
 		if line.size() >= 2 and _screen_visible((line[0] + line[-1]) * 0.5, line[0].distance_to(line[-1]) * 0.5 + 20.0):
 			_draw_dashed_polyline(pen, line, Color("ecc679", 0.9), 2.0)
-	if _pixels_per_meter() < 0.025:
-		return
-	for reservation in region.road_reservations:
-		var bounds: Rect2 = reservation["bounds"]
-		if not _screen_visible(_world_to_screen(bounds.get_center()), maxf(bounds.size.x, bounds.size.y) * _map_scale() * view_zoom + 20.0):
-			continue
-		for mask in reservation["masks"]:
-			if mask.size() >= 3:
-				pen.draw_colored_polygon(_screen_polyline(mask), Color("24343b", 0.98))
 
 
 func _draw_transit_overlay(pen) -> void:
@@ -1981,10 +2069,11 @@ func _draw_terrain_detail(pen) -> void:
 	# Keep the previous view_zoom's tiles until this viewport's new level is ready.
 	# After that, short pans may show a small unfinished strip at the edge.
 	for fallback_level in range(level):
-		_draw_cached_terrain_level(pen, terrain, fallback_level, visible_world, pixels_per_km)
+		if pen != null:
+			_draw_cached_terrain_level(pen, terrain, fallback_level, visible_world, pixels_per_km)
 	if tile_count > 0 and ready_count == tile_count:
 		terrain_detail_published_level = level
-	if ready_count > 0:
+	if ready_count > 0 and pen != null:
 		_draw_cached_terrain_level(pen, terrain, level, visible_world, pixels_per_km)
 	if not missing.is_empty():
 		var center: Vector2 = (visible_world.get_center() - terrain.bounds.position) / tile_km
@@ -2021,50 +2110,6 @@ func _draw_cached_terrain_level(pen, terrain, level: int, visible_world: Rect2, 
 				pen.draw_texture_rect(tile["slope"], screen_rect, false)
 			if base_map_style == "Map" and show_contours:
 				pen.draw_texture_rect(tile["contours"], screen_rect, false)
-
-
-func _make_terrain_texture(source) -> ImageTexture:
-	if source.terrain == null:
-		return null
-	var terrain = source.terrain
-	var image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
-	var terrain_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
-	var satellite_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
-	var slope_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
-	var contour_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
-	var land: PackedVector2Array = source.jurisdictions[0].polygon_km
-	for y in range(terrain.height):
-		for x in range(terrain.width):
-			var point: Vector2 = terrain.bounds.position + Vector2(x, y) * terrain.GRID_KM
-			if not Geometry2D.is_point_in_polygon(point, land):
-				image.set_pixel(x, y, Color.TRANSPARENT)
-				terrain_image.set_pixel(x, y, Color.TRANSPARENT)
-				satellite_image.set_pixel(x, y, Color.TRANSPARENT)
-				slope_image.set_pixel(x, y, Color.TRANSPARENT)
-				contour_image.set_pixel(x, y, Color.TRANSPARENT)
-				continue
-			var elevation: float = terrain.elevations[y * terrain.width + x]
-			var west: float = terrain.elevations[y * terrain.width + maxi(0, x - 1)]
-			var east: float = terrain.elevations[y * terrain.width + mini(terrain.width - 1, x + 1)]
-			var north: float = terrain.elevations[maxi(0, y - 1) * terrain.width + x]
-			var south: float = terrain.elevations[mini(terrain.height - 1, y + 1) * terrain.width + x]
-			var gradient: Vector2 = Vector2(east - west, south - north) / (terrain.GRID_KM * 2000.0)
-			var cover: Vector3 = terrain.land_cover_at(point, elevation, gradient)
-			image.set_pixel(x, y, TerrainDetailTile.land_color(elevation, gradient, cover))
-			terrain_image.set_pixel(x, y, TerrainDetailTile.terrain_color(elevation, gradient, cover))
-			satellite_image.set_pixel(x, y, TerrainDetailTile.satellite_color(elevation, gradient, cover, terrain.ground_detail_at(point), terrain.ground_detail_at(point * 8.0)))
-			slope_image.set_pixel(x, y, TerrainDetailTile.slope_color(gradient))
-			contour_image.set_pixel(x, y, TerrainDetailTile.contour_color(elevation, gradient, terrain.GRID_KM, 500.0))
-	image.generate_mipmaps()
-	terrain_image.generate_mipmaps()
-	satellite_image.generate_mipmaps()
-	slope_image.generate_mipmaps()
-	contour_image.generate_mipmaps()
-	terrain_slope_texture = ImageTexture.create_from_image(slope_image)
-	terrain_contour_texture = ImageTexture.create_from_image(contour_image)
-	terrain_relief_texture = ImageTexture.create_from_image(terrain_image)
-	satellite_texture = ImageTexture.create_from_image(satellite_image)
-	return ImageTexture.create_from_image(image)
 
 
 func _draw_terrain_water(pen) -> void:
@@ -2236,11 +2281,10 @@ func _jurisdiction_label_eligible(area) -> bool:
 
 
 func _ensure_jurisdiction_labels() -> void:
-	# Layout is stable for a whole zoom band: anchors are stored in world
-	# space and re-projected every frame, so pans and sub-band zooms never
-	# re-run the collision pass.
+	# Cache world-space anchors within zoom bands and 256-pixel pan cells.
+	# Recompute when new areas enter view, not on every navigation frame.
 	var band := _zoom_band()
-	var key: String = "%d:%s:%d:%s:%d" % [region.get_instance_id(), size, band, detail_level, selected_jurisdiction_id]
+	var key: String = "%d:%s:%d:%s:%d:%s:%s:%d" % [region.generation_seed, size, band, detail_level, selected_jurisdiction_id, Vector2i(pan / 256.0), base_map_style, region.current_day_key]
 	if key == jurisdiction_layout_key:
 		return
 	jurisdiction_layout_key = key
@@ -2286,10 +2330,11 @@ func _draw_jurisdiction_labels(pen) -> void:
 			continue
 		if region.is_large_scale and detail_level == "Region" and view_zoom < 4.0 and kind == "City":
 			continue
-		for area in region.jurisdictions:
+		for area_id in jurisdiction_label_rects:
+			var area = region.jurisdictions[area_id]
 			if area.kind != kind:
 				continue
-			if not _jurisdiction_label_visible(area):
+			if not _jurisdiction_label_rect(area).intersects(Rect2(Vector2.ZERO, size)):
 				continue
 			var rect: Rect2 = _jurisdiction_label_rect(area)
 			var color: Color = _jurisdiction_color(kind)
@@ -3003,7 +3048,7 @@ func _hit_road_node(screen_position: Vector2) -> int:
 		return -1
 	var closest := -1
 	var best := INF
-	var show_local_roads: bool = _show_local_road_detail()
+	var show_local_roads: bool = _map_scale() * view_zoom >= 25.0 or road_tool != "Inspect"
 	var node_indices: Array[int] = _spatial_near_indices(spatial_road_nodes, screen_position, 25.0) if region.is_large_scale and view_zoom >= 2.0 else _all_indices(region.road_nodes.size())
 	for node_index in node_indices:
 		var node = region.road_nodes[node_index]
@@ -3173,8 +3218,8 @@ func view_rect() -> Rect2:
 
 
 func refresh_static() -> void:
-	if static_layer != null:
-		static_layer.queue_redraw()
+	overlays_dirty = true
+	terrain_view_key = ""
 	refresh_dynamic()
 
 
@@ -3199,61 +3244,7 @@ func _band_zoom(band: int) -> float:
 
 
 func _static_bake_key(band: int) -> String:
-	if region == null:
-		return "none"
-	var phase_digest := 0
-	var approved_digest := 0
-	for neighborhood in region.neighborhoods:
-		if neighborhood.development_plan != null:
-			phase_digest += neighborhood.development_plan.completed_phase
-		if neighborhood.development_approved:
-			approved_digest += 1
-	var live_bucket := 0
-	if show_traffic_overlay and road_traffic_mode == ROAD_LIVE:
-		live_bucket = int(Time.get_ticks_msec() / 1000.0)
-	var key := "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%s|%s|%s" % [
-		region.generation_seed,
-		region.road_geometry_revision,
-		region.road_links.size(),
-		region.road_nodes.size(),
-		region.neighborhoods.size(),
-		region.jurisdictions.size(),
-		region.development_candidates.size(),
-		region.urban_corridors.size(),
-		region.road_reservations.size(),
-		region.rail_reservations.size(),
-		region.station_sites.size(),
-		phase_digest,
-		approved_digest,
-		band,
-		live_bucket,
-		detail_level,
-		map_mode,
-		base_map_style,
-	]
-	key += "|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%s" % [
-		1 if show_terrain_overlay else 0,
-		1 if show_slope_overlay else 0,
-		1 if show_contours else 0,
-		1 if show_traffic_overlay else 0,
-		1 if show_transit_overlay else 0,
-		road_traffic_mode,
-		selected_jurisdiction_id,
-		selected_road_link_id,
-		selected_candidate_id,
-		recorded_bin,
-		size,
-	]
-	key += "|%d|%d|%d|%d|%s|%d|%d" % [
-		terrain_texture_source.get_instance_id() if terrain_texture_source != null else 0,
-		selected_hour,
-		selected_local_street.x,
-		selected_local_street.y,
-		selected_purpose,
-		road_history_previous_hour,
-		road_history_current_hour,
-	]
-	return key
+	return "%s:%s:%s:%s:%d" % [size, map_mode, show_transit_overlay, selected_candidate_id, band]
 
 
 func _static_update() -> void:
@@ -3270,7 +3261,7 @@ func _static_update() -> void:
 	var origin: Vector2 = (Vector2.ONE - Vector2(ratio, ratio)) * size * 0.5 + pan - bake_pan * ratio
 	var needed: Rect2 = Rect2(-origin / ratio, size / ratio)
 	var coverage: Rect2 = Rect2(Vector2(-BAKE_MARGIN_PX, -BAKE_MARGIN_PX), size + Vector2(BAKE_MARGIN_PX, BAKE_MARGIN_PX) * 2.0).grow(-32.0)
-	if key != bake_key or not coverage.encloses(needed):
+	if overlays_dirty or key != bake_key or not coverage.encloses(needed):
 		pending_bake_key = key
 		pending_bake_zoom = _band_zoom(band)
 		# pan is a screen-pixel offset for the live zoom; re-anchor it for the

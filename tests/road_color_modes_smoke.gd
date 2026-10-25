@@ -1,5 +1,6 @@
 extends SceneTree
 
+const UiFixture = preload("res://tests/ui_fixture.gd")
 const MultiScaleTraffic = preload("res://scripts/simulation/multiscale_traffic.gd")
 const RegionMap = preload("res://scripts/ui/region_map.gd")
 
@@ -9,8 +10,7 @@ func _initialize() -> void:
 
 
 func _run() -> void:
-	var main = load("res://scenes/main.tscn").instantiate()
-	root.add_child(main)
+	var main = await UiFixture.attach(self, 1)
 	var deadline: int = Time.get_ticks_msec() + 300000
 	while main.region == null and Time.get_ticks_msec() < deadline:
 		await process_frame

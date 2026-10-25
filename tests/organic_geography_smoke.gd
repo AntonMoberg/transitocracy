@@ -77,6 +77,7 @@ func _run() -> void:
 	map.queue_redraw()
 	await process_frame
 	await process_frame
+	await UiFixture.settle_map(self, map)
 	_check(map.last_drawn_neighborhood_borders > 0, "neighborhood borders must be drawn when inspecting a city")
 	var neighborhood = main.region.neighborhoods[0]
 	var district = main.region.jurisdictions[neighborhood.jurisdiction_id]

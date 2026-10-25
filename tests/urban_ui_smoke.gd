@@ -21,17 +21,12 @@ func _run() -> void:
 	var layout = main.region.neighborhoods[0].street_layout
 	map.zoom = 300.0 / map._map_scale()
 	map.pan = -(layout.bounds.get_center() - map._world_center()) * map._map_scale() * map.zoom
-	map.urban_layer.building_cache.clear()
-	map.urban_layer.clearance_cache.clear()
 	map.queue_redraw()
-	await process_frame
-	await process_frame
-	var cold_urban_ms: float = float(map.last_draw_stages_us["urban"] - map.last_draw_stages_us["cities"]) / 1000.0
-	map.queue_redraw()
-	await process_frame
-	await process_frame
-	print("Neighbourhood draw: cold urban %.1f ms; warm total %.1f ms, urban %.1f ms" % [cold_urban_ms, float(map.last_draw_us) / 1000.0, float(map.last_draw_stages_us["urban"] - map.last_draw_stages_us["cities"]) / 1000.0])
+	var ready: bool = await UiFixture.settle_map(self, map)
+	print("Urban publication: %d buildings, %d streets; renderer %.2f ms" % [map.urban_layer.last_building_count, map.urban_layer.last_street_count, map.chunk_renderer.last_tick_us / 1000.0])
 	var errors := PackedStringArray()
+	if not ready:
+		errors.append("Urban geometry did not finish publishing.")
 	for placeholder in main.region.neighborhoods:
 		if placeholder.street_layout != null:
 			continue
@@ -74,8 +69,7 @@ func _run() -> void:
 			break
 	if covered:
 		map.queue_redraw()
-		await process_frame
-		await process_frame
+		await UiFixture.settle_map(self, map)
 		if map.urban_layer.last_building_count >= buildings_before:
 			errors.append("Highway land reservations must clear building footprints beneath them.")
 		main.region.road_reservations.pop_back()

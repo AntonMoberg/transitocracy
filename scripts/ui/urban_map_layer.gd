@@ -81,7 +81,7 @@ func draw(map, pen) -> void:
 		var plan = neighborhood.development_plan
 		if layout == null or plan == null:
 			continue
-		var screen_bounds := Rect2(map._world_to_screen(layout.bounds.position), layout.bounds.size * map._map_scale() * map.zoom)
+		var screen_bounds := Rect2(map._world_to_screen(layout.bounds.position), layout.bounds.size * map._map_scale() * map.view_zoom)
 		if not screen_bounds.intersects(viewport):
 			continue
 		if map.base_map_style == "Map" and map.map_mode != "Zoning":
@@ -224,7 +224,7 @@ func _draw_footprint(map, pen, neighborhood, deadline: int) -> bool:
 			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		footprint_cache[key] = mesh
 	if footprint_cache[key] != null:
-		var scale: float = map._map_scale() * map.zoom
+		var scale: float = map._map_scale() * map.view_zoom
 		var transform := Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), map._world_to_screen(layout.bounds.position))
 		pen.draw_mesh(footprint_cache[key], null, transform)
 	return false
@@ -242,7 +242,7 @@ func _draw_blocks(map, pen, neighborhood, viewport: Rect2, meters: float, buildi
 		clearance_cache[clearance_key] = RoadLand.masks_for_bounds(map.region, layout.bounds)
 	var reserved_masks: Array[PackedVector2Array] = clearance_cache[clearance_key]
 	var chunk_bounds: Array[Rect2] = _chunk_bounds(layout)
-	var scale: float = map._map_scale() * map.zoom
+	var scale: float = map._map_scale() * map.view_zoom
 	var origin: Vector2 = map._world_to_screen(layout.bounds.position)
 	var transform := Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), origin)
 	var shadow_transform := Transform2D(Vector2(scale, 0.0), Vector2(0.0, scale), origin + Vector2(1.0, 1.5) * minf(3.0, meters * 2.0))
