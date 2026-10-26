@@ -1,5 +1,8 @@
 extends RefCounted
 
+# Actual generated urban street fabric, distinct from a city jurisdiction.
+var is_urban_street: bool = false
+
 var id: int = -1
 var position_km: Vector2 = Vector2.ZERO
 var kind: String = "Junction"

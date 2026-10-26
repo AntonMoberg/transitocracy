@@ -304,6 +304,9 @@ static func _prepare_junctions_and_crossings(source: Dictionary) -> void:
 					fixed.append(protected.size() - 1)
 				cursor += 1
 			protected.append(points[i])
+			# LOD simplification must retain the approach tangent at both ends.
+			if i==1 or i==points.size()-2:
+				fixed.append(protected.size()-1)
 			station += distance
 		feature.points = protected
 		feature["fixed"] = fixed

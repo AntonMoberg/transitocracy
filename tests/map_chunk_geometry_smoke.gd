@@ -15,6 +15,9 @@ func _run() -> void:
 	_check(clipped.size() == 4 and Geometry.bounds(clipped) == Rect2(0,0,10,10), "polygon clipping preserves complete tile coverage")
 	var source := {"bounds": Rect2(0,0,16,16), "epoch": 9, "terrain": null, "features": [{"kind":"line", "layer":"roads", "points":points, "lanes":2, "highway":true, "slot":41}, {"kind":"block", "layer":"water", "points":polygon, "color":Color.BLUE}]}
 	source = Geometry.index_source(source)
+	var prepared:Dictionary=source.features[0]
+	var distant:=Geometry.simplify(prepared.points,10.0,prepared.fixed)
+	_check(distant.has(points[1]) and distant.has(points[-2]),"distant LOD must retain both road approach tangents")
 	var result := Geometry.build(source, Vector3i.ZERO, "roads")
 	_check(result.epoch == 9 and not result.parts.is_empty(), "worker returns versioned road geometry")
 	for part in result.parts:

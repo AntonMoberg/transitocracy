@@ -23,6 +23,7 @@ var crossings: Array[Dictionary] = []
 var terrain_spans: Array[Dictionary] = []
 var terrain_surface_paths: Array[PackedVector2Array] = []
 var redevelopment_impact: Array[Dictionary] = []
+var build_plan: Dictionary = {}
 
 
 func days_remaining(day_key: int) -> int:

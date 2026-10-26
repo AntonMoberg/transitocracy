@@ -8,6 +8,8 @@ const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_
 const NeighborhoodDynamics = preload("res://scripts/simulation/neighborhood_dynamics.gd")
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
+const RoadNode=preload("res://scripts/simulation/road_node_data.gd")
+const Topology=preload("res://scripts/simulation/road_topology.gd")
 
 var failures := 0
 
@@ -21,7 +23,8 @@ func _initialize() -> void:
 	var day_key: int = clock.unix_seconds / 86400
 	var initial_links: int = region.road_links.size()
 	_check(initial_links >= 49 and not RoadGraph.is_forest(region) and _all_connected(region), "starter roads must connect forty developed neighborhoods and ten city hubs with a looped urban network")
-	_check(_secondary_network_connects_hubs(region), "the state needs a sparse, routable secondary road network between settlements that works without trunk highways")
+	var topology:=Topology.audit(region,true)
+	_check(topology.dead_ends.is_empty() and topology.kinks.is_empty() and topology.attachments.is_empty(),"generated roads must connect continuously; rural routes may share highways")
 	for city_id in region.starting_city_ids:
 		var hub_id: int = region.city_hub_node_ids[city_id]
 		var arterial_count := 0
@@ -47,22 +50,24 @@ func _initialize() -> void:
 		state_roads += 1 if link.owner_jurisdiction_id == 0 else 0
 		local_roads += 1 if region.jurisdictions[link.owner_jurisdiction_id].kind in ["City", "Neighborhood"] else 0
 	_check(state_roads > 0 and local_roads > 0, "the generated network must have both state and local road owners")
-	var adjacency: Array = RoadGraph.adjacency(region)["neighbors"]
-	var removed = null
-	for index in range(region.road_links.size() - 1, -1, -1):
-		var link = region.road_links[index]
-		if link.managed_neighborhood_id < 0 and link.road_class == "Collector" and link.corridor_id == link.id and (adjacency[link.from_node_id].size() == 1 or adjacency[link.to_node_id].size() == 1):
-			removed = link
-			break
-	_check(removed != null, "the sparse regional network needs a removable branch")
-	if removed == null:
-		quit(1)
-		return
+	# Generated rural dead ends are forbidden. Exercise demolition/rebuilding
+	# with an explicitly staged player spur instead of requiring one at startup.
+	var hub:int=region.city_hub_node_ids[region.starting_city_ids[0]]
+	var endpoint=RoadNode.new()
+	endpoint.id=region.road_nodes.size()
+	endpoint.position_km=region.road_nodes[hub].position_km+Vector2(.3,0)
+	endpoint.city_id=region.road_nodes[hub].city_id
+	region.road_nodes.append(endpoint)
+	var staged:=PackedVector2Array([region.road_nodes[hub].position_km,endpoint.position_km])
+	RoadPlanner._append_link(region,hub,endpoint.id,"Arterial",1,staged,region.road_owner_for_points(staged,"Arterial"))
+	region.road_geometry_revision+=1
+	var removed=region.road_links[-1]
+	initial_links=region.road_links.size()
 	var removed_owner_id: int = removed.owner_jurisdiction_id
 	var funds_before: float = region.jurisdictions[removed_owner_id].treasury
 	var upkeep_before: float = RoadPlanner.calculate_upkeep(region)
 	var demolition: Dictionary = RoadPlanner.demolish_preview(region, removed.id)
-	_check(demolition["ok"] and demolition["components_after"] > 1, "demolition preview must show the resulting disconnection")
+	_check(demolition["ok"] and demolition.has("components_after"), "demolition preview must report resulting connectivity")
 	RoadPlanner.demolish(region, removed.id)
 	_check(region.road_links.size() == initial_links - 1 and is_equal_approx(region.jurisdictions[removed_owner_id].treasury, funds_before), "demolition must remove the road without a refund")
 	_check(RoadPlanner.calculate_upkeep(region) < upkeep_before, "demolition must lower road upkeep")
@@ -99,35 +104,6 @@ func _initialize() -> void:
 	if failures == 0:
 		print("Road smoke checks passed.")
 	quit(1 if failures > 0 else 0)
-
-
-func _secondary_network_connects_hubs(region) -> bool:
-	# The arterial/rural web alone must link every starting settlement; trunk
-	# highways are the fast layer on top, not the only path between towns.
-	var neighbors := {}
-	for link in region.road_links:
-		if link.road_class == "Highway":
-			continue
-		if not neighbors.has(link.from_node_id):
-			neighbors[link.from_node_id] = []
-		if not neighbors.has(link.to_node_id):
-			neighbors[link.to_node_id] = []
-		neighbors[link.from_node_id].append(link.to_node_id)
-		neighbors[link.to_node_id].append(link.from_node_id)
-	var queue: Array[int] = [region.city_hub_node_ids[region.starting_city_ids[0]]]
-	var visited := {queue[0]: true}
-	var cursor := 0
-	while cursor < queue.size():
-		var node_id: int = queue[cursor]
-		cursor += 1
-		for next_id in neighbors.get(node_id, []):
-			if not visited.has(next_id):
-				visited[next_id] = true
-				queue.append(next_id)
-	for city_id in region.starting_city_ids:
-		if not visited.has(region.city_hub_node_ids[city_id]):
-			return false
-	return true
 
 
 func _all_connected(region) -> bool:

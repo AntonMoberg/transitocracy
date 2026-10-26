@@ -20,13 +20,15 @@ New districts bend their streets gently on hillsides and omit local streets that
 
 ## Road and planning tools
 
-- **Arterial** and **Highway** draw Straight, Curved, or Multi-point Curved routes. Click a starting node, place curve guides when needed, and choose an end. Curved guides control the bend; the road leaves an existing road along its tangent. Double click empty land to end an arterial at a new junction. Highways use interchanges at both ends.
+- **Arterial** and **Highway** draw Straight, Curved, or Multi-point Curved routes. Start on a road or node, place curve guides when needed, and choose an end. Outside developed city streets, a two-road connection follows the existing approach tangent. Double click empty land to stage an arterial extension; extend its endpoint after it opens. Highway connections include their required interchanges in the preview and price.
 - **Snap 5°** uses the turn relative to the road being extended. **Snap 5 m** rounds segment length. The preview shows construction cost, required land acquisition, demolition, and local street work. At a crossing, choose **Above** or **Below**; a grade-separated crossing remains disconnected until an interchange is built.
 - The road preview also marks and prices bridges, tunnels, and grading across difficult terrain. Tunnel sections acquire land only at their surface approaches.
 - **Growth corridor** records a two-point city planning guide and raises the priority of nearby development proposals. **Rail corridor** records a future rail alignment; **Station site** marks a future station location and raises nearby growth priority. These are planning inputs; rail service and trains are not simulated yet.
 - **Junction** splits an existing surface road, **Interchange** adds highway access, **Widen** adds a lane per direction, and **Demolish** removes an open road after showing its connectivity impact.
 
 New arterials and highways through developed land acquire and clear affected blocks and pay for site work and local street reconstruction. Replacement parcels fit around the new road when it opens; unaffected parcels retain their zoning. A surface arterial preserves selected, spaced local street crossings and trims the others along their existing heading. Highway clearance prevents buildings beneath the highway, including elevated segments. Surface roads connect at intersections; highway crossings require interchanges. Right click or press Escape to clear an unfinished route or planning guide.
+
+Road connection previews run on a worker. Green stretches reuse an existing corridor; dashed stretches show construction. Funding reserves the priced work, while the existing roads stay open until the replacement branches and junctions open together. A changed network invalidates an unfunded preview. Roads involved in a funded connection cannot be demolished or widened while it is under construction.
 
 ## Simulation and code
 
@@ -74,6 +76,10 @@ New worlds choose complete terrain-weighted state corridors between developed st
 Routing favors low relative elevation and limited climbing, tries broad surface bends before tighter legal curves, then refines difficult sections in bounded windows. Surface passes precede exceptional tunnels (3 km each, at most 5% of a highway). Final grade, curve, land and bridge checks still apply. Route-specific avoidance is not stored in reusable terrain-edge costs, and changing road class invalidates grade-dependent costs.
 
 The countryside samples at 30 km spacing, with optional-loop degree capped at three and a 1.85× detour threshold. This was calibrated from an initial 32 km setting to preserve a modest reduction. Connectivity uses the actual graph, including highway interior junctions; city access and overview importance are resolved after the whole network is built. Existing worlds receive the new rendering style; road geography changes on regeneration.
+
+Generation consolidates parallel corridors when they stay within 1 km and 20 degrees for at least 5 km. Already-connected approaches also merge over short shared stretches (at least 100 m within 25 m), moving the fork to the divergence after unused branches are pruned. Highways take precedence over arterials, then rural roads. Bridge and tunnel stretches are excluded. Unused rural tails and duplicate return branches are removed, and an unused highway tail stops at its final interchange. Degree-two joins outside actual developed streets are rounded together without moving unrelated junctions; isolated sharp vertices within a road are rounded where terrain and junction constraints allow. City connections favor gates facing the incoming route to avoid looping around backward-facing exits. Rendering preserves endpoint approach vertices through LOD simplification. Existing saved networks are not automatically rewritten.
+
+`road_topology_smoke.gd` and `road_compound_smoke.gd` cover continuous joins, shared corridors, priced interchange opening, staged extensions, detached snapshots, and stale previews. `road_network_metrics.gd` checks connectivity, physical attachments, dead ends and two-arm continuity across three seeds at 256 and 768 cities.
 
 This follows the worker layout / retained GPU buffer architecture documented by [Mapbox GL JS](https://github.com/mapbox/mapbox-gl-js/blob/main/ARCHITECTURE.md). It applies the techniques of modern vector maps inside Godot; it does not embed a map service or depend on proprietary Google/Apple internals.
 

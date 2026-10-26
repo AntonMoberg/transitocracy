@@ -12,6 +12,7 @@ const RegionMap = preload("res://scripts/ui/region_map.gd")
 const FlowTimeline = preload("res://scripts/ui/flow_timeline.gd")
 const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_generator.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
+const RoadPreviewJob = preload("res://scripts/simulation/road_preview_job.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 const RegionSnapshot = preload("res://scripts/simulation/region_snapshot.gd")
@@ -128,6 +129,11 @@ var suppress_toll_input: bool = false
 var road_status_label: Label
 var pending_road_preview: Dictionary = {}
 var road_start_node: int = -1
+var road_start_position := Vector2.INF
+var road_preview_thread: Thread
+var road_preview_job
+var road_preview_serial := 0
+var road_preview_request: Dictionary = {}
 var planning_start_point: Vector2 = Vector2.ZERO
 var planning_has_start: bool = false
 var road_waypoints: PackedVector2Array = PackedVector2Array()
@@ -159,6 +165,7 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	if road_preview_thread != null: road_preview_thread.wait_to_finish()
 	if generation_thread != null:
 		generation_thread.wait_to_finish()
 	if road_rebuild_thread != null:
@@ -176,6 +183,7 @@ func _process(delta: float) -> void:
 	var process_started: int = Time.get_ticks_usec()
 	_poll_generation()
 	_poll_road_rebuild()
+	_poll_road_preview()
 	_reap_finished_day_threads()
 	_reap_finished_data_threads()
 	_poll_day_worker()
@@ -1097,6 +1105,9 @@ func _apply_generated_region(result: Dictionary) -> void:
 		inspector.text = "[color=#ff8c8c]Region generation failed validation.[/color]"
 		return
 	next_day_profile = null
+	road_preview_serial+=1
+	road_preview_request.clear()
+	road_start_position=Vector2.INF
 	road_start_node = -1
 	planning_has_start = false
 	road_waypoints.clear()
@@ -1289,6 +1300,7 @@ func _ensure_week_worker() -> void:
 
 
 func _region_snapshot_busy() -> bool:
+	if road_preview_thread != null and not road_preview_job.snapshot_ready(): return true
 	if road_rebuild_thread != null:
 		return true
 	for index in range(active_snapshot_buffers.size() - 1, -1, -1):
@@ -1980,18 +1992,19 @@ func _on_road_node_clicked(node_id: int) -> void:
 		return
 	match tool_name:
 		"Arterial", "Highway":
-			if road_start_node < 0 or not pending_road_preview.is_empty():
+			if road_start_node == -1 or not pending_road_preview.is_empty():
+				_cancel_road_preview()
 				road_start_node = node_id
+				road_start_position = Vector2.INF
 				road_waypoints.clear()
 				road_last_guide_click = false
 				pending_road_preview.clear()
-				map_view.set_road_preview(road_start_node, road_waypoints, {})
+				map_view.set_road_preview(road_start_node, road_waypoints, {},road_start_position)
 			else:
 				if road_waypoints.size() < _road_required_guides() or (_road_draw_mode() == RoadRouteBuilder.MULTIPOINT and road_waypoints.size() % 2 == 0):
 					road_status_label.text = "Place a curve guide before choosing the end." if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT else "Add a curve guide before choosing the end."
 					return
-				pending_road_preview = RoadPlanner.link_preview(region, road_start_node, node_id, _road_class(), road_waypoints, _current_day_key(), _road_draw_mode())
-				map_view.set_road_preview(road_start_node, road_waypoints, pending_road_preview)
+				_request_road_preview(node_id,region.road_nodes[node_id].position_km)
 			_refresh_crossing_controls()
 		"Interchange":
 			pending_road_preview = RoadPlanner.interchange_preview(region, node_id, -1, Vector2.ZERO, _current_day_key())
@@ -2013,6 +2026,23 @@ func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
 	var tool_name: String = road_tool_selector.get_item_text(road_tool_selector.selected)
 	if tool_name in ["Growth corridor", "Rail corridor", "Station site"]:
 		_on_planning_point(world_position)
+		return
+	if tool_name in ["Arterial","Highway"]:
+		if road_start_node == -1 or not pending_road_preview.is_empty():
+			_cancel_road_preview()
+			road_start_node=-2
+			var index:int=RoadGraph.link_index(region,link_id)
+			if index<0: return
+			road_start_position=RoadPlanner.closest_point(region.road_links[index].points,world_position)
+			road_waypoints.clear()
+			pending_road_preview.clear()
+			map_view.set_road_preview(road_start_node,road_waypoints,{},road_start_position)
+		else:
+			if road_waypoints.size()<_road_required_guides() or _road_draw_mode()==RoadRouteBuilder.MULTIPOINT and road_waypoints.size()%2==0:
+				road_status_label.text="Place a curve guide before choosing the end."
+				return
+			_request_road_preview(-1,world_position)
+		_update_road_status()
 		return
 	if tool_name != "Junction":
 		map_view.selected_local_street = Vector2i(-1, -1)
@@ -2055,30 +2085,30 @@ func _on_road_empty_clicked(world_position: Vector2) -> void:
 		road_status_label.text = "Junction added." if result["ok"] else result["reason"]
 		if result["ok"]:
 			_rebuild_after_road_change()
-	elif (tool_name == "Arterial" or tool_name == "Highway") and road_start_node >= 0:
+	elif (tool_name == "Arterial" or tool_name == "Highway") and road_start_node != -1:
 		if _road_draw_mode() == RoadRouteBuilder.STRAIGHT or (_road_draw_mode() == RoadRouteBuilder.CURVED and road_waypoints.size() >= 1):
 			road_status_label.text = "Double click empty land to finish the arterial, or choose an existing node."
 			return
-		var point: Vector2 = RoadPlanner.snap_position(region, road_start_node, road_waypoints, world_position, _road_class(), _road_draw_mode(), road_snap_toggle.button_pressed, road_length_snap_toggle.button_pressed) if road_snap_toggle.button_pressed or road_length_snap_toggle.button_pressed else world_position
+		var point: Vector2 = RoadPlanner.snap_position(region, road_start_node, road_waypoints, world_position, _road_class(), _road_draw_mode(), road_snap_toggle.button_pressed, road_length_snap_toggle.button_pressed) if road_start_node>=0 and (road_snap_toggle.button_pressed or road_length_snap_toggle.button_pressed) else world_position
 		var placing_guide: bool = _road_draw_mode() == RoadRouteBuilder.MULTIPOINT and road_waypoints.size() % 2 == 0
 		if placing_guide:
-			var curve_start: Vector2 = road_waypoints[-1] if not road_waypoints.is_empty() else region.road_nodes[road_start_node].position_km
+			var curve_start: Vector2 = road_waypoints[-1] if not road_waypoints.is_empty() else _road_start_world()
 			if point.distance_to(curve_start) < 0.02:
 				road_status_label.text = "Move the curve guide away from its start."
 				return
 		if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT and road_waypoints.size() % 2 == 1:
-			if RoadPlanner.player_route(region, road_start_node, point, _road_class(), road_waypoints, RoadRouteBuilder.MULTIPOINT).is_empty():
+			if (RoadPlanner.player_route(region, road_start_node, point, _road_class(), road_waypoints, RoadRouteBuilder.MULTIPOINT) if road_start_node>=0 else RoadRouteBuilder.build_player(region,road_start_position,point,_road_class(),road_waypoints,RoadRouteBuilder.MULTIPOINT)).is_empty():
 				road_status_label.text = "This curve cannot be placed here. Adjust its guide or end."
 				return
 		road_waypoints.append(point)
 		road_last_guide_click = placing_guide
 		road_last_click_position = world_position
-		map_view.set_road_preview(road_start_node, road_waypoints, {})
+		map_view.set_road_preview(road_start_node, road_waypoints, {},road_start_position)
 		_update_road_status()
 
 
 func _on_road_empty_double_clicked(world_position: Vector2) -> void:
-	if road_start_node < 0 or _road_class() != RoadLinkData.ARTERIAL:
+	if road_start_node == -1 or _road_class() != RoadLinkData.ARTERIAL:
 		return
 	var guides: PackedVector2Array = road_waypoints.duplicate()
 	var endpoint: Vector2 = world_position
@@ -2094,11 +2124,9 @@ func _on_road_empty_double_clicked(world_position: Vector2) -> void:
 	elif guides.size() < _road_required_guides():
 		road_status_label.text = "Add %d curve guide%s first." % [_road_required_guides(), "s" if _road_required_guides() != 1 else ""]
 		return
-	if endpoint == world_position and (road_snap_toggle.button_pressed or road_length_snap_toggle.button_pressed):
+	if endpoint == world_position and road_start_node>=0 and (road_snap_toggle.button_pressed or road_length_snap_toggle.button_pressed):
 		endpoint = RoadPlanner.snap_position(region, road_start_node, guides, world_position, _road_class(), _road_draw_mode(), road_snap_toggle.button_pressed, road_length_snap_toggle.button_pressed)
-	pending_road_preview = RoadPlanner.link_preview(region, road_start_node, -1, RoadLinkData.ARTERIAL, guides, _current_day_key(), _road_draw_mode(), endpoint)
-	map_view.set_road_preview(road_start_node, road_waypoints, pending_road_preview)
-	_refresh_crossing_controls()
+	_request_road_preview(-1,endpoint,{},guides)
 	_update_road_status()
 
 
@@ -2116,9 +2144,7 @@ func _on_crossing_level_selected(index: int) -> void:
 		choices[crossing["key"]] = crossing["above"]
 	var selected_crossing: Dictionary = pending_road_preview["crossings"][crossing_selector.selected]
 	choices[selected_crossing["key"]] = index == 0
-	pending_road_preview = RoadPlanner.link_preview(region, pending_road_preview["from"], pending_road_preview["to"], pending_road_preview["road_class"], pending_road_preview["waypoints"], _current_day_key(), pending_road_preview["draw_mode"], pending_road_preview["end_position"], choices)
-	map_view.set_road_preview(road_start_node, road_waypoints, pending_road_preview)
-	_refresh_crossing_controls()
+	_request_road_preview(pending_road_preview["to"],pending_road_preview["end_position"],choices,pending_road_preview["waypoints"])
 	_update_road_status()
 
 
@@ -2139,12 +2165,15 @@ func _refresh_crossing_controls() -> void:
 	var impact: Dictionary = pending_road_preview.get("land_impact", {})
 	road_impact_label.text = "Land %.1f ha  •  Construction $%s  •  Structures $%s  •  Acquisition $%s  •  Demolition/site $%s  •  Local streets $%s" % [
 		float(impact.get("land_ha", 0.0)), _format_count(int(pending_road_preview.get("construction_cost", 0))),
-		_format_count(int(pending_road_preview.get("structure_cost", 0)) + int(impact.get("local_bridge_cost", 0))), _format_count(int(impact.get("land_cost", 0))),
+		_format_count(int(pending_road_preview.get("structure_cost", 0)) + int(pending_road_preview.get("terrain_impact",{}).get("cost",0)) + int(impact.get("local_bridge_cost", 0))), _format_count(int(impact.get("land_cost", 0))),
 		_format_count(int(impact.get("home_cost", 0)) + int(impact.get("job_cost", 0)) + int(impact.get("site_cost", 0))),
 		_format_count(int(impact.get("street_cost", 0)))]
 
 
 func _on_road_build_pressed() -> void:
+	if road_preview_thread!=null or not road_preview_request.is_empty():
+		road_status_label.text="Preparing road connection…"
+		return
 	if _region_snapshot_busy():
 		deferred_region_edits.append(Callable(self, "_on_road_build_pressed"))
 		return
@@ -2171,6 +2200,9 @@ func _on_road_build_pressed() -> void:
 
 
 func _cancel_road_preview() -> void:
+	road_preview_serial+=1
+	road_preview_request.clear()
+	road_start_position=Vector2.INF
 	road_start_node = -1
 	planning_has_start = false
 	if map_view != null:
@@ -2190,6 +2222,10 @@ func _update_road_status() -> void:
 		return
 	if map_view != null and map_view.map_mode == "Zoning":
 		road_status_label.text = zoning_tool_message
+		return
+	if road_preview_thread!=null or not road_preview_request.is_empty():
+		road_build_button.disabled=true
+		road_status_label.text="Preparing road connection…"
 		return
 	var owner_id: int = int(pending_road_preview.get("owner_id", 0))
 	road_build_button.disabled = pending_road_preview.is_empty() or not pending_road_preview.get("ok", false) or (not region.dev_mode and region.jurisdictions[owner_id].treasury < float(pending_road_preview.get("cost", 0)))
@@ -2213,7 +2249,7 @@ func _update_road_status() -> void:
 			road_status_label.text += "  •  %.1f km tunnel" % float(terrain_impact["tunnel_km"])
 		if float(terrain_impact.get("earthwork_km", 0.0)) > 0.0:
 			road_status_label.text += "  •  %.1f km grading" % float(terrain_impact["earthwork_km"])
-	elif road_start_node >= 0:
+	elif road_start_node != -1:
 		if _road_draw_mode() == RoadRouteBuilder.MULTIPOINT:
 			if _road_class() == RoadLinkData.HIGHWAY:
 				road_status_label.text = "Click a curve guide, then its end. Repeat to continue; choose an interchange to finish. Esc cancels." if road_waypoints.size() % 2 == 0 else "Click the curve end to lock it, or choose an interchange to finish. Esc cancels."
@@ -2230,7 +2266,49 @@ func _update_road_status() -> void:
 	elif road_tool_selector.get_item_text(road_tool_selector.selected) == "Station site":
 		road_status_label.text = "Click a station site. Nearby districts receive higher growth priority."
 	else:
-		road_status_label.text = "Draw roads between nodes  •  Junctions connect arterials  •  Highways need interchanges"
+		road_status_label.text = region.road_project_notice if not region.road_project_notice.is_empty() else "Draw between roads or nodes  •  Connections are included in the preview"
+
+
+func _road_start_world() -> Vector2:
+	return region.road_nodes[road_start_node].position_km if road_start_node>=0 else road_start_position
+
+
+func _request_road_preview(to:int,end:Vector2,choices:Dictionary={},guides:PackedVector2Array=PackedVector2Array()) -> void:
+	road_preview_serial+=1
+	road_preview_request={"from":road_start_node if road_start_node>=0 else -1,"to":to,"road_class":_road_class(),"waypoints":road_waypoints.duplicate() if guides.is_empty() else guides.duplicate(),"day_key":_current_day_key(),"draw_mode":_road_draw_mode(),"end_position":end,"crossing_choices":choices.duplicate(),"start_position":_road_start_world()}
+	_start_road_preview()
+	_update_road_status()
+
+
+func _start_road_preview() -> void:
+	if road_preview_thread!=null or road_preview_request.is_empty(): return
+	road_preview_job=RoadPreviewJob.new()
+	road_preview_job.source=region
+	road_preview_job.request=road_preview_request
+	road_preview_job.serial=road_preview_serial
+	road_preview_request={}
+	var worker:=Thread.new()
+	if worker.start(road_preview_job.run,Thread.PRIORITY_NORMAL)==OK:
+		road_preview_thread=worker
+	else:
+		pending_road_preview={"ok":false,"reason":"Could not prepare road preview. Try the endpoint again."}
+
+
+func _poll_road_preview() -> void:
+	if road_preview_thread==null: return
+	if road_preview_thread.is_alive(): return
+	var result:Dictionary=road_preview_thread.wait_to_finish()
+	road_preview_thread=null
+	if result.get("serial",-1)==road_preview_serial and region!=null:
+		if result.seed==region.generation_seed and result.revision==region.road_geometry_revision:
+			pending_road_preview=result.preview
+		else:
+			pending_road_preview={"ok":false,"reason":"Road network changed. Choose the endpoint again to refresh its preview."}
+		map_view.set_road_preview(road_start_node,road_waypoints,pending_road_preview,road_start_position)
+		_refresh_crossing_controls()
+		_update_road_status()
+	_start_road_preview()
+	_update_road_status()
 
 
 func _rebuild_after_road_change(changed_city_ids: Array[int] = [], new_district_only: bool = false) -> void:

@@ -78,6 +78,7 @@ static func build_starting_city(region, city: Dictionary) -> void:
 			var point: Vector2 = CityPlan.base_junction(best_plan, address)
 			if region.jurisdictions[0].contains_point(point):
 				node_grid[address] = StreetNetwork.ensure_node(region, point, city_id)
+				region.road_nodes[node_grid[address]].is_urban_street = true
 	var horizontal_y: int = (start_y + maxi(1, count_y / 2)) * ROWS if count_y > 1 else (start_y + posmod(hash("%d:starter-side:%d" % [region.generation_seed, city_id]), 2)) * ROWS
 	var horizontal_corridor_id: int = region.next_road_link_id
 	var horizontal_distance := 0.0

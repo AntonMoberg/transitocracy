@@ -63,6 +63,7 @@ var road_length_snap_enabled: bool = false
 var selected_road_link_id: int = -1
 var selected_local_street := Vector2i(-1, -1)
 var preview_start_node: int = -1
+var preview_start_position: Vector2 = Vector2.INF
 var planning_preview_start: Vector2 = Vector2.INF
 var planning_preview_kind: String = ""
 var preview_waypoints: PackedVector2Array = PackedVector2Array()
@@ -329,6 +330,7 @@ func set_region(new_region) -> void:
 	selected_candidate_id = -1
 	selected_road_link_id = -1
 	preview_start_node = -1
+	preview_start_position = Vector2.INF
 	preview_waypoints.clear()
 	preview_frozen_route.clear()
 	road_preview.clear()
@@ -528,8 +530,9 @@ func set_road_input_mode(mode: String, snap_enabled: bool, length_snap_enabled: 
 	refresh_dynamic()
 
 
-func set_road_preview(start_node: int, waypoints: PackedVector2Array, preview: Dictionary) -> void:
+func set_road_preview(start_node: int, waypoints: PackedVector2Array, preview: Dictionary, start_position:Vector2=Vector2.INF) -> void:
 	preview_start_node = start_node
+	preview_start_position=start_position
 	preview_waypoints = waypoints
 	road_preview = preview
 	preview_frozen_route = RoadPlanner.frozen_multi_curve(region, start_node, waypoints, road_tool) if region != null and start_node >= 0 and road_draw_mode == RoadRouteBuilder.MULTIPOINT else PackedVector2Array()
@@ -1220,10 +1223,12 @@ func _draw_roads(pen) -> void:
 	for project in region.road_projects:
 		match project.kind:
 			"New road":
-				if overview:
-					_draw_dashed_polyline(pen, _screen_polyline(project.points), Color("aa8b5b", 0.82), 2.0)
-				else:
-					_draw_dashed_road(pen, _screen_polyline(project.points), project.lanes_per_direction, project.road_class, Color("8fbfd8", 0.70))
+				var work:Array=project.build_plan.get("work",[{"points":project.points,"road_class":project.road_class}])
+				for item in work:
+					if overview:
+						_draw_dashed_polyline(pen, _screen_polyline(item.points), Color("aa8b5b", 0.82), 2.0)
+					else:
+						_draw_dashed_road(pen, _screen_polyline(item.points), project.lanes_per_direction, item.road_class, Color("8fbfd8", 0.70))
 			"Widen":
 				for link in region.road_links:
 					if link.id == project.target_link_id:
@@ -1755,26 +1760,31 @@ func _draw_road_preview(pen) -> void:
 		var guide_color: Color = Color("9fc7f0") if planning_preview_kind == "Rail corridor" else Color("ecc679")
 		pen.draw_circle(_world_to_screen(planning_preview_start), 5.0, guide_color)
 		pen.draw_dashed_line(_world_to_screen(planning_preview_start), _world_to_screen(hover_world_position), guide_color, 2.0, 7.0, true)
-	if preview_start_node >= 0:
-		var points: PackedVector2Array = road_preview["points"] if road_preview.get("ok", false) else PackedVector2Array([region.road_nodes[preview_start_node].position_km])
+	if preview_start_node >= 0 or preview_start_position.is_finite():
+		var start:Vector2=region.road_nodes[preview_start_node].position_km if preview_start_node>=0 else preview_start_position
+		var points: PackedVector2Array = road_preview["points"] if road_preview.get("ok", false) else PackedVector2Array([start])
 		if not road_preview.get("ok", false):
 			var multi_curve: bool = road_draw_mode == RoadRouteBuilder.MULTIPOINT
 			var awaiting_guide: bool = multi_curve and preview_waypoints.size() % 2 == 0
 			if multi_curve and not preview_frozen_route.is_empty():
 				points = preview_frozen_route
-			var snap_guide: Dictionary = RoadPlanner.snap_guidance(region, preview_start_node, preview_waypoints, hover_world_position, road_tool, road_draw_mode, road_snap_enabled, road_length_snap_enabled) if road_snap_enabled or road_length_snap_enabled else {}
+			var snap_guide: Dictionary = RoadPlanner.snap_guidance(region, preview_start_node, preview_waypoints, hover_world_position, road_tool, road_draw_mode, road_snap_enabled, road_length_snap_enabled) if preview_start_node>=0 and (road_snap_enabled or road_length_snap_enabled) else {}
 			var ghost: Vector2 = snap_guide.get("position", hover_world_position)
-			var guide_origin: Vector2 = preview_waypoints[-1] if not preview_waypoints.is_empty() else region.road_nodes[preview_start_node].position_km
+			var guide_origin: Vector2 = preview_waypoints[-1] if not preview_waypoints.is_empty() else start
 			var ray: Vector2 = ghost - guide_origin
 			if ray.length() > 0.001:
 				pen.draw_dashed_line(_world_to_screen(guide_origin), _world_to_screen(ghost), Color("a9d4ee", 0.6), 1.0, 6.0, true)
-				if road_snap_enabled or road_length_snap_enabled:
+				if not snap_guide.is_empty():
 					if road_snap_enabled and snap_guide["has_reference"] and (preview_waypoints.is_empty() or multi_curve):
 						var reference: Vector2 = snap_guide["reference"]
 						pen.draw_line(_world_to_screen(guide_origin - reference * 0.12), _world_to_screen(guide_origin), Color("85d4ff"), 3.0, true)
 					pen.draw_string(get_theme_default_font(), _world_to_screen(ghost) + Vector2(10, -8), snap_guide["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d1eaff"))
 			if (multi_curve and not awaiting_guide) or (road_draw_mode == RoadRouteBuilder.CURVED and not preview_waypoints.is_empty()):
-				var curved: PackedVector2Array = RoadPlanner.multi_curve_preview(region, preview_start_node, preview_waypoints, ghost, road_tool, preview_frozen_route) if multi_curve else RoadPlanner.player_route(region, preview_start_node, ghost, road_tool, preview_waypoints, road_draw_mode)
+				var curved: PackedVector2Array
+				if preview_start_node<0:
+					curved=RoadRouteBuilder.build_player(region,start,ghost,road_tool,preview_waypoints,road_draw_mode)
+				else:
+					curved=RoadPlanner.multi_curve_preview(region,preview_start_node,preview_waypoints,ghost,road_tool,preview_frozen_route) if multi_curve else RoadPlanner.player_route(region,preview_start_node,ghost,road_tool,preview_waypoints,road_draw_mode)
 				if not curved.is_empty():
 					points = curved
 				elif not multi_curve:
@@ -1783,7 +1793,16 @@ func _draw_road_preview(pen) -> void:
 			elif not multi_curve:
 				points.append(ghost)
 		var preview_lanes: int = int(road_preview.get("lanes", 2 if road_tool == "Highway" else 1))
-		_draw_dashed_road(pen, _screen_polyline(points), preview_lanes, road_tool, Color("f4dd91"))
+		if road_preview.has("build_plan"):
+			for reused in road_preview.build_plan.reused_intervals:
+				pen.draw_polyline(_screen_polyline(reused.points),Color("91c9ac",.8),4.0,true)
+			for work in road_preview.build_plan.work:
+				_draw_dashed_road(pen,_screen_polyline(work.points),preview_lanes,work.road_class,Color("f4dd91"))
+			for action in road_preview.build_plan.junction_actions:
+				for node in road_preview.build_plan.nodes:
+					if node.id==action.node_id: pen.draw_arc(_world_to_screen(node.point),7.0,0,TAU,24,Color("f4dd91"),2.0,true)
+		else:
+			_draw_dashed_road(pen, _screen_polyline(points), preview_lanes, road_tool, Color("f4dd91"))
 		for span in road_preview.get("terrain_impact", {}).get("spans", []):
 			var color: Color = Color("8ed6e8") if span["kind"] == "Bridge" else (Color("bd9ee9") if span["kind"] == "Tunnel" else Color("e7b984"))
 			pen.draw_polyline(_screen_polyline(span["points"]), color, 5.0, true)
@@ -3038,7 +3057,7 @@ func _gui_input(event: InputEvent) -> void:
 			if new_hover != hovered_id:
 				hovered_id = new_hover
 				refresh_dynamic()
-			elif preview_start_node >= 0 or planning_preview_start.is_finite():
+			elif preview_start_node >= 0 or preview_start_position.is_finite() or planning_preview_start.is_finite():
 				refresh_dynamic()
 
 

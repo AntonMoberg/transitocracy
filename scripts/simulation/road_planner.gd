@@ -8,6 +8,8 @@ const RoadRouteBuilder = preload("res://scripts/simulation/road_route_builder.gd
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
 const StreetSpatial = preload("res://scripts/simulation/street_spatial_index.gd")
+const Topology = preload("res://scripts/simulation/road_topology.gd")
+const BuildPlan = preload("res://scripts/simulation/road_build_plan.gd")
 
 const INTERCHANGE_COST = 10000000
 const INTERCHANGE_UPKEEP = 1000.0
@@ -17,7 +19,15 @@ const DEMOLISH = "Demolish"
 static var surface_phase_us: Dictionary = {}
 
 
-static func link_preview(region, from_id: int, to_id: int, road_class: String, waypoints: PackedVector2Array, day_key: int, draw_mode: String = RoadRouteBuilder.AUTO, end_position: Vector2 = Vector2.ZERO, crossing_choices: Dictionary = {}) -> Dictionary:
+static func link_preview(region, from_id: int, to_id: int, road_class: String, waypoints: PackedVector2Array, day_key: int, draw_mode: String = RoadRouteBuilder.AUTO, end_position: Vector2 = Vector2.ZERO, crossing_choices: Dictionary = {}, start_position: Vector2 = Vector2.INF) -> Dictionary:
+	return BuildPlan.preview(region,{"from":from_id,"to":to_id,"road_class":road_class,"waypoints":waypoints,"day_key":day_key,"draw_mode":draw_mode,"end_position":end_position,"crossing_choices":crossing_choices,"start_position":start_position},Callable(get_script_static(),"_single_preview"),Callable(get_script_static(),"_crossings_for_route"))
+
+
+static func get_script_static():
+	return load("res://scripts/simulation/road_planner.gd")
+
+
+static func _single_preview(region, from_id: int, to_id: int, road_class: String, waypoints: PackedVector2Array, day_key: int, draw_mode: String = RoadRouteBuilder.AUTO, end_position: Vector2 = Vector2.ZERO, crossing_choices: Dictionary = {}) -> Dictionary:
 	if from_id < 0 or from_id >= region.road_nodes.size() or to_id < -1 or to_id >= region.road_nodes.size() or from_id == to_id or (to_id < 0 and (road_class == RoadLinkData.HIGHWAY or draw_mode == RoadRouteBuilder.AUTO)):
 		return {"ok": false, "reason": "Choose two different road nodes."}
 	if road_class != RoadLinkData.ARTERIAL and road_class != RoadLinkData.HIGHWAY:
@@ -42,8 +52,9 @@ static func link_preview(region, from_id: int, to_id: int, road_class: String, w
 	if road_class == RoadLinkData.HIGHWAY:
 		from_tangent = -_single_highway_outward(region, from_id)
 		to_tangent = _single_highway_outward(region, to_id)
-	elif draw_mode in [RoadRouteBuilder.CURVED, RoadRouteBuilder.MULTIPOINT]:
-		from_tangent = arterial_continuation(region, from_id, waypoints[0] if not waypoints.is_empty() else finish)
+	else:
+		from_tangent = Topology.continuation(region,from_id)
+		to_tangent = -Topology.continuation(region,to_id) if to_id>=0 else Vector2.ZERO
 	var points: PackedVector2Array = RoadRouteBuilder.build(region, from_id, to_id, road_class, waypoints, from_tangent, to_tangent) if draw_mode == RoadRouteBuilder.AUTO else player_route(region, from_id, finish, road_class, waypoints, draw_mode, to_id)
 	if points.size() < 2:
 		return {"ok": false, "reason": "This route needs valid guide points and must stay on land."}
@@ -74,6 +85,7 @@ static func link_preview(region, from_id: int, to_id: int, road_class: String, w
 
 
 static func widen_preview(region, link_id: int, day_key: int) -> Dictionary:
+	if BuildPlan.reserved(region,link_id): return {"ok":false,"reason":"Finish construction on the shared road before widening it."}
 	var index: int = RoadGraph.link_index(region, link_id)
 	if index < 0:
 		return {"ok": false, "reason": "Select an open road."}
@@ -93,6 +105,7 @@ static func widen_preview(region, link_id: int, day_key: int) -> Dictionary:
 
 
 static func demolish_preview(region, link_id: int) -> Dictionary:
+	if BuildPlan.reserved(region,link_id): return {"ok":false,"reason":"Finish construction on the shared road before demolishing it."}
 	var index: int = RoadGraph.link_index(region, link_id)
 	if index < 0:
 		return {"ok": false, "reason": "Select an open road to demolish."}
@@ -102,6 +115,15 @@ static func demolish_preview(region, link_id: int) -> Dictionary:
 	var link = region.road_links[index]
 	if link.managed_neighborhood_id >= 0:
 		return {"ok": false, "reason": "This street is managed by its neighborhood development plan."}
+	var arms:=Topology.approaches(region,link_id)
+	var urban:=Topology.settlement_nodes(region)
+	var touched:Array=[link.from_node_id,link.to_node_id]
+	for junction in link.junctions: touched.append(junction.node_id)
+	for id in touched:
+		if urban.has(id) or arms[id].size()!=2: continue
+		var highway:bool=arms[id][0].link.road_class==RoadLinkData.HIGHWAY or arms[id][1].link.road_class==RoadLinkData.HIGHWAY
+		if Topology.join_error(arms[id])>(0.25 if highway else 1.0):
+			return {"ok":false,"reason":"Removing this road would leave a sharp two-road bend. Rebuild its approach first."}
 	return {
 		"ok": true,
 		"kind": DEMOLISH,
@@ -159,10 +181,13 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 		return {"ok": false, "reason": preview.get("reason", "Invalid road project.")}
 	match preview["kind"]:
 		RoadProjectData.NEW_LINK:
-			var choices: Dictionary = {}
-			for crossing in preview.get("crossings", []):
-				choices[crossing["key"]] = crossing["above"]
-			preview = link_preview(region, preview["from"], preview["to"], preview["road_class"], preview.get("waypoints", PackedVector2Array()), day_key, preview.get("draw_mode", RoadRouteBuilder.AUTO), preview.get("end_position", Vector2.ZERO), choices)
+			if preview.has("build_plan"):
+				if preview.build_plan.revision!=region.road_geometry_revision or preview.build_plan.request.day_key!=day_key or not BuildPlan.valid_dependencies(region,preview.build_plan):
+					return {"ok":false,"reason":"This road preview is out of date. Refresh it before funding."}
+			else:
+				var choices: Dictionary = {}
+				for crossing in preview.get("crossings", []): choices[crossing["key"]] = crossing["above"]
+				preview = link_preview(region, preview["from"], preview["to"], preview["road_class"], preview.get("waypoints", PackedVector2Array()), day_key, preview.get("draw_mode", RoadRouteBuilder.AUTO), preview.get("end_position", Vector2.ZERO), choices)
 		RoadProjectData.WIDEN:
 			preview = widen_preview(region, preview["target_link_id"], day_key)
 		RoadProjectData.INTERCHANGE_NODE:
@@ -174,7 +199,18 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 	var owner_id: int = int(preview["owner_id"])
 	if not region.dev_mode and region.jurisdictions[owner_id].treasury < float(preview["cost"]):
 		return {"ok": false, "reason": "Insufficient treasury funds."}
-	if preview["kind"] == RoadProjectData.NEW_LINK and int(preview["to"]) < 0:
+	var node_map:Dictionary={}
+	if preview.has("build_plan"):
+		preview=preview.duplicate(true)
+		for pending in preview.build_plan.nodes:
+			var node=RoadNodeData.new()
+			node.id=region.road_nodes.size()
+			node.position_km=pending.point
+			node.city_id=region.city_id_at_point(node.position_km)
+			node_map[pending.id]=node.id
+			region.road_nodes.append(node)
+		BuildPlan.remap(preview.build_plan,node_map)
+	elif preview["kind"] == RoadProjectData.NEW_LINK and int(preview["to"]) < 0:
 		var end_node = RoadNodeData.new()
 		end_node.id = region.road_nodes.size()
 		end_node.position_km = preview["end_position"]
@@ -191,8 +227,9 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 	project.owner_jurisdiction_id = owner_id
 	match project.kind:
 		RoadProjectData.NEW_LINK:
-			project.from_node_id = preview["from"]
-			project.to_node_id = preview["to"]
+			project.build_plan=preview.get("build_plan",{})
+			project.from_node_id = node_map.get(project.build_plan.get("from",preview["from"]),project.build_plan.get("from",preview["from"]))
+			project.to_node_id = node_map.get(project.build_plan.get("to",preview["to"]),project.build_plan.get("to",preview["to"]))
 			project.road_class = preview["road_class"]
 			project.lanes_per_direction = preview["lanes"]
 			project.points = preview["points"]
@@ -209,13 +246,18 @@ static func commit(region, preview: Dictionary, day_key: int) -> Dictionary:
 	if not region.dev_mode:
 		region.jurisdictions[owner_id].treasury -= float(project.cost)
 	region.road_projects.append(project)
+	region.road_project_notice=""
 	if project.kind == RoadProjectData.NEW_LINK:
-		RoadLand.apply(region, project.points, project.road_class, project.id, preview["land_impact"])
+		if not project.build_plan.is_empty():
+			for work in project.build_plan.work: RoadLand.apply(region,work.points,work.road_class,project.id,work.land)
+		else:
+			RoadLand.apply(region, project.points, project.road_class, project.id, preview["land_impact"])
 		region.road_geometry_revision += 1
 	return {"ok": true, "project": project}
 
 
 static func add_junction(region, point: Vector2, split_link_id: int = -1) -> Dictionary:
+	if BuildPlan.reserved(region,split_link_id): return {"ok":false,"reason":"Finish construction on this road before adding another junction."}
 	if not _inside_map(point, region):
 		return {"ok": false, "reason": "Place junctions inside the region."}
 	if region.terrain != null and region.terrain.water_at(point):
@@ -265,6 +307,12 @@ static func advance_day(region, day_key: int) -> bool:
 			continue
 		match project.kind:
 			RoadProjectData.NEW_LINK:
+				if not project.build_plan.is_empty():
+					if BuildPlan.open(region,project):
+						for corridor in project.build_plan.get("opened_corridors",[]):
+							_connect_surface_crossings(region,corridor)
+					changed=true
+					continue
 				_append_link(region, project.from_node_id, project.to_node_id, project.road_class, project.lanes_per_direction, project.points, project.owner_jurisdiction_id)
 				region.road_links[-1].crossings = project.crossings.duplicate(true)
 				region.road_links[-1].terrain_spans = project.terrain_spans.duplicate(true)
@@ -372,11 +420,12 @@ static func attach_junction(region, link_id: int, node_id: int) -> void:
 		return
 	var link = region.road_links[index]
 	var node = region.road_nodes[node_id]
+	if node_id in [link.from_node_id,link.to_node_id]: return
 	var point: Vector2 = closest_point(link.points, node.position_km)
+	# An attachment cannot silently move a node serving another road.
+	if point.distance_to(node.position_km)>Topology.EPS:
+		return
 	var station: float = station_for(link.points, point)
-	if station <= 0.002 or station >= link.length_km - 0.002:
-		station = clampf(station, 0.002, maxf(0.002, link.length_km - 0.002))
-	node.position_km = point
 	for junction in link.junctions:
 		if int(junction["node_id"]) == node_id:
 			junction["station_km"] = station
@@ -485,11 +534,10 @@ static func _split_link(region, link_id: int, new_node_id: int, point: Vector2) 
 static func _rebased_junctions(region, junctions: Array[Dictionary], points: PackedVector2Array) -> Array[Dictionary]:
 	if junctions.is_empty():
 		return []
-	var length: float = _length(points)
 	var result: Array[Dictionary] = []
 	for junction in junctions:
 		var node_point: Vector2 = region.road_nodes[int(junction["node_id"])].position_km
-		var station: float = clampf(station_for(points, node_point), 0.002, maxf(0.002, length - 0.002))
+		var station: float = station_for(points, node_point)
 		result.append({"node_id": junction["node_id"], "station_km": station})
 	return result
 
@@ -564,6 +612,7 @@ static func _connect_surface_crossings(region, corridor_id: int) -> void:
 				var point = Geometry2D.segment_intersects_segment(first, last, other_first, other_last)
 				if point == null:
 					continue
+				if Topology.structured(other,point) or Topology.structured(region.road_links[probe_link],point): continue
 				crossings.append({"first": region.road_links[probe_link], "second": other, "point": point})
 	surface_phase_us["scan"] = int(surface_phase_us.get("scan", 0)) + iterate_started - scan_started
 	var fix_started: int = Time.get_ticks_usec()
@@ -636,7 +685,7 @@ static func _clean_polyline(points: PackedVector2Array) -> PackedVector2Array:
 	return result
 
 
-static func _crossings_for_route(region, points: PackedVector2Array, road_class: String, choices: Dictionary) -> Array[Dictionary]:
+static func _crossings_for_route(region, points: PackedVector2Array, road_class: String, choices: Dictionary, excluded_link_id:int=-1) -> Array[Dictionary]:
 	var crossings: Array[Dictionary] = []
 	if points.size() < 2:
 		return crossings
@@ -648,6 +697,7 @@ static func _crossings_for_route(region, points: PackedVector2Array, road_class:
 		for pair in range(0, pairs.size(), 2):
 			var link_index: int = pairs[pair]
 			var link = region.road_links[link_index]
+			if link.id==excluded_link_id: continue
 			if link.road_class != RoadLinkData.HIGHWAY and not highway_route:
 				continue
 			var b: int = pairs[pair + 1]
@@ -824,8 +874,9 @@ static func player_route(region, start_id: int, end: Vector2, road_class: String
 		tangent = -_single_highway_outward(region, start_id)
 		if end_id >= 0:
 			final_tangent = _single_highway_outward(region, end_id)
-	elif mode in [RoadRouteBuilder.CURVED, RoadRouteBuilder.MULTIPOINT]:
-		tangent = arterial_continuation(region, start_id, guides[0] if not guides.is_empty() else end)
+	else:
+		tangent=Topology.continuation(region,start_id)
+		final_tangent=-Topology.continuation(region,end_id) if end_id>=0 else Vector2.ZERO
 	return RoadRouteBuilder.build_player(region, region.road_nodes[start_id].position_km, end, road_class, guides, mode, tangent, final_tangent)
 
 

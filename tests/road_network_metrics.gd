@@ -3,6 +3,7 @@ extends SceneTree
 const Network = preload("res://scripts/simulation/road_network_generator.gd")
 const Graph = preload("res://scripts/simulation/road_graph.gd")
 const Route = preload("res://scripts/simulation/road_route_builder.gd")
+const Topology = preload("res://scripts/simulation/road_topology.gd")
 var errors: Array[String] = []
 const Setup = preload("res://scripts/simulation/region_setup.gd")
 
@@ -16,7 +17,21 @@ func _initialize() -> void:
 		for seed_value in seeds:
 			var started := Time.get_ticks_msec()
 			var region = Setup.build(seed_value, cities, 0.10).region
+			_check(region.validation_errors().is_empty(),"region validation failed: %s" % region.validation_errors())
 			var totals := {}
+			var topology:=Topology.audit(region,true)
+			print("TOPOLOGY_AUDIT ",topology)
+			for id in topology.attachments:
+				for link in region.road_links:
+					if link.id!=id: continue
+					print("Attachment ",id," endpoints ",link.points[0].distance_to(region.road_nodes[link.from_node_id].position_km),"/",link.points[-1].distance_to(region.road_nodes[link.to_node_id].position_km))
+					for junction in link.junctions:
+						var gap:float=Topology.sample(link.points,junction.station_km).point.distance_to(region.road_nodes[junction.node_id].position_km)
+						if gap>Topology.EPS: print(" interior ",junction," gap ",gap)
+			for id in topology.dead_ends: print("Dead end ",id," ",Topology.node_approaches(region,id).map(func(a):return [a.link.id,a.link.road_class,a.link.length_km]))
+			_check(topology.dead_ends.is_empty(),"generated rural dead ends")
+			_check(topology.kinks.is_empty(),"discontinuous two-arm joins")
+			_check(topology.attachments.is_empty(),"road geometry detached from nodes")
 			for link in region.road_links:
 				var key: String = link.road_class
 				if not totals.has(key): totals[key] = {"count": 0, "km": 0.0}

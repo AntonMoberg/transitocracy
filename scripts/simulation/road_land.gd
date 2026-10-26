@@ -244,6 +244,12 @@ static func mark_open(region, project_id: int, link_id: int) -> void:
 			return
 
 
+static func release_project(region,project_id:int) -> void:
+	for i in range(region.road_reservations.size()-1,-1,-1):
+		if int(region.road_reservations[i].project_id)==project_id: region.road_reservations.remove_at(i)
+	for neighborhood in region.neighborhoods: _recalculate_neighborhood(region,neighborhood)
+
+
 static func split_link_reservation(region, old_id: int, new_id: int, first: PackedVector2Array, second: PackedVector2Array) -> void:
 	for reservation in region.road_reservations:
 		if int(reservation["link_id"]) != old_id:

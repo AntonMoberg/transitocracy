@@ -21,7 +21,23 @@ static func build_player(region, first: Vector2, last: Vector2, road_class: Stri
 		return PackedVector2Array()
 	var land: PackedVector2Array = region.jurisdictions[0].polygon_km
 	if mode == STRAIGHT:
-		return PackedVector2Array([first, last]) if first.distance_to(last) >= 0.1 and StateGeography.segment_on_land(land, first, last) else PackedVector2Array()
+		if first.distance_to(last)<0.1 or not StateGeography.segment_on_land(land,first,last): return PackedVector2Array()
+		var chord:Vector2=(last-first).normalized()
+		if (start_tangent==Vector2.ZERO or start_tangent.dot(chord)>.99999) and (end_tangent==Vector2.ZERO or end_tangent.dot(chord)>.99999): return PackedVector2Array([first,last])
+		var reach:float=minf(first.distance_to(last)*.45,maxf(1.6,first.distance_to(last)*.2))
+		var path:=PackedVector2Array([first])
+		var lead:float=minf(.1,reach*.05)
+		if start_tangent!=Vector2.ZERO:
+			path.append(first+start_tangent*lead)
+			var body:Vector2=first+chord*reach
+			if not _sample_player_curve(land,path,path[-1],path[-1]+start_tangent*reach*.5,body-chord*reach*.5,body,0): return PackedVector2Array()
+		if end_tangent!=Vector2.ZERO:
+			var body:Vector2=last-chord*reach
+			if path[-1].distance_to(body)>.000001: path.append(body)
+			var finish:Vector2=last-end_tangent*lead
+			if not _sample_player_curve(land,path,body,body+chord*reach*.5,finish-end_tangent*reach*.5,finish,0): return PackedVector2Array()
+		path.append(last)
+		return path
 	if mode == MULTIPOINT:
 		var route := PackedVector2Array([first])
 		var curve_start: Vector2 = first
@@ -130,7 +146,7 @@ static func build(region, from_id: int, to_id: int, road_class: String, waypoint
 				safe_path.append(safe_leg[point_index])
 	if safe_path.size() < 2:
 		return safe_path
-	if road_class == RoadLinkData.ARTERIAL and waypoints.is_empty() and safe_path.size() == 2:
+	if road_class == RoadLinkData.ARTERIAL and waypoints.is_empty() and safe_path.size() == 2 and from_tangent==Vector2.ZERO and to_tangent==Vector2.ZERO:
 		return safe_path
 	# Use one bend scale for the whole route so adjoining segments keep the same tangent.
 	var highway: bool = road_class == RoadLinkData.HIGHWAY

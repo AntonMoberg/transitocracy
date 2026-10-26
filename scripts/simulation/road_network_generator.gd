@@ -6,6 +6,7 @@ const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
 const Planner = preload("res://scripts/simulation/terrain_route_planner.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
+const Topology = preload("res://scripts/simulation/road_topology.gd")
 
 const COUNTRYSIDE_SPACING_KM = 30.0
 
@@ -62,11 +63,24 @@ static func generate(region) -> void:
 		print("Countryside roads: %d links in %d ms" % [region.road_links.size(), Time.get_ticks_msec() - generation_started])
 		_assign_highway_access(region, planner, highways.get("gate_cities", {}))
 		_promote_access_spurs(region)
+		print("Shared corridors: ", Topology.consolidate(region))
+		print("Road topology: ", Topology.cleanup(region))
+		# Prune unused branches first: otherwise a temporary third arm can
+		# hide a bend that becomes impossible once its overlapping fork moves.
+		var short_merges:=Topology.consolidate_approaches(region)
+		print("Shared approaches: ",short_merges)
+		if short_merges>0: print("Final road topology: ",Topology.cleanup(region))
+		_assign_highway_access(region, planner, highways.get("gate_cities", {}))
 		_mark_map_backbone(region)
 		print("Regional roads complete: %d ms" % (Time.get_ticks_msec() - generation_started))
 	for link in region.road_links:
-		if link.road_class != Roads.COLLECTOR:
-			link.owner_jurisdiction_id = region.road_owner_for_points(link.points, link.road_class)
+		link.owner_jurisdiction_id = region.road_owner_for_points(link.points, link.road_class)
+		if link.road_class==Roads.HIGHWAY:
+			var access:Array=[link.from_node_id,link.to_node_id]
+			for junction in link.junctions: access.append(junction.node_id)
+			for id in access:
+				region.road_nodes[id].is_interchange=true
+				region.road_nodes[id].interchange_owner_jurisdiction_id=link.owner_jurisdiction_id
 	region.street_spatial_cache = {}
 
 
@@ -117,6 +131,23 @@ static func _add_site(region, sites: Array[Dictionary], point: Vector2) -> void:
 	sites.append({"point": point, "node": node.id, "city": -1, "tangent": Vector2.ZERO})
 
 
+static func _facing_city_site(sites:Array[Dictionary],site_id:int,target:Vector2) -> int:
+	var city_id:int=sites[site_id].city
+	if city_id<0: return site_id
+	var best:=site_id
+	var best_score:=INF
+	for i in range(sites.size()):
+		if sites[i].city!=city_id: continue
+		var delta:Vector2=target-sites[i].point
+		var facing:float=sites[i].tangent.normalized().dot(delta.normalized())
+		# Attach on the side facing the incoming route. Nearest-point-only
+		# selection can force a road to loop around an outward-facing city gate.
+		var score:float=delta.length()+maxf(0.0,.25-facing)*8.0
+		if score<best_score:
+			best=i
+			best_score=score
+	return best
+
 static func _proximity_edges(region, sites: Array[Dictionary]) -> Array[Dictionary]:
 	var positions := PackedVector2Array()
 	for site in sites:
@@ -128,6 +159,9 @@ static func _proximity_edges(region, sites: Array[Dictionary]) -> Array[Dictiona
 		for corner in range(3):
 			var a: int = triangles[index + corner]
 			var b: int = triangles[index + (corner + 1) % 3]
+			if sites[a].city>=0 and sites[a].city==sites[b].city: continue
+			a=_facing_city_site(sites,a,positions[b])
+			b=_facing_city_site(sites,b,positions[a])
 			var key := Vector2i(mini(a, b), maxi(a, b))
 			if seen.has(key) or (sites[a]["city"] >= 0 and sites[a]["city"] == sites[b]["city"]):
 				continue
@@ -253,7 +287,8 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 		if link.road_class == Roads.COLLECTOR and (city_gate_nodes.has(link.from_node_id) or city_gate_nodes.has(link.to_node_id)):
 			if link.length_km < 18.0:
 				link.road_class = Roads.ARTERIAL
-	_de_braid(region)
+	# Shared valley alignments are consolidated after the network is assembled.
+	# Rerouting a road in isolation discarded its existing junctions.
 
 
 const BRAID_SAMPLE_KM := 2.0

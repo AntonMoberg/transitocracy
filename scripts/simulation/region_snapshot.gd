@@ -22,6 +22,7 @@ static func _copy_large_region(source):
 	copy.generation_seed = source.generation_seed
 	copy.terrain = source.terrain
 	copy.dev_mode = source.dev_mode
+	copy.road_project_notice = source.road_project_notice
 	copy.starting_city_ids = source.starting_city_ids.duplicate()
 	copy.neighborhood_development_connected = source.neighborhood_development_connected.duplicate()
 	copy.is_large_scale = true
@@ -160,6 +161,7 @@ static func _copy_large_region(source):
 		node.neighborhood_id = original.neighborhood_id
 		node.city_id = original.city_id
 		node.is_interchange = original.is_interchange
+		node.is_urban_street = original.is_urban_street
 		node.interchange_owner_jurisdiction_id = original.interchange_owner_jurisdiction_id
 		node.managed_neighborhood_id = original.managed_neighborhood_id
 		copy.road_nodes.append(node)

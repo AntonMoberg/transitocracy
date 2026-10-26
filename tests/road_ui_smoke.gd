@@ -113,6 +113,9 @@ func _run_checks() -> void:
 		main._on_road_empty_clicked(multi_case["end_two"])
 		_check(main.road_waypoints.size() == 4 and main.map_view.preview_frozen_route.size() > frozen_first.size(), "the fourth click should lock a second curve")
 		main._on_road_empty_double_clicked(multi_case["end_two"])
+		var deadline:int=Time.get_ticks_msec()+30000
+		while main.road_preview_thread!=null and Time.get_ticks_msec()<deadline:
+			await process_frame
 		_check(main.pending_road_preview.get("ok", false) and main.pending_road_preview.get("points", PackedVector2Array()) == multi_case["preview"]["points"], "double clicking a locked end should finish the two-curve route")
 		main._cancel_road_preview()
 	var initial_links: int = main.region.road_links.size()
