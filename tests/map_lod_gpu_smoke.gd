@@ -13,7 +13,7 @@ func _run() -> void:
 	root.content_scale_size = root.size
 	var renderer := Renderer.new()
 	root.add_child(renderer)
-	renderer.map = {"base_map_style":"Map","map_mode":"Roads","show_traffic_overlay":false,"selected_local_street":Vector2i(-1,-1),"selected_road_link_id":-1}
+	renderer.map = {"map_mode":"Roads","show_traffic_overlay":false,"selected_local_street":Vector2i(-1,-1),"selected_road_link_id":-1}
 	var features := []
 	for style in range(5):
 		var y: float = .4 + style * .8

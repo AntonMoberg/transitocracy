@@ -157,17 +157,14 @@ var last_drawn_neighborhood_borders: int = 0
 var terrain_base_textures: Dictionary = {}
 var terrain_texture: ImageTexture
 var terrain_relief_texture: ImageTexture
-var satellite_texture: ImageTexture
 var terrain_slope_texture: ImageTexture
 var terrain_contour_texture: ImageTexture
 var terrain_texture_source = null
-var base_map_style := "Map"
 var show_terrain_overlay := false
 var show_slope_overlay := false
 var show_contours := false
 var show_traffic_overlay := false
 var show_transit_overlay := false
-var base_map_selector: OptionButton
 var terrain_toggle_button: Button
 var slope_toggle_button: Button
 var contour_toggle_button: Button
@@ -240,16 +237,6 @@ func _ready() -> void:
 			button.tooltip_text = "Zoom in" if label == "+" else "Zoom out"
 			button.pressed.connect(func() -> void: _zoom_at(size * 0.5, factor))
 		navigation.add_child(button)
-	base_map_selector = OptionButton.new()
-	base_map_selector.add_item("Map")
-	base_map_selector.add_item("Satellite")
-	base_map_selector.selected = 0
-	base_map_selector.tooltip_text = "Choose a simple map or a natural-color satellite-style view"
-	base_map_selector.focus_mode = Control.FOCUS_NONE
-	base_map_selector.item_selected.connect(func(index: int) -> void:
-		set_base_map_style("Satellite" if index == 1 else "Map")
-	)
-	navigation.add_child(base_map_selector)
 	var layers := HBoxContainer.new()
 	layers.name = "MapLayers"
 	layers.z_index = 200
@@ -326,7 +313,6 @@ func set_region(new_region) -> void:
 		terrain_uploads.clear()
 		if new_region == null:
 			terrain_relief_texture = null
-			satellite_texture = null
 			terrain_slope_texture = null
 			terrain_contour_texture = null
 	district_fill_meshes.clear()
@@ -369,7 +355,7 @@ func _process(_delta: float) -> void:
 		urban_layer.last_street_count = chunk_renderer.visible_streets
 		last_drawn_neighborhood_borders = chunk_renderer.visible_districts
 		_apply_static_transform()
-		var camera_key := "%s:%s:%s:%s:%s:%s:%s" % [pan, zoom, size, base_map_style, show_terrain_overlay, show_slope_overlay, show_contours]
+		var camera_key := "%s:%s:%s:%s:%s:%s" % [pan, zoom, size, show_terrain_overlay, show_slope_overlay, show_contours]
 		if camera_key != terrain_view_key:
 			terrain_view_key = camera_key
 			_static_update()
@@ -397,7 +383,7 @@ func _process(_delta: float) -> void:
 			terrain_detail_active.erase(key)
 			continue
 		var names: Array[String] = []
-		for name in ["color", "terrain", "satellite", "slope", "contours", "map_field"]:
+		for name in ["color", "terrain", "slope", "contours", "map_field"]:
 			if result.has(name): names.append(name)
 		names.append("map_mesh")
 		terrain_uploads.append({"key": key, "images": result, "textures": {}, "part": 0, "names": names})
@@ -418,7 +404,6 @@ func _process(_delta: float) -> void:
 			terrain_base_textures = upload.textures
 			terrain_texture = upload.textures.color
 			terrain_relief_texture = upload.textures.terrain
-			satellite_texture = upload.textures.satellite
 			terrain_slope_texture = upload.textures.slope
 			terrain_contour_texture = upload.textures.contours
 			terrain_layer.refresh_base()
@@ -509,20 +494,6 @@ func set_traffic_profile(new_profile) -> void:
 
 func set_map_mode(mode: String) -> void:
 	map_mode = mode
-	refresh_static()
-
-
-func set_base_map_style(style: String) -> void:
-	base_map_style = style
-	queue_redraw()
-	if base_map_selector != null:
-		base_map_selector.select(1 if style == "Satellite" else 0)
-	if terrain_toggle_button != null:
-		terrain_toggle_button.disabled = style == "Satellite"
-	if slope_toggle_button != null:
-		slope_toggle_button.disabled = style == "Satellite"
-	if contour_toggle_button != null:
-		contour_toggle_button.disabled = style == "Satellite"
 	refresh_static()
 
 
@@ -931,7 +902,7 @@ func _hit_aggregate_node(screen_position: Vector2) -> int:
 
 
 func _draw() -> void:
-	draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else MapStyle.WATER)
+	draw_rect(Rect2(Vector2.ZERO, size), MapStyle.WATER)
 	# The control supplies the water background. Retained terrain/geometry
 	# and interactive overlays draw above it. External redraws refresh labels.
 	if dynamic_overlay != null:
@@ -941,7 +912,7 @@ func _draw() -> void:
 func _draw_static_content(pen) -> void:
 	# Runs inside static_layer._draw() with the bake view swapped in.
 	if region == null:
-		pen.draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else MapStyle.WATER)
+		pen.draw_rect(Rect2(Vector2.ZERO, size), MapStyle.WATER)
 		return
 	static_bake_queued = false
 	# Commit the pending bake values; the transform in _process uses these
@@ -1355,8 +1326,6 @@ func _draw_overview_road(pen, screen_points: PackedVector2Array, road_class: Str
 	var outer_width: float = 4.0 if highway else (2.0 if rural else 2.8)
 	var inner_width: float = 2.45 if highway else (1.0 if rural else 1.55)
 	var route_color: Color = Color("8193b1") if highway else Color("a5aeb4")
-	if base_map_style == "Satellite":
-		route_color = Color("a8b8b1") if highway else Color("a8aea1")
 	if show_traffic_overlay:
 		route_color = forward_color.lerp(reverse_color, 0.5)
 	if map_mode == "Trips":
@@ -1997,14 +1966,14 @@ func _visible_zoning_candidate_at(point: Vector2) -> int:
 func _draw_boundaries(pen) -> void:
 	var state_polygon: PackedVector2Array = _screen_polyline(region.jurisdictions[0].polygon_km)
 	if state_polygon.size() >= 3:
-		pen.draw_colored_polygon(state_polygon, Color("829576") if base_map_style == "Satellite" else Color("c7e9d6"))
+		pen.draw_colored_polygon(state_polygon, Color("c7e9d6"))
 		if terrain_texture != null:
 			var bounds: Rect2 = region.terrain.bounds
-			var base_texture: ImageTexture = satellite_texture if base_map_style == "Satellite" else (terrain_relief_texture if show_terrain_overlay else terrain_texture)
+			var base_texture: ImageTexture = terrain_relief_texture if show_terrain_overlay else terrain_texture
 			pen.draw_texture_rect(base_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * view_zoom), false)
-			if base_map_style == "Map" and show_slope_overlay and terrain_slope_texture != null:
+			if show_slope_overlay and terrain_slope_texture != null:
 				pen.draw_texture_rect(terrain_slope_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * view_zoom), false)
-			if base_map_style == "Map" and show_contours and terrain_contour_texture != null:
+			if show_contours and terrain_contour_texture != null:
 				pen.draw_texture_rect(terrain_contour_texture, Rect2(_world_to_screen(bounds.position), bounds.size * _map_scale() * view_zoom), false)
 			_draw_terrain_detail(pen)
 		_draw_terrain_water(pen)
@@ -2025,7 +1994,7 @@ func _draw_boundaries(pen) -> void:
 				continue
 			var color: Color = _jurisdiction_color(kind)
 			color.a = {"City": 0.46, "County": 0.72, "Region": 0.92}[kind]
-			if base_map_style == "Map" and map_mode != "Zoning":
+			if map_mode != "Zoning":
 				color.a = 0.12
 			if region.is_large_scale and view_zoom < 2.0:
 				color.a = 0.11 if kind == "County" else 0.31
@@ -2037,7 +2006,7 @@ func _draw_boundaries(pen) -> void:
 
 
 func _needs_terrain_raster() -> bool:
-	return base_map_style == "Satellite" or show_terrain_overlay or show_slope_overlay or show_contours
+	return show_terrain_overlay or show_slope_overlay or show_contours
 
 
 func _terrain_tile_ready(key: Vector3i) -> bool:
@@ -2049,9 +2018,9 @@ func _draw_terrain_detail(pen) -> void:
 	var level := -1
 	if pixels_per_km >= 2.0:
 		var target_texel_pixels := 2.0
-		if base_map_style == "Satellite" or show_terrain_overlay:
+		if show_terrain_overlay:
 			target_texel_pixels = 2.5
-		if base_map_style == "Map" and show_terrain_overlay and pixels_per_km < 20.0:
+		if show_terrain_overlay and pixels_per_km < 20.0:
 			target_texel_pixels = 1.5
 		for index in range(TERRAIN_DETAIL_STEPS.size()):
 			level = index
@@ -2130,15 +2099,15 @@ func _draw_cached_terrain_level(pen, terrain, level: int, visible_world: Rect2, 
 			var tile: Dictionary = terrain_detail_tiles[key]
 			var origin: Vector2 = terrain.bounds.position + Vector2(x, y) * tile_km
 			var screen_rect := Rect2(_world_to_screen(origin), Vector2.ONE * tile_km * pixels_per_km)
-			var texture_key: String = "satellite" if base_map_style == "Satellite" else ("terrain" if show_terrain_overlay else "color")
-			if base_map_style == "Map" and not show_terrain_overlay and tile.get("map_mesh") != null:
+			var texture_key: String = "terrain" if show_terrain_overlay else "color"
+			if not show_terrain_overlay and tile.get("map_mesh") != null:
 				var transform := Transform2D(Vector2(pixels_per_km, 0.0), Vector2(0.0, pixels_per_km), screen_rect.position)
 				pen.draw_mesh(tile["map_mesh"], null, transform)
 			else:
 				pen.draw_texture_rect(tile[texture_key], screen_rect, false)
-			if base_map_style == "Map" and show_slope_overlay:
+			if show_slope_overlay:
 				pen.draw_texture_rect(tile["slope"], screen_rect, false)
-			if base_map_style == "Map" and show_contours:
+			if show_contours:
 				pen.draw_texture_rect(tile["contours"], screen_rect, false)
 
 
@@ -2156,7 +2125,7 @@ func _draw_terrain_water(pen) -> void:
 		var polygon := PackedVector2Array()
 		for point in lake["polygon"]:
 			polygon.append(_world_to_screen(point))
-		pen.draw_colored_polygon(polygon, Color("477d8c") if base_map_style == "Satellite" else Color("79cde2"))
+		pen.draw_colored_polygon(polygon, Color("79cde2"))
 	for river in terrain.rivers:
 		if _map_scale() * view_zoom < 2.0 and float(river["width_km"]) < 0.12:
 			continue
@@ -2167,7 +2136,7 @@ func _draw_terrain_water(pen) -> void:
 			continue
 		var line: PackedVector2Array = river["points"]
 		var widths: PackedFloat32Array = river.get("widths_km", PackedFloat32Array())
-		var water_color: Color = Color("4b8290") if base_map_style == "Satellite" else Color("6cc2dc")
+		var water_color: Color = Color("6cc2dc")
 		for i in range(1, line.size()):
 			var a: Vector2 = _world_to_screen(line[i - 1])
 			var b: Vector2 = _world_to_screen(line[i])
@@ -2257,7 +2226,7 @@ func _jurisdiction_color(kind: String) -> Color:
 
 
 func _jurisdiction_label_text(area) -> String:
-	if area.kind == "City" and base_map_style == "Map":
+	if area.kind == "City":
 		return area.name
 	var space: float = _jurisdiction_screen_rect(area).size.x
 	if area.kind == "City" and region.city_development_state(area.id) != "Dormant":
@@ -2314,7 +2283,7 @@ func _ensure_jurisdiction_labels() -> void:
 	# Cache world-space anchors within zoom bands and 256-pixel pan cells.
 	# Recompute when new areas enter view, not on every navigation frame.
 	var band := _zoom_band()
-	var key: String = "%d:%s:%d:%s:%d:%s:%s:%d" % [region.generation_seed, size, band, detail_level, selected_jurisdiction_id, Vector2i(pan / 256.0), base_map_style, region.current_day_key]
+	var key: String = "%d:%s:%d:%s:%d:%s:%d" % [region.generation_seed, size, band, detail_level, selected_jurisdiction_id, Vector2i(pan / 256.0), region.current_day_key]
 	if key == jurisdiction_layout_key:
 		return
 	jurisdiction_layout_key = key
@@ -2333,7 +2302,7 @@ func _ensure_jurisdiction_labels() -> void:
 	var font := get_theme_default_font()
 	var band_scale: float = _map_scale() * _band_zoom(band)
 	for area in ordered:
-		var font_size := 13 if area.kind == "City" and base_map_style == "Map" else (11 if area.kind == "Region" else (10 if area.kind == "County" else 9))
+		var font_size := 13 if area.kind == "City" else (11 if area.kind == "Region" else (10 if area.kind == "County" else 9))
 		var width: float = maxf(20.0, font.get_string_size(_jurisdiction_label_text(area), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + 8.0)
 		var anchor: Vector2 = city_label_points.get(area.id, area.center_km)
 		var center: Vector2 = size * 0.5 + pan + (anchor - _world_center()) * band_scale
@@ -2369,7 +2338,7 @@ func _draw_jurisdiction_labels(pen) -> void:
 			var rect: Rect2 = _jurisdiction_label_rect(area)
 			var color: Color = _jurisdiction_color(kind)
 			var selected: bool = area.id == selected_jurisdiction_id
-			if kind == "City" and base_map_style == "Map":
+			if kind == "City":
 				var position: Vector2 = rect.position + Vector2(4.0, 12.0)
 				pen.draw_string_outline(font, position, area.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, 3, Color("f5f6ef"))
 				pen.draw_string(font, position, area.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("4b5b60"))
@@ -2407,7 +2376,7 @@ func _is_recorded_time() -> bool:
 
 
 func _draw_cities(pen) -> void:
-	if base_map_style == "Map" and map_mode != "Zoning":
+	if map_mode != "Zoning":
 		return
 	for city in region.cities:
 		var area = region.jurisdictions[city["jurisdiction_id"]]
@@ -2552,7 +2521,7 @@ func _draw_neighborhoods(pen) -> void:
 		label_order.append(selected_id)
 	if hovered_id >= 0 and hovered_id != selected_id:
 		label_order.append(hovered_id)
-	if view_zoom >= 1.8 and (base_map_style != "Map" or _pixels_per_meter() >= 0.15) and (not region.is_large_scale or _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM >= 20.0):
+	if view_zoom >= 1.8 and _pixels_per_meter() >= 0.15 and (not region.is_large_scale or _map_scale() * view_zoom * StateGeography.CELL_SIZE_KM >= 20.0):
 		for neighborhood_index in neighborhood_indices:
 			var neighborhood = region.neighborhoods[neighborhood_index]
 			if neighborhood.id != selected_id and neighborhood.id != hovered_id and _screen_visible(_world_to_screen(neighborhood.position_km), 25.0) and neighborhood.id % stride == 0:

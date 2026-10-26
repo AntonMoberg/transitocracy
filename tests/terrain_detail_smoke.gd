@@ -48,7 +48,6 @@ func _run() -> void:
 		var images: Dictionary = TerrainDetailTile.render(terrain, region.jurisdictions[0].polygon_km, origin, step_km)
 		_check(images["color"].get_width() == TerrainDetailTile.PIXELS, "detail renderer must produce full size tiles")
 		_check(images["terrain"].get_width() == TerrainDetailTile.PIXELS, "detail renderer must produce shaded terrain tiles")
-		_check(images["satellite"].get_width() == TerrainDetailTile.PIXELS, "detail renderer must produce satellite-style tiles")
 		_check(images["contours"].get_width() == TerrainDetailTile.PIXELS, "terrain tiles must carry contour overlays")
 		# The cached derivative optimization must agree with direct world
 		# sampling, including cells crossing the original 2 km height grid.
@@ -60,7 +59,7 @@ func _run() -> void:
 				var expected := Style.landscape_field(terrain,point)
 				var actual := field.get_pixel(x,y)
 				_check(absf(actual.r-expected.r)<.001 and absf(actual.g-expected.g)<.001 and absf(actual.b-expected.b)<.001 and absf(actual.a-expected.a)<.001,"cached landscape derivative changes world-space cover")
-		_check(not map.terrain_detail_tiles[key].has("satellite"), "plain Map must not wait for unused raster styles")
+		_check(not map.terrain_detail_tiles[key].has("terrain"), "plain Map must not wait for unused raster styles")
 	# Enabling analysis at the same zoom invalidates readiness, keeps a base
 	# available, and upgrades cached Map-only entries rather than using blanks.
 	map.show_slope_overlay = true
@@ -83,7 +82,6 @@ func _run() -> void:
 	_check(lowland.g > lowland.r and foothill.g > foothill.r and foothill.g < lowland.g, "wooded hills must deepen from light green open land")
 	_check(alpine.r > alpine.g and alpine.g > alpine.b, "exposed mountain rock must use sand colors")
 	_check(not TerrainDetailTile.terrain_color(500.0, Vector2.ZERO).is_equal_approx(TerrainDetailTile.terrain_color(500.0, Vector2(0.3, 0.1))), "terrain toggle must add relief shading")
-	_check(not TerrainDetailTile.satellite_color(500.0, Vector2.ZERO).is_equal_approx(TerrainDetailTile.land_color(500.0, Vector2.ZERO)), "satellite style must use distinct natural colors")
 	var contour_pixels := 0
 	for y in range(TerrainDetailTile.PIXELS):
 		for x in range(TerrainDetailTile.PIXELS):
@@ -107,10 +105,8 @@ func _run() -> void:
 			_check(map.terrain_layer.tiles[key].ground.texture == map.terrain_detail_tiles[key].terrain, "visible tile must adopt its upgraded texture")
 	await process_frame
 	_check(not map.traffic_toggle_button.disabled, "terrain relief must keep traffic controls available")
-	map.set_base_map_style("Satellite")
-	_check(map.terrain_toggle_button.disabled and map.slope_toggle_button.disabled and map.contour_toggle_button.disabled and not map.traffic_toggle_button.disabled and not map.transit_toggle_button.disabled, "satellite style must offer Traffic and Transit without terrain analysis layers")
-	map.set_base_map_style("Map")
-	_check(not map.terrain_toggle_button.disabled and not map.slope_toggle_button.disabled and not map.contour_toggle_button.disabled and map.show_terrain_overlay, "returning to Map must restore terrain analysis layers")
+	_check(not map.terrain_toggle_button.disabled and not map.slope_toggle_button.disabled and not map.contour_toggle_button.disabled and not map.transit_toggle_button.disabled, "Map must always offer its terrain, analysis and transit layers")
+	_check(map.get_node("MapNavigation").get_child_count()==3, "Map navigation must only contain zoom and Fit controls")
 	map.queue_free()
 	if failures == 0:
 		print("Terrain tiles, contours, flat colors, and terrain relief toggle passed.")

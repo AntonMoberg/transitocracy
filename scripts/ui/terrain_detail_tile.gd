@@ -15,16 +15,15 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 		# fields or baking analysis images which their empty mesh cannot draw.
 		geometry["map_field"] = Image.create(3, 3, false, Image.FORMAT_RGBAH)
 		if not cartography_only:
-			for name in ["color", "terrain", "satellite", "slope", "contours"]:
+			for name in ["color", "terrain", "slope", "contours"]:
 				geometry[name] = Image.create(1, 1, false, Image.FORMAT_RGBA8)
 		return geometry
 	if cartography_only:
-		# Map never waits for unused Satellite, relief and analysis textures.
+		# Map never waits for unused relief and analysis textures.
 		geometry["map_field"] = render_field(terrain, rect, Vector2i(PIXELS, PIXELS))
 		return geometry
 	var image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var terrain_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
-	var satellite_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var slope_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var contour_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var has_land_cover: bool = terrain.has_method("land_cover_at")
@@ -57,13 +56,11 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 			var broad_gradient := Vector2(heights[index + padding] - heights[index - padding], heights[index + padding * stride] - heights[index - padding * stride]) / (step_km * 2000.0 * float(padding))
 			var cover: Vector3 = terrain.land_cover_at(point, elevation, gradient) if has_land_cover else Vector3.ZERO
 			var ground_detail: float = terrain.ground_detail_at(point) if has_ground_detail else 0.0
-			var fine_detail: float = terrain.ground_detail_at(point * 8.0) if has_ground_detail else 0.0
 			image.set_pixel(x, y, land_color(elevation, map_gradient, cover, ground_detail))
 			terrain_image.set_pixel(x, y, terrain_color(elevation, detail_gradient, cover, ground_detail, broad_gradient))
-			satellite_image.set_pixel(x, y, satellite_color(elevation, gradient, cover, ground_detail, fine_detail))
 			slope_image.set_pixel(x, y, slope_color(gradient))
 			contour_image.set_pixel(x, y, contour_color(elevation, gradient, step_km, contour_interval_m))
-	var result := {"map_field": render_field(terrain, Rect2(origin, Vector2.ONE * step_km * PIXELS), Vector2i(PIXELS, PIXELS)), "color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+	var result := {"map_field": render_field(terrain, Rect2(origin, Vector2.ONE * step_km * PIXELS), Vector2i(PIXELS, PIXELS)), "color": image, "terrain": terrain_image, "slope": slope_image, "contours": contour_image}
 	result.merge(geometry)
 	return result
 
@@ -81,18 +78,6 @@ static func terrain_color(elevation: float, gradient: Vector2, cover: Vector3 = 
 	var detail_light: float = clampf(1.0 - (detail_gradient.x + detail_gradient.y) * 1.5, 0.83, 1.17)
 	var hill_detail: float = smoothstep(0.035, 0.15, gradient.length())
 	var shaded: Color = base * broad_light * detail_light * (1.0 + ground_detail * 0.05 * hill_detail)
-	shaded.a = 1.0
-	return shaded
-
-
-static func satellite_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, ground_detail: float = 0.0, fine_detail: float = 0.0) -> Color:
-	var base: Color = Color("829576").lerp(Color("a6a08e"), smoothstep(220.0, 1200.0, elevation))
-	base = base.lerp(Color("d2cdc1"), smoothstep(1300.0, 1900.0, elevation))
-	base = base.lerp(Color("426c4d"), cover.x * 0.82)
-	base = base.lerp(Color("b7a87d"), cover.y * 0.76)
-	base = base.lerp(Color("a8a39b"), cover.z * 0.82)
-	var light: float = clampf(1.0 - (gradient.x + gradient.y) * 1.6, 0.76, 1.18)
-	var shaded: Color = base * light * (1.0 + ground_detail * 0.13 + fine_detail * 0.11)
 	shaded.a = 1.0
 	return shaded
 
@@ -133,7 +118,6 @@ static func contour_color(elevation: float, gradient: Vector2, step_km: float, i
 static func render_base(terrain, land: PackedVector2Array) -> Dictionary:
 	var image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	var terrain_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
-	var satellite_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	var slope_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	var contour_image := Image.create(terrain.width, terrain.height, false, Image.FORMAT_RGBA8)
 	for y in range(terrain.height):
@@ -148,15 +132,13 @@ static func render_base(terrain, land: PackedVector2Array) -> Dictionary:
 			var cover: Vector3 = terrain.land_cover_at(point, elevation, gradient)
 			image.set_pixel(x, y, land_color(elevation, gradient, cover))
 			terrain_image.set_pixel(x, y, terrain_color(elevation, gradient, cover))
-			satellite_image.set_pixel(x, y, satellite_color(elevation, gradient, cover, terrain.ground_detail_at(point), terrain.ground_detail_at(point * 8.0)))
 			slope_image.set_pixel(x, y, slope_color(gradient))
 			contour_image.set_pixel(x, y, contour_color(elevation, gradient, terrain.GRID_KM, 500.0))
 	image.generate_mipmaps()
 	terrain_image.generate_mipmaps()
-	satellite_image.generate_mipmaps()
 	slope_image.generate_mipmaps()
 	contour_image.generate_mipmaps()
-	var result := {"map_field": render_field(terrain, terrain.bounds, Vector2i(terrain.width, terrain.height)), "color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+	var result := {"map_field": render_field(terrain, terrain.bounds, Vector2i(terrain.width, terrain.height)), "color": image, "terrain": terrain_image, "slope": slope_image, "contours": contour_image}
 	result.merge(CartographicTile.build_rect(land, terrain.bounds))
 	return result
 

@@ -536,12 +536,10 @@ func _update_traffic(deadline: int) -> void:
 
 func _update_materials(ppk: float) -> void:
 	fill_material.set_shader_parameter("pixels_per_km", ppk)
-	fill_material.set_shader_parameter("satellite", map.base_map_style == "Satellite")
 	fill_material.set_shader_parameter("zoning", map.map_mode == "Zoning")
 	var mix_value: float = clampf(float(Time.get_ticks_msec() - traffic_published) / 67.0, 0.0, 1.0)
 	for material in current_materials:
 		material.set_shader_parameter("pixels_per_km", ppk)
-		material.set_shader_parameter("satellite", map.base_map_style == "Satellite")
 		material.set_shader_parameter("traffic_enabled", map.show_traffic_overlay)
 		material.set_shader_parameter("trips", map.map_mode == "Trips")
 		material.set_shader_parameter("traffic_previous", previous_texture)

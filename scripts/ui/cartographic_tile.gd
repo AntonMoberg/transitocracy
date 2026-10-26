@@ -1,5 +1,5 @@
 extends RefCounted
-## Exact coastline geometry shared by Map, Terrain and Satellite tiles.
+## Exact coastline geometry shared by Map and Terrain tiles.
 ## Filtering a coarse alpha mask leaks land into the sea, even underneath
 ## a sharper replacement. The shoreline must be defined by geometry.
 

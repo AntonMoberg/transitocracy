@@ -118,17 +118,11 @@ func _run() -> void:
 		errors.append("Terrain relief must preserve visible building footprints.")
 	if map.traffic_toggle_button.disabled:
 		errors.append("Traffic overlay must remain available with terrain relief.")
-	map.set_base_map_style("Satellite")
-	await process_frame
-	await process_frame
-	if map.urban_layer.last_building_count == 0 or map.map_mode != "Roads":
-		errors.append("Satellite style must preserve road mode and visible building footprints.")
-	if not map.terrain_toggle_button.disabled or map.traffic_toggle_button.disabled or map.transit_toggle_button.disabled:
-		errors.append("Satellite style must offer Traffic and Transit layers without Terrain.")
+	if map.terrain_toggle_button.disabled or map.slope_toggle_button.disabled or map.contour_toggle_button.disabled or map.transit_toggle_button.disabled:
+		errors.append("Map must always offer Terrain, Slope, Contours and Transit layers.")
 	map.transit_toggle_button.button_pressed = true
 	if not map.show_transit_overlay:
-		errors.append("Transit layer must be switchable over Satellite.")
-	map.set_base_map_style("Map")
+		errors.append("Transit layer must be switchable over Map.")
 	map.traffic_toggle_button.button_pressed = false
 	if map.show_traffic_overlay:
 		errors.append("Traffic toggle must turn off congestion coloring.")

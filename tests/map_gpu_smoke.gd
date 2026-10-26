@@ -16,7 +16,7 @@ func _run() -> void:
 	root.content_scale_size = Vector2i(1200,1000)
 	var renderer := Renderer.new()
 	root.add_child(renderer)
-	renderer.map = {"base_map_style":"Map", "map_mode":"Roads", "show_traffic_overlay":false, "selected_local_street":Vector2i(-1,-1), "selected_road_link_id":0}
+	renderer.map = {"map_mode":"Roads", "show_traffic_overlay":false, "selected_local_street":Vector2i(-1,-1), "selected_road_link_id":0}
 	renderer.epoch = 1
 	renderer.source = Geometry.index_source({"bounds":Rect2(0,0,1,1), "epoch":1, "terrain":null, "features":[{"identity":"road:0", "kind":"line", "layer":"roads", "points":PackedVector2Array([Vector2(.1,.5),Vector2(.9,.5)]), "slot":0, "lanes":2, "highway":true}]})
 	renderer.traffic_slots = {0:0}

@@ -34,14 +34,14 @@ class Tile:
 		position = rect.position
 		for layer in [ground, slope, contours]:
 			layer.mesh = textures.get("map_mesh")
-		var cartographic: bool = map.base_map_style == "Map" and not map.show_terrain_overlay
-		var key := "map_field" if cartographic else ("satellite" if map.base_map_style == "Satellite" else "terrain")
+		var cartographic: bool = not map.show_terrain_overlay
+		var key := "map_field" if cartographic else "terrain"
 		ground.texture = textures.get(key)
 		ground.material = land_material if cartographic else null
 		slope.texture = textures.get("slope")
-		slope.visible = map.base_map_style == "Map" and map.show_slope_overlay
+		slope.visible = map.show_slope_overlay
 		contours.texture = textures.get("contours")
-		contours.visible = map.base_map_style == "Map" and map.show_contours
+		contours.visible = map.show_contours
 
 func sync() -> void:
 	if map.region == null:
@@ -58,7 +58,7 @@ func sync() -> void:
 		base.textures = map.terrain_base_textures
 		add_child(base)
 		base.configure(land_material)
-	var style: String = "%s:%s:%s:%s" % [map.base_map_style, map.show_terrain_overlay, map.show_slope_overlay, map.show_contours]
+	var style: String = "%s:%s:%s" % [map.show_terrain_overlay, map.show_slope_overlay, map.show_contours]
 	if style != last_style:
 		last_style = style
 		base.configure(land_material)

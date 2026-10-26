@@ -74,8 +74,8 @@ func draw(map, pen) -> void:
 	var street_lines := PackedVector2Array()
 	var street_colors := PackedColorArray()
 	var dashed_streets := PackedVector2Array()
-	var street_width: float = maxf(0.65 if map.base_map_style == "Map" else 1.3, meters * 7.0)
-	var casing_width: float = street_width + maxf(0.4 if map.base_map_style == "Map" else 1.0, meters * 2.0)
+	var street_width: float = maxf(0.65, meters * 7.0)
+	var casing_width: float = street_width + maxf(0.4, meters * 2.0)
 	for neighborhood_id in NeighborhoodSpatialIndex.in_bounds(map.region, world_viewport):
 		var neighborhood = map.region.neighborhoods[neighborhood_id]
 		var layout = neighborhood.street_layout
@@ -85,7 +85,7 @@ func draw(map, pen) -> void:
 		var screen_bounds := Rect2(map._world_to_screen(layout.bounds.position), layout.bounds.size * map._map_scale() * map.view_zoom)
 		if not screen_bounds.intersects(viewport):
 			continue
-		if map.base_map_style == "Map" and map.map_mode != "Zoning":
+		if map.map_mode != "Zoning":
 			pending_buildings = _draw_footprint(map, pen, neighborhood, building_deadline_us) or pending_buildings
 		if meters < 0.025:
 			continue
@@ -118,7 +118,7 @@ func draw(map, pen) -> void:
 				continue
 			if layout.classes[edge_id] != Roads.LOCAL:
 				continue
-			var color := Color("fcfcf7") if map.base_map_style == "Map" else Color("6f7f80")
+			var color := Color("fcfcf7")
 			if not record.is_empty() and map.show_traffic_overlay:
 				var rate: Vector2 = LocalTraffic.edge_rate(record, edge_id)
 				var queue: Vector2 = record["queues"][edge_id]
@@ -150,7 +150,7 @@ func draw(map, pen) -> void:
 		last_street_draw_us += Time.get_ticks_usec() - street_started
 	if not casing_lines.is_empty():
 		var batch_started: int = Time.get_ticks_usec()
-		pen.draw_multiline(casing_lines, Color("c4ced0") if map.base_map_style == "Map" else Color("17252c"), casing_width, true)
+		pen.draw_multiline(casing_lines, Color("c4ced0"), casing_width, true)
 		pen.draw_multiline_colors(street_lines, street_colors, street_width, true)
 		for index in range(0, dashed_streets.size(), 2):
 			pen.draw_dashed_line(dashed_streets[index], dashed_streets[index + 1], Color("b5baa1", 0.5), maxf(0.6, meters * 0.12), meters * 3.0, true)

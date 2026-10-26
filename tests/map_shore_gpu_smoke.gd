@@ -28,7 +28,7 @@ func _run() -> void:
 	var land := PackedVector2Array([Vector2(0,0),Vector2(4,0),Vector2(4,3),Vector2(2.8,3),Vector2(2.8,1.6),Vector2(2.2,1.6),Vector2(2.2,3),Vector2(0,3)])
 	var base_data := TileBuilder.render(terrain,land,Vector2.ZERO,4.0/128.0,true)
 	var tile := Layer.Tile.new()
-	tile.map = {"base_map_style":"Map","show_terrain_overlay":false,"show_slope_overlay":false,"show_contours":false}
+	tile.map = {"show_terrain_overlay":false,"show_slope_overlay":false,"show_contours":false}
 	tile.rect = Rect2(0,0,4,4)
 	tile.textures = {"map_mesh":maker._cartographic_mesh(base_data),"map_field":ImageTexture.create_from_image(base_data.map_field)}
 	layer.add_child(tile)
@@ -50,20 +50,17 @@ func _run() -> void:
 		if ppk==150:
 			_check(_distance(pixels.get_pixel(455,500),Style.WATER)<.015,"concave bay must stay water")
 		pixels.save_png("user://shore_%d.png" % ppk)
-	# The same geometry clips the textured Terrain and Satellite modes; their
-	# opaque colors must not disappear or darken near a filtered alpha mask.
+	# Terrain relief uses the same sharp coastline as the plain Map.
 	var rasters := TileBuilder.render(terrain,land,Vector2.ZERO,4.0/128.0)
-	for name in ["terrain", "satellite", "slope", "contours"]:
+	for name in ["terrain", "slope", "contours"]:
 		tile.textures[name] = ImageTexture.create_from_image(rasters[name])
-	for style in ["Terrain", "Satellite"]:
-		tile.map.base_map_style = "Satellite" if style == "Satellite" else "Map"
-		tile.map.show_terrain_overlay = style == "Terrain"
-		tile.configure(layer.land_material)
-		await process_frame
-		await RenderingServer.frame_post_draw
-		var pixels := root.get_texture().get_image()
-		_check(_distance(pixels.get_pixel(100,603),Style.WATER)<.015,"%s leaks beyond coast" % style)
-		_check(_distance(pixels.get_pixel(100,597),pixels.get_pixel(100,570))<.015,"%s fades at coast" % style)
+	tile.map.show_terrain_overlay = true
+	tile.configure(layer.land_material)
+	await process_frame
+	await RenderingServer.frame_post_draw
+	var relief := root.get_texture().get_image()
+	_check(_distance(relief.get_pixel(100,603),Style.WATER)<.015,"Terrain leaks beyond coast")
+	_check(_distance(relief.get_pixel(100,597),relief.get_pixel(100,570))<.015,"Terrain fades at coast")
 	# Adjacent gutters must evaluate the same world coordinates.
 	var left := TileBuilder.render_field(terrain,Rect2(0,0,2,2),Vector2i(128,128))
 	var right := TileBuilder.render_field(terrain,Rect2(2,0,2,2),Vector2i(128,128))

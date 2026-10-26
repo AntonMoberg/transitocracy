@@ -2,7 +2,6 @@ shader_type canvas_item;
 render_mode unshaded;
 
 uniform float pixels_per_km = 1.0;
-uniform bool satellite = false;
 uniform vec4 road_colors[5];
 uniform vec4 water_color : source_color = vec4(0.58,0.85,0.91,1.0);
 varying flat vec3 cartography;
@@ -40,12 +39,12 @@ void fragment() {
 	vec4 color = vec4(0.64, 0.68, 0.70, 1.0);
 	if (pass < 0.5) {
 		// Negative slots encode water / administrative borders / bridge decks.
-		color = slot == -2 ? (satellite ? vec4(0.29,0.51,0.56,1.0) : water_color) : vec4(0.60,0.67,0.62,0.24);
+		color = slot == -2 ? water_color : vec4(0.60,0.67,0.62,0.24);
 		if (slot == -3) color = vec4(0.72,0.79,0.82,1.0);
 		if (slot == -4) color = vec4(0.66,0.85,0.89,0.82);
 		if (slot == -5) color = vec4(0.71,0.64,0.80,0.72);
 	} else if (pass < 1.5) {
-		color = satellite ? vec4(0.09,0.15,0.17,1.0) : mix(road_colors[int(cartography.x)], vec4(0.48,0.57,0.65,1.0), 0.28);
+		color = mix(road_colors[int(cartography.x)], vec4(0.48,0.57,0.65,1.0), 0.28);
 	} else {
 		if (traffic_enabled && slot >= 0) {
 			vec2 uv = vec2((float(slot % 256) + 0.5) / 256.0, (float(slot / 256) * 2.0 + (pass < 2.5 ? 0.5 : 1.5)) / traffic_height);
@@ -55,7 +54,7 @@ void fragment() {
 				color = mix(color, mix(texture(traffic_previous, other_uv), texture(traffic_current, other_uv), traffic_mix), 0.5);
 			}
 		} else {
-			color = satellite ? vec4(0.65,0.70,0.67,1.0) : road_colors[int(cartography.x)];
+			color = road_colors[int(cartography.x)];
 		}
 		if (slot == selected_slot && slot >= 0) color = vec4(0.97,0.89,0.63,1.0);
 	}
