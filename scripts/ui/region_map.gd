@@ -154,6 +154,7 @@ var district_fill_meshes: Dictionary = {}
 var jurisdiction_layout_key: String = ""
 var jurisdiction_label_rects: Dictionary = {}
 var last_drawn_neighborhood_borders: int = 0
+var terrain_base_textures: Dictionary = {}
 var terrain_texture: ImageTexture
 var terrain_relief_texture: ImageTexture
 var satellite_texture: ImageTexture
@@ -319,6 +320,7 @@ func set_region(new_region) -> void:
 		terrain_detail_level = -1
 		terrain_detail_published_level = -1
 		terrain_texture_source = new_region.terrain if new_region != null else null
+		terrain_base_textures.clear()
 		terrain_texture = null
 		terrain_base_pending = new_region != null
 		terrain_uploads.clear()
@@ -367,7 +369,7 @@ func _process(_delta: float) -> void:
 		urban_layer.last_street_count = chunk_renderer.visible_streets
 		last_drawn_neighborhood_borders = chunk_renderer.visible_districts
 		_apply_static_transform()
-		var camera_key := "%s:%s:%s:%s:%s" % [pan, zoom, size, base_map_style, show_terrain_overlay]
+		var camera_key := "%s:%s:%s:%s:%s:%s:%s" % [pan, zoom, size, base_map_style, show_terrain_overlay, show_slope_overlay, show_contours]
 		if camera_key != terrain_view_key:
 			terrain_view_key = camera_key
 			_static_update()
@@ -394,10 +396,14 @@ func _process(_delta: float) -> void:
 		if result.is_empty():
 			terrain_detail_active.erase(key)
 			continue
-		terrain_uploads.append({"key": key, "images": result, "textures": {}, "part": 0})
+		var names: Array[String] = []
+		for name in ["color", "terrain", "satellite", "slope", "contours", "map_field"]:
+			if result.has(name): names.append(name)
+		names.append("map_mesh")
+		terrain_uploads.append({"key": key, "images": result, "textures": {}, "part": 0, "names": names})
 	while not terrain_uploads.is_empty() and Time.get_ticks_usec() < publish_deadline:
 		var upload: Dictionary = terrain_uploads[0]
-		var names := ["color", "terrain", "satellite", "slope", "contours", "map_mesh"]
+		var names: Array = upload.names
 		var name: String = names[upload.part]
 		if name == "map_mesh":
 			upload.textures[name] = _cartographic_mesh(upload.images)
@@ -409,6 +415,7 @@ func _process(_delta: float) -> void:
 			continue
 		var key: Vector3i = upload.key
 		if key.x < 0:
+			terrain_base_textures = upload.textures
 			terrain_texture = upload.textures.color
 			terrain_relief_texture = upload.textures.terrain
 			satellite_texture = upload.textures.satellite
@@ -435,7 +442,7 @@ func _process(_delta: float) -> void:
 	while terrain_detail_workers.size() < worker_limit and not terrain_detail_queue.is_empty():
 		var key: Vector3i = terrain_detail_queue.pop_front()
 		terrain_detail_requested.erase(key)
-		if terrain_texture_source == null or terrain_detail_tiles.has(key) or key.x != terrain_detail_level or not terrain_detail_visible.has(key):
+		if terrain_texture_source == null or _terrain_tile_ready(key) or key.x != terrain_detail_level or not terrain_detail_visible.has(key):
 			continue
 		var terrain = terrain_texture_source
 		var step_km: float = TERRAIN_DETAIL_STEPS[key.x]
@@ -444,7 +451,7 @@ func _process(_delta: float) -> void:
 		var thread := Thread.new()
 		terrain_detail_active[key] = true
 		var land: PackedVector2Array = region.jurisdictions[0].polygon_km
-		var error: Error = thread.start(Callable(TerrainDetailTile, "render").bind(terrain, land, origin, step_km))
+		var error: Error = thread.start(Callable(TerrainDetailTile, "render").bind(terrain, land, origin, step_km, not _needs_terrain_raster()))
 		if error == OK:
 			terrain_detail_workers.append({"thread": thread, "source": terrain, "key": key})
 			continue
@@ -461,7 +468,7 @@ func _cartographic_mesh(result: Dictionary) -> ArrayMesh:
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_COLOR] = result["map_colors"]
+	arrays[Mesh.ARRAY_TEX_UV] = result["map_uvs"]
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return mesh
@@ -956,8 +963,6 @@ func _draw_static_content(pen) -> void:
 	last_draw_stages_us["roads"] = Time.get_ticks_usec() - draw_started
 	if show_transit_overlay:
 		_draw_transit_overlay(pen)
-	if map_mode == "Zoning":
-		_draw_zoning_candidates(pen)
 	if map_mode == "Trips":
 		_draw_hourly_flows(pen)
 	view_pan = pan
@@ -975,7 +980,14 @@ func _draw_dynamic_content(pen) -> void:
 	if selected_jurisdiction_id >= 0:
 		var selected = region.jurisdictions[selected_jurisdiction_id]
 		_draw_polygon_border(pen, selected, Color("fff0b0", 0.95), 3.5)
-	if map_mode != "Zoning":
+	if map_mode == "Zoning":
+		# Interactive suggestions use the live camera, like their hit tests.
+		# Keeping them in the band-scaled static bake can lose their coverage
+		# when switching modes or crossing a zoom band.
+		_draw_zoning_candidates(pen)
+	# Accessibility/desirability circles belong to trip analysis. The normal
+	# map shows the actual developed blocks and ordinary place labels.
+	if map_mode == "Trips":
 		_draw_neighborhoods(pen)
 	last_draw_stages_us["neighborhoods"] = Time.get_ticks_usec() - draw_started
 	_ensure_jurisdiction_labels()
@@ -983,7 +995,8 @@ func _draw_dynamic_content(pen) -> void:
 	last_draw_stages_us["labels"] = Time.get_ticks_usec() - draw_started
 	_draw_jurisdiction_key(pen)
 	if map_mode == "Roads":
-		_draw_road_nodes(pen)
+		if road_tool != "Inspect":
+			_draw_road_nodes(pen)
 		_draw_road_preview(pen)
 		_draw_hidden_road_selection(pen)
 		_draw_road_legend(pen)
@@ -1880,7 +1893,7 @@ func _draw_road_legend(pen) -> void:
 	else:
 		pen.draw_string(font, base + Vector2(0, -39), "Traffic overlay off · Use the Traffic button to show flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	pen.draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, base + Vector2(0, 4), "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+	pen.draw_string(font, base + Vector2(0, 4), "Dashed = construction" if road_tool == "Inspect" else "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 
 func _draw_zoning_legend(pen) -> void:
@@ -2023,11 +2036,19 @@ func _draw_boundaries(pen) -> void:
 			_draw_polygon_border(pen, selected, Color("fff0b0", 0.95), 3.5)
 
 
+func _needs_terrain_raster() -> bool:
+	return base_map_style == "Satellite" or show_terrain_overlay or show_slope_overlay or show_contours
+
+
+func _terrain_tile_ready(key: Vector3i) -> bool:
+	return terrain_detail_tiles.has(key) and (not _needs_terrain_raster() or terrain_detail_tiles[key].has("terrain"))
+
+
 func _draw_terrain_detail(pen) -> void:
 	var pixels_per_km: float = _map_scale() * view_zoom
 	var level := -1
 	if pixels_per_km >= 2.0:
-		var target_texel_pixels := 4.0
+		var target_texel_pixels := 2.0
 		if base_map_style == "Satellite" or show_terrain_overlay:
 			target_texel_pixels = 2.5
 		if base_map_style == "Map" and show_terrain_overlay and pixels_per_km < 20.0:
@@ -2038,6 +2059,10 @@ func _draw_terrain_detail(pen) -> void:
 				break
 	if level < 0:
 		terrain_detail_visible.clear()
+		terrain_detail_level = -1
+		terrain_detail_published_level = -1
+		terrain_detail_queue.clear()
+		terrain_detail_requested.clear()
 		return
 	if level != terrain_detail_level:
 		terrain_detail_level = level
@@ -2065,7 +2090,7 @@ func _draw_terrain_detail(pen) -> void:
 			var key := Vector3i(level, x, y)
 			terrain_detail_visible[key] = true
 			tile_count += 1
-			if terrain_detail_tiles.has(key):
+			if _terrain_tile_ready(key):
 				ready_count += 1
 			elif not terrain_detail_requested.has(key) and not terrain_detail_active.has(key):
 				missing.append(key)
@@ -2076,6 +2101,8 @@ func _draw_terrain_detail(pen) -> void:
 			_draw_cached_terrain_level(pen, terrain, fallback_level, visible_world, pixels_per_km)
 	if tile_count > 0 and ready_count == tile_count:
 		terrain_detail_published_level = level
+	else:
+		terrain_detail_published_level = -1
 	if ready_count > 0 and pen != null:
 		_draw_cached_terrain_level(pen, terrain, level, visible_world, pixels_per_km)
 	if not missing.is_empty():

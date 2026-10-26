@@ -7,34 +7,26 @@ const PIXELS = 128
 const CartographicTile = preload("res://scripts/ui/cartographic_tile.gd")
 
 
-static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: float) -> Dictionary:
+static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: float, cartography_only: bool = false) -> Dictionary:
+	var rect := Rect2(origin, Vector2.ONE * step_km * PIXELS)
+	var geometry := CartographicTile.build_rect(land, rect)
+	if geometry.map_vertices.is_empty():
+		# Ocean tiles still count as complete coverage, without sampling land
+		# fields or baking analysis images which their empty mesh cannot draw.
+		geometry["map_field"] = Image.create(3, 3, false, Image.FORMAT_RGBAH)
+		if not cartography_only:
+			for name in ["color", "terrain", "satellite", "slope", "contours"]:
+				geometry[name] = Image.create(1, 1, false, Image.FORMAT_RGBA8)
+		return geometry
+	if cartography_only:
+		# Map never waits for unused Satellite, relief and analysis textures.
+		geometry["map_field"] = render_field(terrain, rect, Vector2i(PIXELS, PIXELS))
+		return geometry
 	var image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var terrain_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var satellite_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var slope_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
 	var contour_image := Image.create(PIXELS, PIXELS, false, Image.FORMAT_RGBA8)
-	var tile_rect := Rect2(origin, Vector2.ONE * step_km * PIXELS)
-	var corners := [tile_rect.position, Vector2(tile_rect.end.x, tile_rect.position.y), tile_rect.end, Vector2(tile_rect.position.x, tile_rect.end.y)]
-	var all_land := true
-	var any_land := false
-	for corner in corners:
-		var inside: bool = Geometry2D.is_point_in_polygon(corner, land)
-		all_land = all_land and inside
-		any_land = any_land or inside
-	var boundary_crosses := false
-	for edge in range(land.size()):
-		var a: Vector2 = land[edge]
-		var b: Vector2 = land[(edge + 1) % land.size()]
-		if Rect2(a.min(b), (b - a).abs()).intersects(tile_rect, true):
-			boundary_crosses = true
-			break
-	if not boundary_crosses and not any_land:
-		image.fill(Color.TRANSPARENT)
-		terrain_image.fill(Color.TRANSPARENT)
-		satellite_image.fill(Color.TRANSPARENT)
-		slope_image.fill(Color.TRANSPARENT)
-		contour_image.fill(Color.TRANSPARENT)
-		return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image, "map_vertices": PackedVector2Array(), "map_colors": PackedColorArray()}
 	var has_land_cover: bool = terrain.has_method("land_cover_at")
 	var has_ground_detail: bool = terrain.has_method("ground_detail_at")
 	# Padding lets hillshade compare broad slopes with local gullies
@@ -51,13 +43,6 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 	for y in range(PIXELS):
 		for x in range(PIXELS):
 			var point: Vector2 = origin + Vector2(float(x) + 0.5, float(y) + 0.5) * step_km
-			if (boundary_crosses or not all_land) and not Geometry2D.is_point_in_polygon(point, land):
-				image.set_pixel(x, y, Color.TRANSPARENT)
-				terrain_image.set_pixel(x, y, Color.TRANSPARENT)
-				satellite_image.set_pixel(x, y, Color.TRANSPARENT)
-				slope_image.set_pixel(x, y, Color.TRANSPARENT)
-				contour_image.set_pixel(x, y, Color.TRANSPARENT)
-				continue
 			var index: int = (y + padding) * stride + x + padding
 			var elevation: float = heights[index]
 			var west: float = heights[index - 1]
@@ -78,8 +63,8 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 			satellite_image.set_pixel(x, y, satellite_color(elevation, gradient, cover, ground_detail, fine_detail))
 			slope_image.set_pixel(x, y, slope_color(gradient))
 			contour_image.set_pixel(x, y, contour_color(elevation, gradient, step_km, contour_interval_m))
-	var result := {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
-	result.merge(CartographicTile.build(terrain, land, origin, step_km * PIXELS))
+	var result := {"map_field": render_field(terrain, Rect2(origin, Vector2.ONE * step_km * PIXELS), Vector2i(PIXELS, PIXELS)), "color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+	result.merge(geometry)
 	return result
 
 
@@ -95,7 +80,9 @@ static func terrain_color(elevation: float, gradient: Vector2, cover: Vector3 = 
 	var detail_gradient: Vector2 = gradient - macro_gradient
 	var detail_light: float = clampf(1.0 - (detail_gradient.x + detail_gradient.y) * 1.5, 0.83, 1.17)
 	var hill_detail: float = smoothstep(0.035, 0.15, gradient.length())
-	return base * broad_light * detail_light * (1.0 + ground_detail * 0.05 * hill_detail)
+	var shaded: Color = base * broad_light * detail_light * (1.0 + ground_detail * 0.05 * hill_detail)
+	shaded.a = 1.0
+	return shaded
 
 
 static func satellite_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, ground_detail: float = 0.0, fine_detail: float = 0.0) -> Color:
@@ -105,7 +92,9 @@ static func satellite_color(elevation: float, gradient: Vector2, cover: Vector3 
 	base = base.lerp(Color("b7a87d"), cover.y * 0.76)
 	base = base.lerp(Color("a8a39b"), cover.z * 0.82)
 	var light: float = clampf(1.0 - (gradient.x + gradient.y) * 1.6, 0.76, 1.18)
-	return base * light * (1.0 + ground_detail * 0.13 + fine_detail * 0.11)
+	var shaded: Color = base * light * (1.0 + ground_detail * 0.13 + fine_detail * 0.11)
+	shaded.a = 1.0
+	return shaded
 
 
 static func _base_color(elevation: float, cover: Vector3) -> Color:
@@ -150,13 +139,6 @@ static func render_base(terrain, land: PackedVector2Array) -> Dictionary:
 	for y in range(terrain.height):
 		for x in range(terrain.width):
 			var point: Vector2 = terrain.bounds.position + Vector2(x, y) * terrain.GRID_KM
-			if not Geometry2D.is_point_in_polygon(point, land):
-				image.set_pixel(x, y, Color.TRANSPARENT)
-				terrain_image.set_pixel(x, y, Color.TRANSPARENT)
-				satellite_image.set_pixel(x, y, Color.TRANSPARENT)
-				slope_image.set_pixel(x, y, Color.TRANSPARENT)
-				contour_image.set_pixel(x, y, Color.TRANSPARENT)
-				continue
 			var elevation: float = terrain.elevations[y * terrain.width + x]
 			var west: float = terrain.elevations[y * terrain.width + maxi(0, x - 1)]
 			var east: float = terrain.elevations[y * terrain.width + mini(terrain.width - 1, x + 1)]
@@ -174,4 +156,46 @@ static func render_base(terrain, land: PackedVector2Array) -> Dictionary:
 	satellite_image.generate_mipmaps()
 	slope_image.generate_mipmaps()
 	contour_image.generate_mipmaps()
-	return {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+	var result := {"map_field": render_field(terrain, terrain.bounds, Vector2i(terrain.width, terrain.height)), "color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
+	result.merge(CartographicTile.build_rect(land, terrain.bounds))
+	return result
+
+
+static func render_field(terrain, rect: Rect2, resolution: Vector2i) -> Image:
+	# One-texel gutter shares samples across adjacent tiles. Keep scalar fields
+	# linear (no sRGB conversion or mipmaps) until classification on the GPU.
+	# Half floats prevent 8-bit quantization from moving a boundary several
+	# screen pixels when a retained parent is magnified.
+	var field := Image.create(resolution.x + 2, resolution.y + 2, false, Image.FORMAT_RGBAH)
+	var step: Vector2 = rect.size / Vector2(resolution)
+	var grid_samples := PackedVector3Array()
+	var grid_start := Vector2.ZERO
+	var grid_size := Vector2i.ZERO
+	var grid_km := 2.0
+	if terrain.has_method("elevation_at"):
+		grid_km = terrain.GRID_KM
+		grid_start = ((rect.position - step - terrain.bounds.position) / grid_km).floor() * grid_km + terrain.bounds.position
+		grid_size = Vector2i(((rect.end + step - grid_start) / grid_km).ceil()) + Vector2i.ONE
+		# A centered derivative at a grid-aligned offset is piecewise bilinear,
+		# just like height. Cache its grid vertices once, rather than making
+		# five terrain queries for every output texel. Vegetation noise is
+		# still sampled at full detail resolution and fixed world positions.
+		for y in range(grid_size.y):
+			for x in range(grid_size.x):
+				var sample := Style.landscape_sample(terrain, grid_start + Vector2(x,y) * grid_km)
+				grid_samples.append(Vector3(sample.elevation, sample.gradient.x, sample.gradient.y))
+	for y in range(resolution.y + 2):
+		for x in range(resolution.x + 2):
+			var point := rect.position + (Vector2(x, y) - Vector2.ONE * 0.5) * step
+			if grid_samples.is_empty():
+				field.set_pixel(x, y, Style.landscape_field(terrain, point))
+				continue
+			var grid := (point - grid_start) / grid_km
+			var cell := Vector2i(grid.floor())
+			var fraction := grid - Vector2(cell)
+			var a: int = cell.y * grid_size.x + cell.x
+			var b: int = a + grid_size.x
+			var sample: Vector3 = grid_samples[a].lerp(grid_samples[a+1],fraction.x).lerp(grid_samples[b].lerp(grid_samples[b+1],fraction.x),fraction.y)
+			var gradient := Vector2(sample.y, sample.z)
+			field.set_pixel(x, y, Style.encode_landscape_field(gradient, terrain.land_cover_at(point, sample.x, gradient)))
+	return field

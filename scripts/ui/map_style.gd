@@ -44,11 +44,26 @@ static func land_color(_elevation: float, gradient: Vector2, cover: Vector3 = Ve
 	return Color(color.r * (1.0 + shade), color.g * (1.0 + shade), color.b * (1.0 + shade), 1.0)
 
 static func landscape_color(terrain, point: Vector2) -> Color:
+	var sample := landscape_sample(terrain, point)
+	return land_color(0.0, sample.gradient, sample.cover)
+
+static func landscape_sample(terrain, point: Vector2) -> Dictionary:
 	# Sample the broad height field, not expensive road/water collision queries.
 	# The 2 km derivative remains identical at every tile LOD.
 	var elevation: float = _height(terrain, point)
 	var gradient := Vector2(_height(terrain, point + Vector2(2,0)) - _height(terrain, point - Vector2(2,0)), _height(terrain, point + Vector2(0,2)) - _height(terrain, point - Vector2(0,2))) / 4000.0
-	return land_color(elevation, gradient, terrain.land_cover_at(point, elevation, gradient) if terrain.has_method("land_cover_at") else Vector3.ZERO)
+	return {"elevation": elevation, "gradient": gradient, "cover": terrain.land_cover_at(point, elevation, gradient) if terrain.has_method("land_cover_at") else Vector3.ZERO}
+
+static func landscape_field(terrain, point: Vector2) -> Color:
+	var sample := landscape_sample(terrain, point)
+	var gradient: Vector2 = sample.gradient
+	var cover: Vector3 = sample.cover
+	return encode_landscape_field(gradient, cover)
+
+static func encode_landscape_field(gradient: Vector2, cover: Vector3) -> Color:
+	var relief: float = smoothstep(0.012, 0.09, gradient.length())
+	var shade: float = clampf(-(gradient.x + gradient.y) * 0.6, -0.06, 0.06) * relief
+	return Color(cover.x, cover.y, cover.z, (shade + 0.06) / 0.12)
 
 static func _height(terrain, point: Vector2) -> float:
 	if not terrain.has_method("elevation_at"):

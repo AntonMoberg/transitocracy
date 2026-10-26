@@ -59,6 +59,12 @@ Traffic uses a compact directional color texture updated at most 15 times per se
 
 Map opens with Traffic and Terrain off. The base palette uses pale mint open land, soft green woods, cream dry ground, sand exposed rock, off-white developed blocks and blue water. Land cover uses the same world-space height/vegetation sampling at every tile level; Map relief is limited to ±6% brightness. Terrain adds stronger relief, while Satellite retains its natural-color palette.
 
+The default road inspection view shows developed blocks, roads and place labels without neighborhood statistics circles or junction markers. Neighborhood circles appear in Trips analysis; road-node targets appear when a road editing tool is active. Selection outlines and road previews remain available.
+
+Zoning suggestions draw on the live interactive overlay, using the same camera as picking. They appear as overview dots or district outlines at closer zooms; selected suggestions show their street preview. They are not part of the static zoom-band bake. `zoning_map_gpu_smoke.gd` checks rendered visibility across zooms, offset cameras, selection and switching back to the normal map; `zoning_ui_smoke.gd` checks candidate approval through the full UI.
+
+All terrain layers, including the whole-state fallback, use meshes clipped to the actual land polygon. Texture alpha no longer defines the coastline, so coarse pixels cannot bleed into the ocean behind a sharper tile. Map uploads half-float vegetation/dryness/rock fields with shared edge gutters; the GPU classifies these into crisp color regions with a screen-pixel antialias fringe. Visible Map tiles target at most two screen pixels per field sample. Refinement samples vegetation at fixed world positions and caches broad height derivatives; it does not change simulation terrain or coast geometry. Map-only tiles skip Satellite and analysis raster generation. Enabling those modes requests missing raster data while retaining available coverage.
+
 Road classes carry independent cartographic colors and live shader visibility. With the 110-pixel scale bar, local streets appear at 500 m and closer (110–121 pixels/km fade), urban collectors at 1 km (55–60.5 pixels/km), and ordinary rural/arterial routes fade between 5 km and 10 km (11–22 pixels/km). Highways and the static settlement-access backbone remain visible at overview. River thresholds use width: 60 m at 1 km, 160 m at 2–5 km, and 240 m at 10 km and farther. Picking follows the same policy; selected roads remain visible. Completed-block land-cover skirts close street-width gaps without painting undeveloped jurisdictions.
 
 ### Initial road network
@@ -88,6 +94,7 @@ Measured on Windows, Godot 4.7.2 Mono, D3D12 Forward+, RTX 3070, 2560×1440 view
 | 32 (initial chunk renderer) | 4.99 ms | 9.67 ms | 12.10 ms | 13.51 ms | 11.2 MiB |
 | 768 (direct LOD loading and revised road styling) | 4.27 ms | 6.39 ms | 9.59 ms | 15.35 ms | 11.0 MiB |
 | 768 (land-cover palette, live class LOD, terrain corridors) | 4.19 ms | 6.59 ms | 9.86 ms | 14.29 ms | 18.0 MiB |
+| 768 (clipped coastlines and GPU land-cover boundaries) | 4.24 ms | 5.65 ms | 8.92 ms | 15.15 ms | 18.0 MiB |
 
 These runs passed the frame budgets and coverage/invalidation checks. The 256-city full-UI headless smoke test measured a 13.5 ms longest day-mode frame. These are repeatable test scenarios on this machine, not guarantees for every GPU, seed, overlay, or simulation workload. `map_gpu_smoke.gd` separately verifies actual pixels for lane extrusion, selected-road color and traffic texture updates without uploading geometry.
 
@@ -98,12 +105,16 @@ Additional cartography and network checks:
 ```text
 Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/cartography_policy_smoke.gd
 Godot_v4.7.2-stable_mono_win64_console.exe --path E:\Godot\transitocracy --script res://tests/map_lod_gpu_smoke.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --path E:\Godot\transitocracy --script res://tests/map_shore_gpu_smoke.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/terrain_detail_smoke.gd
 Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/terrain_corridor_smoke.gd
 Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/road_network_metrics.gd
 Godot_v4.7.2-stable_mono_win64_console.exe --path E:\Godot\transitocracy --script res://tests/map_palette_gallery.gd
 ```
 
 The GPU LOD check changes zoom without publishing another mesh and compares actual pixel visibility to picking policy. The corridor fixture checks a mountain saddle, an impassable barrier, deterministic routes and cross-class cache isolation. Network metrics cover three seeds at 256 and 768 cities, validating city/highway connectivity, grades, curve radii and tunnel limits. The gallery saves Map views at the requested scales and a Terrain overview to `user://palette_*.png`.
+
+The shoreline GPU check reads pixels on both sides of the coast and woodland boundary at 150, 300 and 600 pixels/km, including a concave bay and magnified fallback coverage. It also checks Terrain/Satellite coast clipping and matching adjacent field gutters. The terrain-detail check verifies destination-zoom publication, two-pixel sampling, field accuracy against direct terrain queries, and lazy raster upgrades when analysis is enabled.
 
 The palette/corridor revision also passed visible-detail checks on the same 768-city setup: roads **21–43 ms**, blocks **29–43 ms**, and buildings **254–264 ms**. The final GPU test checks that clearance masks render as light verges in Map mode rather than dark asphalt strips.
 

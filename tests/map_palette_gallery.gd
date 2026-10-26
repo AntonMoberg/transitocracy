@@ -18,7 +18,7 @@ func _run() -> void:
 		var deadline := Time.get_ticks_msec()+15000
 		while Time.get_ticks_msec()<deadline:
 			await create_timer(.01).timeout
-			if map.chunk_renderer.is_settled() and map.terrain_detail_workers.is_empty(): break
+			if map.chunk_renderer.is_settled() and map.terrain_texture != null and (map.terrain_detail_level < 0 or map.terrain_detail_published_level == map.terrain_detail_level): break
 		await RenderingServer.frame_post_draw
 		root.get_texture().get_image().save_png("user://palette_%d.png" % ppk)
 		if ppk == 0:

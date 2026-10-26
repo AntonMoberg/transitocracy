@@ -3,6 +3,7 @@ extends SceneTree
 const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
 const RegionMap = preload("res://scripts/ui/region_map.gd")
 const TerrainDetailTile = preload("res://scripts/ui/terrain_detail_tile.gd")
+const Style = preload("res://scripts/ui/map_style.gd")
 
 class FlatTerrain:
 	extends RefCounted
@@ -42,13 +43,31 @@ func _run() -> void:
 	if not map.terrain_detail_tiles.is_empty():
 		var key: Vector3i = map.terrain_detail_tiles.keys()[0]
 		var step_km: float = map.TERRAIN_DETAIL_STEPS[key.x]
-		_check(step_km * pixels_per_km <= 6.5, "terrain texture texels must stay small on screen")
+		_check(step_km * pixels_per_km <= 2.0, "Map detail fields must refine to at most two pixels per texel")
 		var origin: Vector2 = terrain.bounds.position + Vector2(key.y, key.z) * step_km * TerrainDetailTile.PIXELS
 		var images: Dictionary = TerrainDetailTile.render(terrain, region.jurisdictions[0].polygon_km, origin, step_km)
 		_check(images["color"].get_width() == TerrainDetailTile.PIXELS, "detail renderer must produce full size tiles")
 		_check(images["terrain"].get_width() == TerrainDetailTile.PIXELS, "detail renderer must produce shaded terrain tiles")
 		_check(images["satellite"].get_width() == TerrainDetailTile.PIXELS, "detail renderer must produce satellite-style tiles")
 		_check(images["contours"].get_width() == TerrainDetailTile.PIXELS, "terrain tiles must carry contour overlays")
+		# The cached derivative optimization must agree with direct world
+		# sampling, including cells crossing the original 2 km height grid.
+		var field_rect := Rect2(terrain.bounds.get_center(), Vector2(12,12))
+		var field := TerrainDetailTile.render_field(terrain, field_rect, Vector2i(48,48))
+		for y in range(0,50,7):
+			for x in range(0,50,7):
+				var point := field_rect.position + (Vector2(x,y)-Vector2.ONE*.5)*.25
+				var expected := Style.landscape_field(terrain,point)
+				var actual := field.get_pixel(x,y)
+				_check(absf(actual.r-expected.r)<.001 and absf(actual.g-expected.g)<.001 and absf(actual.b-expected.b)<.001 and absf(actual.a-expected.a)<.001,"cached landscape derivative changes world-space cover")
+		_check(not map.terrain_detail_tiles[key].has("satellite"), "plain Map must not wait for unused raster styles")
+	# Enabling analysis at the same zoom invalidates readiness, keeps a base
+	# available, and upgrades cached Map-only entries rather than using blanks.
+	map.show_slope_overlay = true
+	await process_frame
+	await process_frame
+	_check(map.terrain_detail_published_level < 0, "analysis must request missing raster data at unchanged zoom")
+	map.show_slope_overlay = false
 	var land := PackedVector2Array([Vector2(-1, -1), Vector2(3, -1), Vector2(3, 3), Vector2(-1, 3)])
 	var flat: Dictionary = TerrainDetailTile.render(FlatTerrain.new(), land, Vector2.ZERO, 0.015625)
 	_check(flat["color"].get_pixel(8, 8).is_equal_approx(flat["color"].get_pixel(110, 110)), "flat land must not have artificial bumpy shading")
@@ -82,6 +101,10 @@ func _run() -> void:
 	while map.terrain_detail_published_level != map.terrain_detail_level and Time.get_ticks_msec() < deadline:
 		await create_timer(0.02).timeout
 	_check(map.terrain_detail_level >= 0 and map.terrain_detail_published_level == map.terrain_detail_level, "terrain detail must appear at regional zoom")
+	for key in map.terrain_detail_visible:
+		_check(map.terrain_detail_tiles[key].has("terrain"), "analysis mode must publish complete raster tiles")
+		if map.terrain_layer.tiles.has(key):
+			_check(map.terrain_layer.tiles[key].ground.texture == map.terrain_detail_tiles[key].terrain, "visible tile must adopt its upgraded texture")
 	await process_frame
 	_check(not map.traffic_toggle_button.disabled, "terrain relief must keep traffic controls available")
 	map.set_base_map_style("Satellite")

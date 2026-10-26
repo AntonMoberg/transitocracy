@@ -24,7 +24,7 @@ func _run() -> void:
 	map.queue_redraw()
 	await process_frame
 	await process_frame
-	var overview_draw_ms: float = float(map.last_draw_us) / 1000.0
+	var overview_draw_ms: float = float(map.last_overlay_us) / 1000.0
 	var candidate_id := -1
 	for candidate in main.region.development_candidates:
 		if int(candidate["neighborhood_id"]) < 0 and int(candidate["frontage_link_id"]) >= 0:
@@ -67,7 +67,7 @@ func _run() -> void:
 	map.queue_redraw()
 	await process_frame
 	await process_frame
-	var city_draw_ms: float = float(map.last_draw_us) / 1000.0
+	var city_draw_ms: float = float(map.last_overlay_us) / 1000.0
 	var point: Vector2 = map._world_to_screen(candidate["center_km"])
 	if map._visible_zoning_candidate_at(candidate["center_km"]) != candidate_id:
 		_fail("The suggested district cannot be hit on the zoning map.")
@@ -104,7 +104,7 @@ func _run() -> void:
 	if main.region.neighborhoods.size() != initial_count + 1 or approved_id < 0 or int(main.region.development_candidates[approved_id]["neighborhood_id"]) < 0:
 		_fail("Approving the suggested district did not build exactly one neighborhood.")
 		return
-	print("Suggested district is visible, clickable, and approvable without drawing; zoning draws %.1f ms overview, %.1f ms city." % [overview_draw_ms, city_draw_ms])
+	print("Suggested district is visible, clickable, and approvable without drawing; zoning overlay %.1f ms overview, %.1f ms city." % [overview_draw_ms, city_draw_ms])
 	quit(0)
 
 
