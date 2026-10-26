@@ -1,5 +1,7 @@
 extends Control
 
+const MapStyle = preload("res://scripts/ui/map_style.gd")
+
 signal neighborhood_selected(neighborhood_id: int)
 signal candidate_selected(candidate_id: int)
 signal local_street_selected(neighborhood_id: int, edge_id: int)
@@ -162,7 +164,7 @@ var base_map_style := "Map"
 var show_terrain_overlay := false
 var show_slope_overlay := false
 var show_contours := false
-var show_traffic_overlay := true
+var show_traffic_overlay := false
 var show_transit_overlay := false
 var base_map_selector: OptionButton
 var terrain_toggle_button: Button
@@ -287,7 +289,7 @@ func _ready() -> void:
 	traffic_toggle_button.text = "Traffic"
 	traffic_toggle_button.tooltip_text = "Color roads by traffic flow and congestion"
 	traffic_toggle_button.toggle_mode = true
-	traffic_toggle_button.button_pressed = true
+	traffic_toggle_button.button_pressed = show_traffic_overlay
 	traffic_toggle_button.focus_mode = Control.FOCUS_NONE
 	traffic_toggle_button.toggled.connect(func(enabled: bool) -> void:
 		show_traffic_overlay = enabled
@@ -922,7 +924,7 @@ func _hit_aggregate_node(screen_position: Vector2) -> int:
 
 
 func _draw() -> void:
-	draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
+	draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else MapStyle.WATER)
 	# The control supplies the water background. Retained terrain/geometry
 	# and interactive overlays draw above it. External redraws refresh labels.
 	if dynamic_overlay != null:
@@ -932,7 +934,7 @@ func _draw() -> void:
 func _draw_static_content(pen) -> void:
 	# Runs inside static_layer._draw() with the bake view swapped in.
 	if region == null:
-		pen.draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else Color("9bd2e1"))
+		pen.draw_rect(Rect2(Vector2.ZERO, size), Color("467b89") if base_map_style == "Satellite" else MapStyle.WATER)
 		return
 	static_bake_queued = false
 	# Commit the pending bake values; the transform in _process uses these
@@ -983,6 +985,7 @@ func _draw_dynamic_content(pen) -> void:
 	if map_mode == "Roads":
 		_draw_road_nodes(pen)
 		_draw_road_preview(pen)
+		_draw_hidden_road_selection(pen)
 		_draw_road_legend(pen)
 	elif map_mode == "Trips":
 		_draw_legend(pen)
@@ -3066,16 +3069,34 @@ func _hit_road_node(screen_position: Vector2) -> int:
 	return closest
 
 
+func _draw_hidden_road_selection(pen) -> void:
+	var points := PackedVector2Array()
+	var ppk: float = _map_scale() * zoom
+	if selected_local_street.x >= 0:
+		if MapStyle.visibility(ppk, MapStyle.road_range(MapStyle.RoadStyle.LOCAL)) > 0.05: return
+		var neighborhood = region.neighborhoods[selected_local_street.x]
+		var layout = neighborhood.street_layout
+		var index: int = selected_local_street.y
+		if layout != null and index >= 0 and index < layout.edges.size():
+			var edge: Vector2 = layout.edges[index]
+			points = layout.edge_paths.get(index, PackedVector2Array([layout.nodes[int(edge.x)],layout.nodes[int(edge.y)]]))
+	elif selected_road_link_id >= 0:
+		var index: int = RoadGraph.link_index(region, selected_road_link_id)
+		if index >= 0 and not MapStyle.road_visible(region.road_links[index], ppk):
+			points = region.road_links[index].points
+	if points.size() >= 2:
+		pen.draw_polyline(_screen_polyline(points), Color("f7e3a1"), 3.0, true)
+
+
 func _hit_road_link(screen_position: Vector2) -> int:
 	if region == null:
 		return -1
 	var closest := -1
 	var best := INF
-	var show_local_roads: bool = _show_local_road_detail()
 	var link_indices: Array[int] = _spatial_near_indices(spatial_road_links, screen_position, _road_cull_margin(), true) if region.is_large_scale and zoom >= 2.0 else _all_indices(region.road_links.size())
 	for link_index in link_indices:
 		var link = region.road_links[link_index]
-		if not show_local_roads and not _is_strategic_road(link):
+		if link.id != selected_road_link_id and not MapStyle.road_visible(link, _map_scale() * zoom):
 			continue
 		var screen_points: PackedVector2Array = _screen_polyline(link.points)
 		if _map_scale() * zoom < 60.0:

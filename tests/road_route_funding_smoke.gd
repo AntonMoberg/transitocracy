@@ -18,6 +18,7 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	var quick: bool = OS.get_cmdline_user_args().has("--quick")
 	var region = RegionSetup.build(1729, 32, 0.10)["region"]
 	var curved_highways := 0
 	var sharp_inland_turns := 0
@@ -65,25 +66,25 @@ func _run() -> void:
 		var highway_count := 0
 		var feeder_count := 0
 		for link in region.road_links:
-			if link.from_node_id != access_id and link.to_node_id != access_id:
+			if link.from_node_id != access_id and link.to_node_id != access_id and RoadLinkData.junction_station(link.junctions, access_id) < 0.0:
 				continue
 			highway_count += 1 if link.road_class == "Highway" else 0
 			feeder_count += 1 if link.road_class != "Highway" else 0
 		_check(region.road_nodes[access_id].is_interchange and highway_count >= 1 and feeder_count >= 1, "city %d highway access needs an interchange fed by the road network" % city_id)
 		var center: Vector2 = region.cities[city_id]["center_km"]
 		var access: Vector2 = region.road_nodes[access_id].position_km
-		_check(center.distance_to(access) < 30.0, "city %d highway access must stay near the settlement" % city_id)
+		_check(not RoadGraph.route_from_node(region, RoadGraph.free_flow_costs(region), region.city_hub_node_ids[city_id], access_id).is_empty(), "city %d highway access must be reachable through its actual approach roads" % city_id)
 	_check(served_cities == region.starting_city_ids.size(), "every starting city needs a highway access interchange")
-	for seed_value in [291, 3819]:
+	for seed_value in [] if quick else [291, 3819]:
 		_check_highway_joins(RegionSetup.build(seed_value, 32, 0.10)["region"], seed_value)
-	for city_count in [32, 256, 768]:
+	for city_count in [] if quick else [32, 256, 768]:
 		var target_region = RegionSetup.build(8363444, city_count, 0.10)["region"]
 		_check_highway_joins(target_region, 8363444)
 		for highway in target_region.road_links:
 			if highway.road_class == "Highway":
 				for segment_index in range(1, highway.points.size()):
 					_check(StateGeography.segment_on_land(target_region.jurisdictions[0].polygon_km, highway.points[segment_index - 1], highway.points[segment_index]), "seed 8363444 highway must stay on land")
-	for large_seed in [1729, 291, 3819, 6061]:
+	for large_seed in [] if quick else [1729, 291, 3819, 6061]:
 		_check_highway_joins(RegionSetup.build(large_seed, 256, 0.10)["region"], large_seed)
 	var city: Dictionary = region.cities[0]
 	var city_point: Vector2 = city["center_km"]

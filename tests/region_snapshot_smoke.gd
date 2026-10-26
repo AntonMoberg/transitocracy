@@ -31,6 +31,10 @@ func _run() -> void:
 	if copy.neighborhoods[0] == region.neighborhoods[0] or copy.road_links[0] == region.road_links[0]:
 		_fail("Worker snapshots still own live mutable objects")
 		return
+	for index in range(region.road_links.size()):
+		if copy.road_links[index].map_major != region.road_links[index].map_major or copy.road_links[index].trunk_route_id != region.road_links[index].trunk_route_id:
+			_fail("Snapshot lost cartographic road importance or trunk identity")
+			return
 	copy.neighborhoods[0].households += 17
 	copy.cities[0]["name"] = "Snapshot only"
 	if region.neighborhoods[0].households == copy.neighborhoods[0].households or region.cities[0]["name"] == "Snapshot only":

@@ -1,14 +1,14 @@
 extends RefCounted
 
-# Flat colored geometry changes its geographic sampling with the tile level.
+# Interpolated land-cover colors use fixed world-space terrain sampling.
 # Adjacent tiles share unjittered edge vertices and never need a seam repair.
+const Style = preload("res://scripts/ui/map_style.gd")
 const CELLS = 16
 
 
-static func build(terrain, land: PackedVector2Array, origin: Vector2, tile_km: float, palette: Callable) -> Dictionary:
+static func build(terrain, land: PackedVector2Array, origin: Vector2, tile_km: float) -> Dictionary:
 	var spacing: float = tile_km / float(CELLS)
 	var positions := PackedVector2Array()
-	var heights := PackedFloat32Array()
 	for y in range(CELLS + 1):
 		for x in range(CELLS + 1):
 			var point: Vector2 = origin + Vector2(x, y) * spacing
@@ -16,9 +16,9 @@ static func build(terrain, land: PackedVector2Array, origin: Vector2, tile_km: f
 				var key: int = hash(Vector2i(roundi(point.x / spacing), roundi(point.y / spacing)))
 				point += Vector2(float(posmod(key, 997)) / 996.0 - 0.5, float(posmod(key / 997, 991)) / 990.0 - 0.5) * spacing * 0.55
 			positions.append(point)
-			heights.append(terrain.visual_elevation_at(point))
 	var vertices := PackedVector2Array()
 	var colors := PackedColorArray()
+	var color_cache := {}
 	for y in range(CELLS):
 		for x in range(CELLS):
 			var a: int = y * (CELLS + 1) + x
@@ -29,27 +29,20 @@ static func build(terrain, land: PackedVector2Array, origin: Vector2, tile_km: f
 				var first: Vector2 = positions[indices.x]
 				var second: Vector2 = positions[indices.y]
 				var third: Vector2 = positions[indices.z]
-				var center: Vector2 = (first + second + third) / 3.0
-				var edge_a: Vector2 = (second - first) * 1000.0
-				var edge_b: Vector2 = (third - first) * 1000.0
-				var determinant: float = edge_a.cross(edge_b)
-				var da: float = heights[indices.y] - heights[indices.x]
-				var db: float = heights[indices.z] - heights[indices.x]
-				var gradient := Vector2((da * edge_b.y - db * edge_a.y) / determinant, (db * edge_a.x - da * edge_b.x) / determinant)
-				var elevation: float = (heights[indices.x] + heights[indices.y] + heights[indices.z]) / 3.0
-				var cover: Vector3 = terrain.land_cover_at(center, elevation, gradient) if terrain.has_method("land_cover_at") else Vector3.ZERO
-				var color: Color = palette.call(elevation, gradient, cover)
 				var polygon := PackedVector2Array([first, second, third])
 				if Geometry2D.is_point_in_polygon(first, land) and Geometry2D.is_point_in_polygon(second, land) and Geometry2D.is_point_in_polygon(third, land):
-					_append_polygon(vertices, colors, polygon, origin, color)
+					_append_polygon(vertices, colors, polygon, origin, terrain, color_cache)
 				else:
 					for clipped in Geometry2D.intersect_polygons(polygon, land):
-						_append_polygon(vertices, colors, clipped, origin, color)
+						_append_polygon(vertices, colors, clipped, origin, terrain, color_cache)
 	return {"map_vertices": vertices, "map_colors": colors}
 
 
-static func _append_polygon(vertices: PackedVector2Array, colors: PackedColorArray, polygon: PackedVector2Array, origin: Vector2, color: Color) -> void:
+static func _append_polygon(vertices: PackedVector2Array, colors: PackedColorArray, polygon: PackedVector2Array, origin: Vector2, terrain, color_cache: Dictionary) -> void:
 	var indices: PackedInt32Array = Geometry2D.triangulate_polygon(polygon)
 	for index in indices:
 		vertices.append(polygon[index] - origin)
-		colors.append(color)
+		var point: Vector2 = polygon[index]
+		if not color_cache.has(point):
+			color_cache[point] = Style.landscape_color(terrain, point)
+		colors.append(color_cache[point])

@@ -57,6 +57,18 @@ Main-thread publication has a soft 1 ms budget shared by geometry and terrain. M
 
 Traffic uses a compact directional color texture updated at most 15 times per second, interpolated in the road shader. Changing traffic, selection, or base style does not regenerate road geometry. Feature fingerprints restrict geometry invalidation to affected layers and tiles. Labels, planning previews, and small interactive overlays still use Godot's canvas drawing API.
 
+Map opens with Traffic and Terrain off. The base palette uses pale mint open land, soft green woods, cream dry ground, sand exposed rock, off-white developed blocks and blue water. Land cover uses the same world-space height/vegetation sampling at every tile level; Map relief is limited to ±6% brightness. Terrain adds stronger relief, while Satellite retains its natural-color palette.
+
+Road classes carry independent cartographic colors and live shader visibility. With the 110-pixel scale bar, local streets appear at 500 m and closer (110–121 pixels/km fade), urban collectors at 1 km (55–60.5 pixels/km), and ordinary rural/arterial routes fade between 5 km and 10 km (11–22 pixels/km). Highways and the static settlement-access backbone remain visible at overview. River thresholds use width: 60 m at 1 km, 160 m at 2–5 km, and 240 m at 10 km and farther. Picking follows the same policy; selected roads remain visible. Completed-block land-cover skirts close street-width gaps without painting undeveloped jurisdictions.
+
+### Initial road network
+
+New worlds choose complete terrain-weighted state corridors between developed starting cities before refining their highway geometry. Both map axes are considered; long crossings target at least 70% of settlement extent on an axis. A second primary crossing must serve additional cities and have a validated connection to the first. Regional branches attach to actual interior interchanges. Highway gateways are independent of rural-road sampling.
+
+Routing favors low relative elevation and limited climbing, tries broad surface bends before tighter legal curves, then refines difficult sections in bounded windows. Surface passes precede exceptional tunnels (3 km each, at most 5% of a highway). Final grade, curve, land and bridge checks still apply. Route-specific avoidance is not stored in reusable terrain-edge costs, and changing road class invalidates grade-dependent costs.
+
+The countryside samples at 30 km spacing, with optional-loop degree capped at three and a 1.85× detour threshold. This was calibrated from an initial 32 km setting to preserve a modest reduction. Connectivity uses the actual graph, including highway interior junctions; city access and overview importance are resolved after the whole network is built. Existing worlds receive the new rendering style; road geography changes on regeneration.
+
 This follows the worker layout / retained GPU buffer architecture documented by [Mapbox GL JS](https://github.com/mapbox/mapbox-gl-js/blob/main/ARCHITECTURE.md). It applies the techniques of modern vector maps inside Godot; it does not embed a map service or depend on proprietary Google/Apple internals.
 
 Run geometry regression checks headlessly, and full-frame navigation checks **with a graphical renderer**:
@@ -75,7 +87,35 @@ Measured on Windows, Godot 4.7.2 Mono, D3D12 Forward+, RTX 3070, 2560×1440 view
 | --- | --- | --- | --- | --- | --- |
 | 32 (initial chunk renderer) | 4.99 ms | 9.67 ms | 12.10 ms | 13.51 ms | 11.2 MiB |
 | 768 (direct LOD loading and revised road styling) | 4.27 ms | 6.39 ms | 9.59 ms | 15.35 ms | 11.0 MiB |
+| 768 (land-cover palette, live class LOD, terrain corridors) | 4.19 ms | 6.59 ms | 9.86 ms | 14.29 ms | 18.0 MiB |
 
-Both runs passed the frame budgets and coverage/invalidation checks. The 256-city full-UI headless smoke test measured a 13.5 ms longest day-mode frame. These are repeatable test scenarios on this machine, not guarantees for every GPU, seed, overlay, or simulation workload. `map_gpu_smoke.gd` separately verifies actual pixels for lane extrusion, selected-road color and traffic texture updates without uploading geometry.
+These runs passed the frame budgets and coverage/invalidation checks. The 256-city full-UI headless smoke test measured a 13.5 ms longest day-mode frame. These are repeatable test scenarios on this machine, not guarantees for every GPU, seed, overlay, or simulation workload. `map_gpu_smoke.gd` separately verifies actual pixels for lane extrusion, selected-road color and traffic texture updates without uploading geometry.
 
 `map_refinement_smoke.gd` measures the delay from zoom input to published visible roads, city blocks, and buildings, and saves screenshots at 45, 80, 300, and 1000 pixels/km. On the same RTX 3070 with 768 cities and seed 1729, roads arrived in 25–67 ms, blocks in 35–96 ms, and buildings in 233–309 ms. Thresholds are 350 ms for roads, 500 ms for blocks, and 1 s for buildings. Run it with the graphical renderer, as with the frame benchmark. This complements the frame-time checks: a responsive UI with missing detail does not pass as a responsive map.
+
+Additional cartography and network checks:
+
+```text
+Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/cartography_policy_smoke.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --path E:\Godot\transitocracy --script res://tests/map_lod_gpu_smoke.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/terrain_corridor_smoke.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --headless --path E:\Godot\transitocracy --script res://tests/road_network_metrics.gd
+Godot_v4.7.2-stable_mono_win64_console.exe --path E:\Godot\transitocracy --script res://tests/map_palette_gallery.gd
+```
+
+The GPU LOD check changes zoom without publishing another mesh and compares actual pixel visibility to picking policy. The corridor fixture checks a mountain saddle, an impassable barrier, deterministic routes and cross-class cache isolation. Network metrics cover three seeds at 256 and 768 cities, validating city/highway connectivity, grades, curve radii and tunnel limits. The gallery saves Map views at the requested scales and a Terrain overview to `user://palette_*.png`.
+
+The palette/corridor revision also passed visible-detail checks on the same 768-city setup: roads **21–43 ms**, blocks **29–43 ms**, and buildings **254–264 ms**. The final GPU test checks that clearance masks render as light verges in Map mode rather than dark asphalt strips.
+
+Fixed-seed comparison against the preceding generator (lengths in km, rounded):
+
+| Cities | Seed | Previous collector length | New collector length | Reduction |
+| --- | --- | --- | --- | --- |
+| 256 | 1729 | 24,782 | 17,414 | 29.7% |
+| 256 | 3819 | 27,195 | 19,362 | 28.8% |
+| 256 | 7601356 | 26,252 | 18,511 | 29.5% |
+| 768 | 1729 | 24,484 | 17,394 | 29.0% |
+| 768 | 3819 | 27,276 | 19,443 | 28.7% |
+| 768 | 7601356 | 26,420 | 18,615 | 29.5% |
+
+Collector totals include the rural network and urban collectors; urban layouts are unchanged. All six worlds passed starting-city access, highway connectivity, curvature, grade and tunnel-limit checks. These measurements describe the checked seeds, rather than a hard per-world road-length quota.

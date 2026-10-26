@@ -1,5 +1,6 @@
 extends Node2D
 ## Persistent world-space GPU chunks. Only this node publishes worker results.
+const Style = preload("res://scripts/ui/map_style.gd")
 const LocalTraffic = preload("res://scripts/simulation/local_street_traffic.gd")
 const Geometry = preload("res://scripts/ui/map_geometry.gd")
 const FILL_SHADER = preload("res://scripts/ui/shaders/map_fill.gdshader")
@@ -53,6 +54,8 @@ var current_materials: Array[ShaderMaterial] = []
 func _ready() -> void:
 	fill_material.shader = FILL_SHADER
 	line_material.shader = LINE_SHADER
+	line_material.set_shader_parameter("road_colors", PackedColorArray(Style.ROAD_COLORS))
+	line_material.set_shader_parameter("water_color", Style.WATER)
 	current_materials.append(line_material)
 var visible_buildings := 0
 var visible_streets := 0
@@ -145,12 +148,11 @@ func _capture_snapshot(deadline: int) -> void:
 					_next_stage()
 					continue
 				var link = region.road_links[snapshot_cursor]
-				var rural: bool = link.road_class == "Collector" and link.managed_neighborhood_id < 0
-				var strategic: bool = link.road_class == "Highway" or rural or region.road_nodes[link.from_node_id].city_id != region.road_nodes[link.to_node_id].city_id
-				var minimum: float = 3.0 if rural else (0.0 if strategic else 25.0)
+				var style: int = Style.road_style(link)
+				var limits: Vector2 = Style.road_range(style, link.map_major)
 				var slot: int = snapshot.slots.get(link.id, snapshot.slots.size())
 				snapshot.slots[link.id] = slot
-				snapshot.features.append({"identity": "road:%d" % link.id, "kind": "line", "layer": "roads", "points": link.points.duplicate(), "lanes": link.lanes_per_direction, "highway": link.road_class == "Highway", "slot": slot, "min_ppk": minimum, "junctions": link.junctions.duplicate(true), "crossings": link.crossings.duplicate(true), "terrain_spans": link.terrain_spans.duplicate(true)})
+				snapshot.features.append({"identity": "road:%d" % link.id, "kind": "line", "layer": "roads", "points": link.points.duplicate(), "lanes": link.lanes_per_direction, "highway": link.road_class == "Highway", "slot": slot, "min_ppk": limits.x, "fade": limits, "style": style, "junctions": link.junctions.duplicate(true), "crossings": link.crossings.duplicate(true), "terrain_spans": link.terrain_spans.duplicate(true)})
 			1:
 				if snapshot_cursor >= region.jurisdictions.size():
 					_next_stage()
@@ -168,13 +170,13 @@ func _capture_snapshot(deadline: int) -> void:
 					_next_stage()
 					continue
 				var river: Dictionary = region.terrain.rivers[snapshot_cursor]
-				snapshot.features.append({"identity": "river:%d" % snapshot_cursor, "kind": "line", "layer": "water", "points": river.points.duplicate(), "meters": float(river.width_km) * 1000.0, "pixels": 1.0, "slot": -2, "min_ppk": 0.0 if float(river.width_km) >= 0.12 else 2.0})
+				snapshot.features.append({"identity": "river:%d" % snapshot_cursor, "kind": "line", "layer": "water", "points": river.points.duplicate(), "meters": float(river.width_km) * 1000.0, "pixels": 1.0, "slot": -2, "widths": river.get("widths_km", PackedFloat32Array()).duplicate(), "fade": Style.river_range(float(river.width_km)), "min_ppk": Style.river_range(float(river.width_km)).x})
 			3:
 				if snapshot_cursor >= region.terrain.lakes.size():
 					_next_stage()
 					continue
 				var lake: Dictionary = region.terrain.lakes[snapshot_cursor]
-				snapshot.features.append({"identity": "lake:%d" % snapshot_cursor, "kind": "block", "layer": "water", "points": lake.polygon.duplicate(), "color": Color("79cde2")})
+				snapshot.features.append({"identity": "lake:%d" % snapshot_cursor, "kind": "block", "layer": "water", "points": lake.polygon.duplicate(), "color": Style.WATER})
 			4:
 				if snapshot_cursor >= region.neighborhoods.size():
 					_next_stage()
@@ -231,7 +233,7 @@ func _capture_neighborhood(neighborhood) -> bool:
 			var slot: int = snapshot.slots.get(address, snapshot.slots.size())
 			snapshot.slots[address] = slot
 			snapshot.local_slots.append(address)
-			snapshot.features.append({"slot": slot, "identity": "street:%d:%d" % [neighborhood.id, edge_id], "kind": "line", "layer": "roads", "points": points.duplicate(), "lanes": 1, "local": true, "min_ppk": 25.0})
+			snapshot.features.append({"slot": slot, "identity": "street:%d:%d" % [neighborhood.id, edge_id], "kind": "line", "layer": "roads", "points": points.duplicate(), "lanes": 1, "local": true, "style": Style.RoadStyle.LOCAL, "fade": Style.road_range(Style.RoadStyle.LOCAL), "min_ppk": 110.0})
 		return false
 	var block_id: int = neighborhood_part - layout.edges.size()
 	if block_id >= layout.blocks.size():
@@ -241,7 +243,7 @@ func _capture_neighborhood(neighborhood) -> bool:
 	var block: Dictionary = layout.blocks[block_id]
 	if int(block.phase) > plan.completed_phase or block.get("demolished", false):
 		return false
-	snapshot.features.append({"identity": "block:%d:%d" % [neighborhood.id, block_id], "kind": "block", "layer": "blocks", "points": block.polygon.duplicate(), "color": Color("bee5c9") if block.park else Color("d5d9cf"), "min_ppk": 3.0})
+	snapshot.features.append({"identity": "block:%d:%d" % [neighborhood.id, block_id], "kind": "block", "layer": "blocks", "points": block.polygon.duplicate(), "color": Style.PARK if block.park else Style.URBAN, "urban_fill": not block.park, "min_ppk": 0.0})
 	if block.park or block_id >= neighborhood.block_zoning.size() or neighborhood.block_zoning[block_id] == 0:
 		return false
 	var code: int = neighborhood.block_zoning[block_id] - 1
@@ -306,11 +308,11 @@ func _select_chunks(ppk: float) -> void:
 	visible_streets = 0
 	visible_districts = 0
 	for layer in LAYERS:
-		var minimum: float = 200.0 if layer == "buildings" else (3.0 if layer == "blocks" else 0.0)
+		var minimum: float = 200.0 if layer == "buildings" else 0.0
 		if ppk < minimum:
 			continue
 		# Request the destination LOD immediately, not a staircase of parents.
-		if layer in ["roads", "water", "borders"]:
+		if layer in ["roads", "water", "borders", "blocks"]:
 			_request(Vector3i.ZERO, layer)
 		var width: float = source.bounds.size.x / pow(2.0, target_level)
 		var count: int = int(pow(2.0, target_level))
@@ -415,8 +417,8 @@ func _publish(deadline: int) -> void:
 			var is_line: bool = part.get("line", false)
 			if is_line:
 				arrays[Mesh.ARRAY_CUSTOM0] = part.colors.to_byte_array().to_float32_array()
-				arrays[Mesh.ARRAY_CUSTOM1] = part.sides
-				flags = (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT) | (Mesh.ARRAY_CUSTOM_R_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM1_SHIFT)
+				arrays[Mesh.ARRAY_CUSTOM1] = part.styles
+				flags = (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT) | (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM1_SHIFT)
 			else:
 				arrays[Mesh.ARRAY_COLOR] = part.colors
 			var mesh := ArrayMesh.new()
@@ -440,10 +442,10 @@ func _publish(deadline: int) -> void:
 				node.set_instance_shader_parameter("clip_rect", Vector4(rect.position.x, rect.position.y, rect.end.x, rect.end.y))
 			else:
 				node.material = fill_material
-				node.set_instance_shader_parameter("fill_role", {"water": 0, "blocks": 1, "buildings": 2, "clearance": 3}.get(result.layer, 4))
+				node.set_instance_shader_parameter("fill_role", {"water": 0, "blocks": 1, "buildings": 2, "clearance": 3, "roads": 5}.get(result.layer, 4))
 			add_child(node)
 			result.nodes.append(node)
-			result.bytes += part.vertices.size() * (36 if is_line else 32)
+			result.bytes += part.vertices.size() * (48 if is_line else 32)
 			result.parts[result.part] = {} # Release CPU arrays as each part reaches the GPU.
 			result.part += 1
 			continue
@@ -533,6 +535,7 @@ func _update_traffic(deadline: int) -> void:
 		traffic_pending = false
 
 func _update_materials(ppk: float) -> void:
+	fill_material.set_shader_parameter("pixels_per_km", ppk)
 	fill_material.set_shader_parameter("satellite", map.base_map_style == "Satellite")
 	fill_material.set_shader_parameter("zoning", map.map_mode == "Zoning")
 	var mix_value: float = clampf(float(Time.get_ticks_msec() - traffic_published) / 67.0, 0.0, 1.0)

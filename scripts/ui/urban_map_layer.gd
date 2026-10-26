@@ -2,6 +2,7 @@ extends RefCounted
 
 const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const LocalTraffic = preload("res://scripts/simulation/local_street_traffic.gd")
+const Style = preload("res://scripts/ui/map_style.gd")
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const NeighborhoodSpatialIndex = preload("res://scripts/simulation/neighborhood_spatial_index.gd")
@@ -24,7 +25,7 @@ var footprint_cache: Dictionary = {}
 
 
 func hit_street(map, point: Vector2) -> Vector2i:
-	if map._pixels_per_meter() < 0.025:
+	if Style.visibility(map._pixels_per_meter() * 1000.0, Style.road_range(Style.RoadStyle.LOCAL)) <= 0.05:
 		return Vector2i(-1, -1)
 	var world: Vector2 = map._screen_to_world(point)
 	var best := Vector2i(-1, -1)

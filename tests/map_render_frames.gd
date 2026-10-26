@@ -46,6 +46,7 @@ func _run() -> void:
 		root.get_texture().get_image().save_png("user://renderer_street.png")
 	await _navigate(map, focus)
 	# Static traffic changes must not rebuild terrain or meshes.
+	map.show_traffic_overlay = true
 	map.reset_view()
 	deadline = Time.get_ticks_msec() + 10000
 	while not renderer.is_settled() and Time.get_ticks_msec() < deadline:
@@ -77,7 +78,7 @@ func _run() -> void:
 			_check(entry.epoch == renderer.epoch, "stale generation was published")
 	# Pixel readback deliberately runs outside the timed section.
 	if DisplayServer.get_name() != "headless":
-		for ppk in [3.0,60.0,1000.0,25.0]:
+		for ppk in [3.0,60.0,150.0,1000.0,25.0]:
 			map.zoom = maxf(1.0, ppk / map._map_scale())
 			map.pan = -(focus - map._world_center()) * map._map_scale() * map.zoom
 			for transition_frame in range(3):
@@ -89,9 +90,11 @@ func _run() -> void:
 					for x in range(400,2000,80):
 						var pixel := pixels.get_pixel(x,y)
 						# Empty-map regression clears to the water background.
-						if pixel.to_html(false) != "9bd2e1" and pixel.to_html(false) != "4c4c4c":
+						if pixel.to_html(false) != RegionMap.MapStyle.WATER.to_html(false) and pixel.to_html(false) != "4c4c4c":
 							land_samples += 1
 				_check(land_samples >= 20, "map cleared during LOD refinement")
+			if ppk == 150.0:
+				root.get_texture().get_image().save_png("user://renderer_500m.png")
 	map.reset_view()
 	if DisplayServer.get_name() != "headless":
 		await RenderingServer.frame_post_draw

@@ -7,7 +7,7 @@ const Planner = preload("res://scripts/simulation/terrain_route_planner.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
 const RoadGraph = preload("res://scripts/simulation/road_graph.gd")
 
-const COUNTRYSIDE_SPACING_KM = 28.0
+const COUNTRYSIDE_SPACING_KM = 30.0
 
 static var install_phase_us: Dictionary = {}
 
@@ -54,14 +54,15 @@ static func generate(region) -> void:
 	if sites.size() >= 2:
 		# Layered phases: trunk corridors first, then the rural web spreads
 		# from their interchanges and the city gates, avoiding trunk valleys.
-		var candidates: Array[Dictionary] = _proximity_edges(region, sites)
 		var highways: Dictionary = _build_highways(region, planner, sites)
+		var candidates: Array[Dictionary] = _proximity_edges(region, sites)
 		if not highways.is_empty():
 			planner.set_avoidance(highways["avoid_costs"], highways["avoid_origin"], highways["avoid_step"], highways["avoid_size"])
 		_build_countryside(region, planner, sites, candidates, highways)
 		print("Countryside roads: %d links in %d ms" % [region.road_links.size(), Time.get_ticks_msec() - generation_started])
-		_assign_highway_access(region, planner, highways.get("gate_cities", {}), highways.get("attached_targets", {}))
+		_assign_highway_access(region, planner, highways.get("gate_cities", {}))
 		_promote_access_spurs(region)
+		_mark_map_backbone(region)
 		print("Regional roads complete: %d ms" % (Time.get_ticks_msec() - generation_started))
 	for link in region.road_links:
 		if link.road_class != Roads.COLLECTOR:
@@ -171,22 +172,31 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 			neighbors[city_roots[city_id]][index] = 1.0
 		else:
 			city_roots[city_id] = index
-	# Sites that sit on the trunk network are already connected: skip the
-	# rural candidates that would just parallel the highway between them.
+	# Seed union-find from actual connected components, including interior junctions.
 	var view: Dictionary = RoadGraph.adjacency(region)
-	var trunk_root := -1
+	var node_components := _road_components(view)
+	var component_sites := {}
 	for index in range(sites.size()):
-		var on_trunk := false
-		for edge in view["neighbors"][sites[index]["node"]]:
-			if region.road_links[view["edge_link"][edge.x]].road_class == Roads.HIGHWAY:
-				on_trunk = true
-				break
-		if not on_trunk:
-			continue
-		if trunk_root < 0:
-			trunk_root = index
-		elif _root(parents, index) != _root(parents, trunk_root):
-			parents[_root(parents, index)] = _root(parents, trunk_root)
+		var node_id: int = sites[index].node
+		var component: int = node_components[node_id]
+		if component_sites.has(component):
+			parents[_root(parents, index)] = _root(parents, component_sites[component])
+		else:
+			component_sites[component] = index
+	# Add the actual existing graph to loop-distance queries; do not treat two
+	# gates on a long highway as either disconnected or zero kilometres apart.
+	var node_offset: int = neighbors.size()
+	for node_id in range(view.neighbors.size()): neighbors.append({})
+	for edge in range(view.edge_from.size()):
+		var a: int = node_offset + view.edge_from[edge]
+		var b: int = node_offset + view.edge_to[edge]
+		var km: float = region.road_links[view.edge_link[edge]].length_km * view.edge_fraction[edge]
+		neighbors[a][b] = minf(km, float(neighbors[a].get(b, INF)))
+		neighbors[b][a] = neighbors[a][b]
+	for index in range(sites.size()):
+		var node_id: int = node_offset + sites[index].node
+		neighbors[index][node_id] = 0.0
+		neighbors[node_id][index] = 0.0
 	var installed: Dictionary = {}
 	var install_us := 0
 	# Connect geographic components first; then add useful lowland loops.
@@ -202,10 +212,10 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 			if not loops and same_component:
 				continue
 			if loops:
-				if not same_component or degrees[a] >= 4 or degrees[b] >= 4:
+				if not same_component or degrees[a] >= 3 or degrees[b] >= 3:
 					continue
 				var direct: float = sites[a]["point"].distance_to(sites[b]["point"])
-				if direct > 75.0 or _nearby_distance(neighbors, a, b, direct * 1.65) <= direct * 1.65:
+				if direct > 75.0 or _nearby_distance(neighbors, a, b, direct * 1.85) <= direct * 1.85:
 					continue
 			var alignment: Dictionary = alignments[edge_index]
 			if alignment.is_empty():
@@ -670,128 +680,224 @@ static func _install(region, first: int, last: int, road_class: String, alignmen
 
 
 static func _build_highways(region, planner, sites: Array[Dictionary]) -> Dictionary:
-	var majors: Array[Dictionary] = []
-	var gate_cities: Dictionary = {}
-	var used: Dictionary = {}
+	var gates: Array[Dictionary] = []
+	var gate_cities := {}
+	# Highway endpoints are chosen around real settlements, independently of
+	# optional countryside samples. This remains deterministic as density changes.
 	for city_id in region.starting_city_ids:
-		var center: Vector2 = region.cities[city_id]["center_km"]
-		var best := -1
-		var distance := INF
-		for index in range(sites.size()):
-			if sites[index]["city"] >= 0:
-				continue
-			var trial: float = center.distance_to(sites[index]["point"])
-			if trial >= 4.0 and trial < distance:
-				distance = trial
-				best = index
-		if best >= 0:
-			var node_id: int = sites[best]["node"]
-			gate_cities[city_id] = node_id
-			if not used.has(node_id):
-				majors.append(sites[best])
-				used[node_id] = true
-	# Existing country junctions near opposite edges are through-route gateways.
-	for sign_value in [-1.0, 1.0]:
-		var best := -1
-		var extreme := -INF
-		for index in range(sites.size()):
-			if sites[index]["city"] < 0 and sites[index]["point"].x * sign_value > extreme:
-				best = index
-				extreme = sites[index]["point"].x * sign_value
-		if best >= 0 and not used.has(sites[best]["node"]):
-			majors.append(sites[best])
-			used[sites[best]["node"]] = true
-	if majors.size() < 2:
-		return {}
-	var highway_stats := {"lines": 0, "legs": 0, "short": 0, "alignment_failed": 0, "attempts": 0}
-	# Trunk corridors: a few long chained lines crossing the state through the
-	# major gate sites, instead of a pocketed mesh of short Delaunay hops.
-	var target_lines: int = clampi(majors.size() / 3, 3, 6)
-	var unvisited: Dictionary = {}
-	for index in range(majors.size()):
-		unvisited[index] = true
-	var chained: Dictionary = {}
-	var chain_lengths: PackedVector2Array = PackedVector2Array()
-	for line_index in range(target_lines):
-		var start: int = _pick_trunk_start(majors, unvisited, chained, chain_lengths)
-		if start < 0:
-			break
-		unvisited.erase(start)
-		var chain: Array[int] = [start]
-		var total_km := 0.0
-		# Chained legs share their heading at each interchange so trunk lines
-		# continue smoothly instead of snapping to a new direction.
-		var chain_tangent := Vector2.ZERO
-		while chain.size() < majors.size() and total_km < 900.0:
-			var current: Dictionary = majors[chain[-1]]
-			var direction: Vector2 = _trunk_heading(majors, chain)
-			var ranked: Array[Dictionary] = _rank_trunk_candidates(majors, unvisited, current, direction, region)
-			var installed := false
-			for candidate in ranked.slice(0, 4):
-				highway_stats["attempts"] += 1
-				var next_index: int = candidate["index"]
-				var first: int = current["node"]
-				var last: int = majors[next_index]["node"]
-				var a: Vector2 = region.road_nodes[first].position_km
-				var b: Vector2 = region.road_nodes[last].position_km
-				var alignment: Dictionary = planner.route(a, b, Roads.HIGHWAY, chain_tangent, Vector2.ZERO, false)
-				if alignment.is_empty() and chain_tangent != Vector2.ZERO:
-					alignment = planner.route(a, b, Roads.HIGHWAY, Vector2.ZERO, Vector2.ZERO, false)
-				if alignment.is_empty():
-					highway_stats["alignment_failed"] += 1
-					continue
-				var leg_km: float = float(alignment["length_km"])
-				if leg_km < 30.0:
-					highway_stats["short"] += 1
-					continue
-				for node_id in [first, last]:
-					region.road_nodes[node_id].is_interchange = true
-					region.road_nodes[node_id].interchange_owner_jurisdiction_id = region.road_owner_for_points(PackedVector2Array([region.road_nodes[node_id].position_km]), Roads.HIGHWAY)
-				var highway = _install(region, first, last, Roads.HIGHWAY, alignment)
-				var leg_points: PackedVector2Array = highway.points
-				chain_tangent = (leg_points[-1] - leg_points[-2]).normalized()
-				_connect_highways(region, highway.corridor_id)
-				unvisited.erase(next_index)
-				chained[next_index] = true
-				chain.append(next_index)
-				total_km += leg_km
-				highway_stats["legs"] += 1
-				installed = true
+		var center: Vector2 = region.cities[city_id].center_km
+		var best := Vector2.INF
+		var best_score := INF
+		for radius in [8.0, 12.0, 16.0]:
+			for direction in range(16):
+				var point: Vector2 = center + Vector2.from_angle(direction * TAU / 16.0) * radius
+				if not region.jurisdictions[0].contains_point(point) or region.terrain.water_at(point): continue
+				var slope: float = region.terrain.slope_at(point)
+				if slope > 0.10: continue
+				var score: float = radius + slope * 200.0 + maxf(0.0, region.terrain.elevation_at(point) - region.terrain.elevation_at(center)) * 0.02
+				if score < best_score:
+					best_score = score
+					best = point
+		if not best.is_finite(): continue
+		_add_site(region, sites, best)
+		var node_id: int = sites[-1].node
+		gate_cities[city_id] = node_id
+		gates.append({"point":best, "node":node_id, "city":city_id})
+	if gates.size() < 2: return {}
+	var macro = Planner.new(region, 8.0)
+	var detailed = Planner.new(region, 4.0)
+	var candidates := _state_corridor_candidates(gates, macro)
+	var installed: Array = []
+	var served := {}
+	var route_id := 0
+	for candidate in candidates:
+		if installed.size() >= 2: break
+		if not installed.is_empty():
+			var newly_served := 0
+			for gate in gates:
+				if not served.has(gate.city) and RoadPlanner.closest_point(candidate.guide, gate.point).distance_to(gate.point) < 40.0: newly_served += 1
+			var distinct := 0
+			for point in candidate.guide:
+				if RoadPlanner.closest_point(installed[0].points, point).distance_to(point) > 20.0: distinct += 1
+			if newly_served < 2 or distinct < candidate.guide.size() / 2: continue
+		var alignment: Dictionary = detailed.align_corridor(candidate.guide)
+		if alignment.is_empty(): continue
+		var connection := {}
+		if not installed.is_empty():
+			connection = _corridor_connection(region, macro, detailed, installed[0], alignment.points)
+			if connection.is_empty(): continue
+		var link = _install(region, gates[candidate.a].node, gates[candidate.b].node, Roads.HIGHWAY, alignment)
+		link.trunk_route_id = route_id
+		route_id += 1
+		link.map_major = true
+		installed.append(link)
+		_connect_highways(region, link.corridor_id)
+		if not connection.is_empty():
+			var first_node: int = _corridor_junction(region, sites, installed[0], connection.a)
+			var last_node: int = _corridor_junction(region, sites, link, connection.b)
+			var connector = _install(region, first_node, last_node, Roads.HIGHWAY, connection.alignment)
+			connector.trunk_route_id = route_id
+			connector.map_major = true
+			route_id += 1
+			installed.append(connector)
+			_connect_highways(region, connector.corridor_id)
+		for gate in gates:
+			if RoadPlanner.closest_point(link.points, gate.point).distance_to(gate.point) < 40.0: served[gate.city] = true
+	# Attach unserved cities to the network itself, allowing shared regional
+	# branches. Routes end at a real junction on the chosen existing highway.
+	var remaining: Array = gates.duplicate()
+	while not remaining.is_empty() and not installed.is_empty():
+		var choices: Array[Dictionary] = []
+		for gate_index in range(remaining.size()):
+			var gate: Dictionary = remaining[gate_index]
+			for link in installed:
+				var target: Vector2 = RoadPlanner.closest_point(link.points, gate.point)
+				choices.append({"gate":gate_index,"link":link,"point":target,"distance":target.distance_to(gate.point)})
+		choices.sort_custom(func(a,b): return a.distance < b.distance)
+		var gate: Dictionary = remaining[choices[0].gate]
+		var gate_index: int = choices[0].gate
+		for choice in choices:
+			if int(choice.gate) != gate_index: continue
+			if float(choice.distance) < 0.01:
+				RoadPlanner.attach_junction(region, choice.link.id, gate.node)
 				break
-			if not installed:
-				break
-		if chain.size() >= 2:
-			highway_stats["lines"] += 1
-			chain_lengths.append(Vector2(majors[chain[0]]["point"].x, majors[chain[0]]["point"].y))
-			for index in chain:
-				chained[index] = true
-	# Every starting settlement keeps a gateway on the trunk network, whatever
-	# the travel-time economics of the sparse candidate list say.
-	var attached := {}
-	var attached_targets := {}
-	for node_id in _highway_node_ids(region):
-		attached[node_id] = true
-	for _round in range(3):
-		var joined := 0
-		for city_id in gate_cities:
-			var gate_node: int = gate_cities[city_id]
-			if attached.has(gate_node):
-				continue
-			if _reach_highway_network(region, planner, gate_node, attached, attached_targets) >= 0:
-				joined += 1
-				highway_stats["guaranteed"] = int(highway_stats.get("guaranteed", 0)) + 1
-		if joined == 0:
+			var road_class: String = Roads.ARTERIAL if float(choice.distance) < 40.0 else Roads.HIGHWAY
+			var alignment := {}
+			if road_class == Roads.HIGHWAY:
+				var guide: Dictionary = macro.plan_corridor(gate.point, choice.point)
+				if not guide.is_empty(): alignment = detailed.align_corridor(guide.points)
+			if alignment.is_empty():
+				road_class = Roads.ARTERIAL
+				alignment = planner.route(gate.point, choice.point, road_class, Vector2.ZERO, Vector2.ZERO, true, true)
+			if alignment.is_empty(): continue
+			var target_id: int = RoadPlanner._node_at(region, choice.link, choice.point)
+			if target_id < 0:
+				_add_site(region, sites, choice.point)
+				target_id = sites[-1].node
+				RoadPlanner.attach_junction(region, choice.link.id, target_id)
+			region.road_nodes[target_id].is_interchange = true
+			region.road_nodes[target_id].interchange_owner_jurisdiction_id = region.road_owner_for_points(PackedVector2Array([choice.point]), Roads.HIGHWAY)
+			var branch = _install(region, gate.node, target_id, road_class, alignment)
+			branch.map_major = true
+			if road_class == Roads.HIGHWAY:
+				branch.trunk_route_id = route_id
+				route_id += 1
+				installed.append(branch)
+				_connect_highways(region, branch.corridor_id)
 			break
-	print("Highway candidates: ", highway_stats)
+		remaining.remove_at(gate_index)
+	for link in installed:
+		for node_id in [link.from_node_id, link.to_node_id]:
+			region.road_nodes[node_id].is_interchange = true
+			region.road_nodes[node_id].interchange_owner_jurisdiction_id = region.road_owner_for_points(PackedVector2Array([region.road_nodes[node_id].position_km]), Roads.HIGHWAY)
+	print("Terrain corridors: candidates=%d highways=%d cities=%d" % [candidates.size(), installed.size(), gates.size()])
 	var avoidance: Dictionary = _highway_avoidance(region)
-	return {
-		"gate_cities": gate_cities,
-		"attached_targets": attached_targets,
-		"avoid_costs": avoidance.get("costs", PackedFloat32Array()),
-		"avoid_origin": avoidance.get("origin", Vector2i.ZERO),
-		"avoid_step": avoidance.get("step", 4.0),
-		"avoid_size": avoidance.get("size", Vector2i.ZERO),
-	}
+	return {"gate_cities":gate_cities,"avoid_costs":avoidance.get("costs",PackedFloat32Array()),"avoid_origin":avoidance.get("origin",Vector2i.ZERO),"avoid_step":avoidance.get("step",4.0),"avoid_size":avoidance.get("size",Vector2i.ZERO)}
+
+
+static func _corridor_junction(region, sites: Array[Dictionary], link, point: Vector2) -> int:
+	var node_id: int = RoadPlanner._node_at(region, link, point)
+	if node_id < 0:
+		_add_site(region, sites, point)
+		node_id = sites[-1].node
+		RoadPlanner.attach_junction(region, link.id, node_id)
+	region.road_nodes[node_id].is_interchange = true
+	region.road_nodes[node_id].interchange_owner_jurisdiction_id = region.road_owner_for_points(PackedVector2Array([point]), Roads.HIGHWAY)
+	return node_id
+
+
+static func _corridor_connection(_region, macro, detailed, existing, points: PackedVector2Array) -> Dictionary:
+	var choices: Array[Dictionary] = []
+	for i in range(0, points.size(), maxi(1, points.size()/24)):
+		var a: Vector2 = RoadPlanner.closest_point(existing.points, points[i])
+		var distance: float = a.distance_to(points[i])
+		if distance < 4.0: continue
+		choices.append({"a":a,"b":points[i],"distance":distance})
+	choices.sort_custom(func(a,b): return a.distance < b.distance)
+	for choice in choices.slice(0, 4):
+		var trace: Dictionary = macro.plan_corridor(choice.a, choice.b)
+		if trace.is_empty(): continue
+		var alignment: Dictionary = detailed.align_corridor(trace.points)
+		if not alignment.is_empty(): return {"a":choice.a,"b":choice.b,"alignment":alignment}
+	return {}
+
+
+static func _state_corridor_candidates(gates: Array[Dictionary], planner) -> Array[Dictionary]:
+	var extent := Rect2(gates[0].point, Vector2.ZERO)
+	for gate in gates: extent = extent.expand(gate.point)
+	var pairs: Array[Dictionary] = []
+	var seen := {}
+	# Reserve candidates for both axes; a wide state must not exclude all
+	# north/south valleys merely because its east/west pairs are longer.
+	for axis in range(2):
+		if extent.size[axis] < 1.0: continue
+		var axis_pairs: Array[Dictionary] = []
+		for a in range(gates.size()):
+			for b in range(a+1, gates.size()):
+				var delta: Vector2 = (gates[b].point - gates[a].point).abs()
+				if delta[axis] < extent.size[axis] * 0.7: continue
+				axis_pairs.append({"a":a,"b":b,"distance":delta.length(),"span":delta[axis]})
+		axis_pairs.sort_custom(func(a,b): return a.span > b.span)
+		for pair in axis_pairs.slice(0,4):
+			var key := Vector2i(pair.a,pair.b)
+			if seen.has(key): continue
+			seen[key] = true
+			pairs.append(pair)
+	var result: Array[Dictionary] = []
+	for pair in pairs.slice(0, 8):
+		var trace: Dictionary = planner.plan_corridor(gates[pair.a].point, gates[pair.b].point)
+		if trace.is_empty(): continue
+		result.append({"a":pair.a,"b":pair.b,"guide":trace.points,"score":float(trace.cost) / maxf(1.0,pair.distance * pair.distance)})
+	result.sort_custom(func(a,b): return a.score < b.score)
+	return result
+
+
+static func _road_components(view: Dictionary) -> PackedInt32Array:
+	var result := PackedInt32Array()
+	result.resize(view.neighbors.size())
+	result.fill(-1)
+	for start in range(result.size()):
+		if result[start] >= 0: continue
+		var queue: Array[int] = [start]
+		result[start] = start
+		var cursor := 0
+		while cursor < queue.size():
+			var node: int = queue[cursor]
+			cursor += 1
+			for edge in view.neighbors[node]:
+				var other: int = view.edge_to[edge.x] if edge.y == 0 else view.edge_from[edge.x]
+				if result[other] < 0:
+					result[other] = start
+					queue.append(other)
+	return result
+
+
+static func _mark_map_backbone(region) -> void:
+	# Static geography, never live congestion: preserve continuous approaches
+	# and a spanning backbone between the developed settlement hubs.
+	var costs := RoadGraph.free_flow_costs(region)
+	var cities: Array = region.starting_city_ids.duplicate()
+	for city_id in cities:
+		var access: int = region.city_highway_access_node_ids[city_id]
+		if access >= 0:
+			for edge in RoadGraph.route_from_node(region, costs, region.city_hub_node_ids[city_id], access):
+				region.road_links[edge.x].map_major = true
+	if cities.is_empty(): return
+	var attached: Array = [cities.pop_front()]
+	while not cities.is_empty():
+		var best := Vector2i(-1,-1)
+		var distance := INF
+		for index in range(cities.size()):
+			for city_id in attached:
+				var trial: float = region.cities[cities[index]].center_km.distance_to(region.cities[city_id].center_km)
+				if trial < distance:
+					distance = trial
+					best = Vector2i(index, city_id)
+		var city_id: int = cities[best.x]
+		for edge in RoadGraph.route_from_node(region, costs, region.city_hub_node_ids[city_id], region.city_hub_node_ids[best.y]):
+			region.road_links[edge.x].map_major = true
+		attached.append(city_id)
+		cities.remove_at(best.x)
 
 
 const AVOID_STEP_KM := 4.0
@@ -861,72 +967,6 @@ static func _promote_access_spurs(region) -> void:
 			link.road_class = Roads.ARTERIAL
 
 
-# Start points for trunk lines spread across the state: the first lines run
-# coast to coast from the extreme gateways, later lines start where the
-# existing trunks are farthest away.
-static func _pick_trunk_start(majors: Array[Dictionary], unvisited: Dictionary, chained: Dictionary, chain_starts: PackedVector2Array) -> int:
-	var western := -1
-	var eastern := -1
-	var west := INF
-	var east := -INF
-	for index in unvisited:
-		var x: float = majors[index]["point"].x
-		if x < west:
-			west = x
-			western = index
-		if x > east:
-			east = x
-			eastern = index
-	if chain_starts.is_empty():
-		return western if western >= 0 else -1
-	if chain_starts.size() == 1:
-		return eastern if eastern >= 0 else -1
-	var best := -1
-	var best_gap := -INF
-	for index in unvisited:
-		var point: Vector2 = majors[index]["point"]
-		var nearest := INF
-		for start_point in chain_starts:
-			nearest = minf(nearest, point.distance_to(start_point))
-		if nearest > best_gap:
-			best_gap = nearest
-			best = index
-	return best
-
-
-# Direction a chain has been travelling, so the next leg keeps crossing the
-# state instead of circling back over already-served territory.
-static func _trunk_heading(majors: Array[Dictionary], chain: Array[int]) -> Vector2:
-	var heading: Vector2 = majors[chain[-1]]["point"] - majors[chain[0]]["point"]
-	return heading.normalized() if heading.length() > 0.001 else Vector2.ZERO
-
-
-static func _rank_trunk_candidates(majors: Array[Dictionary], unvisited: Dictionary, current: Dictionary, direction: Vector2, region) -> Array[Dictionary]:
-	var current_point: Vector2 = current["point"]
-	var ranked: Array[Dictionary] = []
-	for index in unvisited:
-		var point: Vector2 = majors[index]["point"]
-		var offset: Vector2 = point - current_point
-		var distance: float = offset.length()
-		if distance < 30.0 or distance > 450.0:
-			continue
-		var forward: float = 1.0
-		if direction != Vector2.ZERO:
-			forward = offset.normalized().dot(direction)
-			if forward < -0.1:
-				continue
-		var penalty := 0.0
-		for fraction in [0.25, 0.5, 0.75]:
-			var sample: Vector2 = current_point.lerp(point, fraction)
-			penalty += region.terrain.slope_at(sample) * 4.0 + (2.0 if region.terrain.water_at(sample) else 0.0)
-		# Prefer steady 100-300 km legs: single super-legs across the whole
-		# state exhaust the route search, so trunks chain forward hop by hop.
-		var reach: float = clampf(distance, 100.0, 300.0)
-		ranked.append({"index": index, "score": forward * reach / (1.0 + penalty)})
-	ranked.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["score"]) > float(b["score"]))
-	return ranked
-
-
 static func _highway_node_ids(region) -> Dictionary:
 	var ids := {}
 	for link in region.road_links:
@@ -934,69 +974,39 @@ static func _highway_node_ids(region) -> Dictionary:
 			continue
 		ids[link.from_node_id] = true
 		ids[link.to_node_id] = true
+		for junction in link.junctions: ids[int(junction.node_id)] = true
 	return ids
 
 
-# Attach an isolated city gate to the existing trunk network with one more
-# terrain-routed arterial, trying nearer junctions first and escalating to the
-# long-range search budget when mountains stand in the way. Arterial
-# connectors keep the trunk free of interchange split cascades while still
-# guaranteeing every settlement a path onto the highway network.
-static func _reach_highway_network(region, planner, gate_node: int, attached: Dictionary, attached_targets: Dictionary) -> int:
-	var gate_point: Vector2 = region.road_nodes[gate_node].position_km
-	var ranked: Array[Dictionary] = []
-	for node_id in attached:
-		ranked.append({"node": node_id, "distance": gate_point.distance_to(region.road_nodes[node_id].position_km)})
-	ranked.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["distance"]) < float(b["distance"]))
-	var long_range_used := 0
-	for entry in ranked.slice(0, 6):
-		var target: int = entry["node"]
-		var target_point: Vector2 = region.road_nodes[target].position_km
-		var alignment: Dictionary = planner.route(gate_point, target_point, Roads.ARTERIAL, Vector2.ZERO, Vector2.ZERO, false)
-		if alignment.is_empty() and long_range_used < 2:
-			long_range_used += 1
-			alignment = planner.route(gate_point, target_point, Roads.ARTERIAL, Vector2.ZERO, Vector2.ZERO, false, true)
-		if alignment.is_empty():
-			continue
-		_install(region, gate_node, target, Roads.ARTERIAL, alignment)
-		attached[gate_node] = true
-		attached_targets[gate_node] = target
-		return target
-	return -1
-
-
-# Every starting settlement gets a highway access interchange: the gate itself
-# when it sits on the trunk, otherwise the interchange where its chain of
-# arterial connectors first touches the trunk network, or a final terrain-
-# routed arterial spur where the gate has no connector at all.
-static func _assign_highway_access(region, planner, gate_cities: Dictionary, attached_targets: Dictionary) -> void:
+# Resolve access from the finished graph, including interior interchanges and
+# countryside rescue links. Endpoint bookkeeping alone can miss valid access.
+static func _assign_highway_access(region, planner, gate_cities: Dictionary) -> void:
 	var highway_ids := _highway_node_ids(region)
-	if highway_ids.is_empty():
-		return
-	for city_id in gate_cities:
-		var gate_node: int = gate_cities[city_id]
-		var access_id: int = gate_node if highway_ids.has(gate_node) else _follow_to_highway(attached_targets, highway_ids, gate_node)
+	if highway_ids.is_empty(): return
+	var view := RoadGraph.adjacency(region)
+	var costs := RoadGraph.free_flow_costs(region)
+	for city_id in region.starting_city_ids:
+		var hub: int = region.city_hub_node_ids[city_id]
+		var tree := RoadGraph._shortest_tree(region, costs, view, hub, false, false, false)
+		var access_id := -1
+		var minutes: float = RoadGraph.UNREACHABLE_MINUTES
+		for node_id in highway_ids:
+			if tree.distances[node_id] < minutes:
+				minutes = tree.distances[node_id]
+				access_id = node_id
 		if access_id < 0:
-			access_id = _add_highway_spur(region, planner, gate_node)
+			access_id = _add_highway_spur(region, planner, gate_cities.get(city_id, hub))
+			if access_id >= 0:
+				highway_ids[access_id] = true
+				view = RoadGraph.adjacency(region)
+				costs = RoadGraph.free_flow_costs(region)
 		if access_id < 0:
+			push_warning("No terrain-feasible highway access for starting city %d" % city_id)
 			continue
 		var node = region.road_nodes[access_id]
 		node.is_interchange = true
 		node.interchange_owner_jurisdiction_id = region.road_owner_for_points(PackedVector2Array([node.position_km]), Roads.HIGHWAY)
 		region.city_highway_access_node_ids[city_id] = access_id
-
-
-# Walk a chain of arterial gate connectors to the interchange where the chain
-# first touches the trunk network.
-static func _follow_to_highway(attached_targets: Dictionary, highway_ids: Dictionary, gate_node: int) -> int:
-	var visited := {}
-	var node_id: int = gate_node
-	while attached_targets.has(node_id) and not visited.has(node_id):
-		visited[node_id] = true
-		node_id = int(attached_targets[node_id])
-		if highway_ids.has(node_id):
-			return node_id
-	return -1
 
 
 static func _add_highway_spur(region, planner, gate_node: int) -> int:

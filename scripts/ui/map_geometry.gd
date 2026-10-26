@@ -1,5 +1,6 @@
 extends RefCounted
 ## Pure CPU geometry preparation. Inputs are owned snapshots, never scene nodes.
+const Style = preload("res://scripts/ui/map_style.gd")
 const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const GRID = 64
@@ -14,6 +15,12 @@ static func bounds(points: PackedVector2Array) -> Rect2:
 	return result
 
 static func index_source(source: Dictionary) -> Dictionary:
+	# A narrow land-cover skirt closes street-width gaps between completed
+	# blocks. It never includes undeveloped administrative city polygons.
+	for feature in source.features:
+		if feature.get("urban_fill", false):
+			var expanded: Array[PackedVector2Array] = Geometry2D.offset_polygon(feature.points, 0.012)
+			if not expanded.is_empty(): feature.points = expanded[0]
 	_prepare_junctions_and_crossings(source)
 	var grid := {}
 	var fingerprints := {}
@@ -97,6 +104,8 @@ static func build(source: Dictionary, key: Vector3i, layer: String) -> Dictionar
 			streets += 1
 		if str(feature.get("identity", "")).begins_with("border:") and float(feature.get("min_ppk", 0.0)) >= 25.0:
 			districts += 1
+		buffer["style"] = feature.get("style", Style.RoadStyle.HIGHWAY if feature.get("highway", false) else Style.RoadStyle.ARTERIAL)
+		buffer["fade"] = feature.get("fade", Vector2(float(feature.get("min_ppk", 0.0)), float(feature.get("min_ppk", 0.0)) * 1.1))
 		if feature.kind == "line":
 			if not buffer.get("line", false) and not buffer.vertices.is_empty():
 				flush(buffer, chunks)
@@ -113,11 +122,11 @@ static func build(source: Dictionary, key: Vector3i, layer: String) -> Dictionar
 				if feature.get("elevated", false):
 					append_line(buffer, chunks, points, rect, Color(lanes * lane_m + median_m + 3.0, 4.5, -2.0, 0.0))
 				var local: bool = feature.get("local", false)
-				var body_min: float = 0.8 if local else (1.65 if highway else 1.2)
+				var body_min: float = 0.5 if local else (1.55 if highway else (0.7 if int(buffer.style) == Style.RoadStyle.COLLECTOR else 1.0))
 				var road_half_m: float = lanes * lane_m + median_m
 				# A continuous road bed remains visible at every scale. Individual
 				# lanes only appear when their physical widths are resolvable.
-				append_line(buffer, chunks, points, rect, Color(road_half_m + (2.0 if highway else 0.8), body_min + 0.55, slot + 1, 1.0))
+				append_line(buffer, chunks, points, rect, Color(road_half_m + (2.0 if highway else 0.8), body_min + (0.35 if local else 0.45), slot + 1, 1.0))
 				append_line(buffer, chunks, points, rect, Color(road_half_m, body_min, slot + 1, 4.0))
 				if ppk >= 500.0 and not local:
 					for direction in range(2):
@@ -128,7 +137,14 @@ static func build(source: Dictionary, key: Vector3i, layer: String) -> Dictionar
 					buffer["line"] = false
 					append_arrows(buffer, chunks, points, rect, ppk, lanes, highway)
 			else:
-				append_line(buffer, chunks, points, rect, Color(width * 0.5, pixel_width * 0.5, slot + 1, 0.0))
+				var widths = feature.get("widths", [])
+				if layer == "water" and widths.size() == feature.points.size():
+					for segment in range(1, feature.points.size()):
+						var river_width: float = (widths[segment - 1] + widths[segment]) * 0.5
+						buffer["fade"] = Style.river_range(river_width)
+						append_line(buffer, chunks, PackedVector2Array([feature.points[segment - 1], feature.points[segment]]), rect, Color(river_width * 500.0, 0.35, slot + 1, 0.0))
+				else:
+					append_line(buffer, chunks, points, rect, Color(width * 0.5, pixel_width * 0.5, slot + 1, 0.0))
 		elif feature.kind == "block":
 			if buffer.get("line", false) and not buffer.vertices.is_empty():
 				flush(buffer, chunks)
@@ -151,7 +167,7 @@ static func build(source: Dictionary, key: Vector3i, layer: String) -> Dictionar
 	return {"key": key, "layer": layer, "parts": chunks, "buildings": count, "streets": streets, "districts": districts, "epoch": source.epoch}
 
 static func new_buffer() -> Dictionary:
-	return {"vertices": PackedVector2Array(), "uv": PackedVector2Array(), "colors": PackedColorArray(), "sides": PackedFloat32Array()}
+	return {"vertices": PackedVector2Array(), "uv": PackedVector2Array(), "colors": PackedColorArray(), "sides": PackedFloat32Array(), "styles": PackedFloat32Array()}
 
 static func flush(buffer: Dictionary, chunks: Array) -> void:
 	if buffer.vertices.is_empty():
@@ -161,13 +177,20 @@ static func flush(buffer: Dictionary, chunks: Array) -> void:
 	buffer.uv = PackedVector2Array()
 	buffer.colors = PackedColorArray()
 	buffer.sides = PackedFloat32Array()
+	buffer.styles = PackedFloat32Array()
 
 static func emit_triangle(buffer: Dictionary, chunks: Array, points: Array, normals: Array, color: Color, sides: Array = []) -> void:
 	for i in range(3):
 		buffer.vertices.append(points[i])
 		buffer.uv.append(normals[i])
 		buffer.colors.append(color)
-		buffer.sides.append(float(sides[i]) if not sides.is_empty() else 0.0)
+		var side: float = float(sides[i]) if not sides.is_empty() else 0.0
+		buffer.sides.append(side)
+		var fade: Vector2 = buffer.get("fade", Vector2.ZERO)
+		buffer.styles.append(side)
+		buffer.styles.append(float(buffer.get("style", 0)))
+		buffer.styles.append(fade.x)
+		buffer.styles.append(fade.y)
 	if buffer.vertices.size() >= MAX_VERTICES:
 		flush(buffer, chunks)
 
@@ -296,7 +319,7 @@ static func _prepare_junctions_and_crossings(source: Dictionary) -> void:
 					best = distance
 					direction = (points[i] - points[i - 1]).normalized()
 			var line := PackedVector2Array([crossing.point - direction * 0.055, crossing.point + direction * 0.055])
-			structures.append({"identity": "%s:crossing:%d" % [feature.identity, crossing_index], "kind": "line", "layer": "structures", "points": line, "lanes": feature.lanes, "highway": feature.get("highway",false), "elevated": true, "slot": feature.slot, "min_ppk": 60.0})
+			structures.append({"identity": "%s:crossing:%d" % [feature.identity, crossing_index], "kind": "line", "layer": "structures", "points": line, "lanes": feature.lanes, "highway": feature.get("highway",false), "elevated": true, "slot": feature.slot, "style": feature.get("style", Style.RoadStyle.HIGHWAY if feature.get("highway",false) else Style.RoadStyle.ARTERIAL), "fade": Vector2(maxf(60.0, feature.get("fade",Vector2.ZERO).x),maxf(66.0,feature.get("fade",Vector2.ZERO).y)), "min_ppk": maxf(60.0,feature.get("min_ppk",0.0))})
 			crossing_index += 1
 		var span_index := 0
 		for span in feature.get("terrain_spans", []):

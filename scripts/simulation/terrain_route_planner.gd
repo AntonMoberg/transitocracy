@@ -23,6 +23,12 @@ var cell_slope: PackedFloat32Array = PackedFloat32Array()
 var edge_computed: PackedByteArray = PackedByteArray()
 var edge_costs: PackedFloat32Array = PackedFloat32Array()
 var tunnel_cache: Dictionary = {}
+var generated_highway := false
+var valley_weight := 0.0
+var tunnel_limit_km := 20.0
+var corridor_search := false
+var cached_grade := -1.0
+var valley_heights := {}
 var fine_planner
 # Read-only penalty grid stamped from already-built trunk corridors, so later
 # routes prefer their own valley instead of braiding alongside a highway.
@@ -97,12 +103,16 @@ func route(first: Vector2, last: Vector2, road_class: String, start_tangent: Vec
 	if first.distance_to(last) < 0.05:
 		return {}
 	avoid_endpoints = [first, last]
-	var lead: float = minf(0.35, first.distance_to(last) * 0.1)
+	if cached_grade != (0.06 if road_class == Roads.HIGHWAY else 0.08):
+		edge_computed.fill(0)
+		cached_grade = 0.06 if road_class == Roads.HIGHWAY else 0.08
+	var lead: float = minf(4.0 if generated_highway else 0.35, first.distance_to(last) * 0.1)
 	var start: Vector2 = first + start_tangent.normalized() * lead
 	var finish: Vector2 = last - end_tangent.normalized() * lead
-	var gentle := true
-	for index in range(9):
-		var point: Vector2 = first.lerp(last, float(index) / 8.0)
+	var gentle := not generated_highway
+	var direct_samples: int = maxi(8, ceili(first.distance_to(last)))
+	for index in range(direct_samples + 1) if gentle else []:
+		var point: Vector2 = first.lerp(last, float(index) / float(direct_samples))
 		if not region.jurisdictions[0].contains_point(point) or region.terrain.slope_at(point) > 0.028 or region.terrain.water_at(point) or _avoid_at(point) > 0.15:
 			gentle = false
 			break
@@ -138,6 +148,10 @@ func route(first: Vector2, last: Vector2, road_class: String, start_tangent: Vec
 		if fine_planner == null:
 			fine_planner = get_script().new(region, 1.0)
 			fine_planner.set_avoidance(avoid_costs, avoid_origin, avoid_step, avoid_size)
+		fine_planner.generated_highway = generated_highway
+		fine_planner.valley_weight = valley_weight
+		fine_planner.tunnel_limit_km = tunnel_limit_km
+		fine_planner.edge_computed.fill(0)
 		return fine_planner.route(first, last, road_class, start_tangent, end_tangent)
 	return {}
 
@@ -166,7 +180,7 @@ func _travel_cost(first_cell: Vector2i, last_cell: Vector2i, direction: int, gra
 		return INF
 	var slot: int = first_index * 8 + direction
 	if edge_computed[slot] != 0:
-		return edge_costs[slot]
+		return edge_costs[slot] + _avoid_penalty_km(Vector2(first_cell) * step_km, Vector2(last_cell) * step_km)
 	var cost := INF
 	if cell_land[first_index] != 0 and cell_land[last_index] != 0:
 		var a: Vector2 = Vector2(first_cell) * step_km
@@ -186,13 +200,16 @@ func _travel_cost(first_cell: Vector2i, last_cell: Vector2i, direction: int, gra
 				water_length = water_length + a.distance_to(b) / float(parts) if region.terrain.water_at(point) else 0.0
 				longest_water = maxf(longest_water, water_length)
 			if maximum <= grade_limit * 1.25 and longest_water <= 2.0:
-				cost = Vector2(first_cell - last_cell).length() * step_km * (1.0 + maximum * maximum * 180.0 + (cell_slope[first_index] + cell_slope[last_index]) * 2.0) + longest_water * 8.0 + _avoid_penalty_km(a, b)
+				cost = Vector2(first_cell - last_cell).length() * step_km * (1.0 + maximum * maximum * 180.0 + (cell_slope[first_index] + cell_slope[last_index]) * 2.0) + longest_water * 8.0
+				if valley_weight > 0.0:
+					var relief: float = maxf(0.0, (cell_height_m[first_index] + cell_height_m[last_index]) * 0.5 - minf(_valley_floor(first_cell), _valley_floor(last_cell)))
+					cost += valley_weight * (a.distance_to(b) * minf(2.0, relief / 400.0) + absf(cell_height_m[last_index] - cell_height_m[first_index]) * 0.008)
 	edge_costs[slot] = cost
 	edge_computed[slot] = 1
 	var reverse_slot: int = last_index * 8 + (direction + 4) % 8
 	edge_costs[reverse_slot] = cost
 	edge_computed[reverse_slot] = 1
-	return cost
+	return cost + _avoid_penalty_km(Vector2(first_cell) * step_km, Vector2(last_cell) * step_km)
 
 
 func _search(first: Vector2, last: Vector2, road_class: String, start_tangent: Vector2, long_range: bool = false) -> Dictionary:
@@ -215,7 +232,10 @@ func _search(first: Vector2, last: Vector2, road_class: String, start_tangent: V
 		# the hop-sized budget above gives up before crossing the range.
 		expansion_budget = 32000
 		cost_ceiling = first.distance_to(last) * 4.5 + 20.0
-	var padding: float = maxf(24.0, first.distance_to(last) * 0.4)
+	if corridor_search:
+		expansion_budget = 180000
+		cost_ceiling = first.distance_to(last) * 12.0 + 100.0
+	var padding: float = maxf(24.0, first.distance_to(last) * (0.8 if generated_highway else 0.4))
 	var rect := Rect2(first.min(last), (last - first).abs()).grow(padding)
 	block_x0 = maxi(origin_cell.x, floori(rect.position.x / step_km))
 	block_y0 = maxi(origin_cell.y, floori(rect.position.y / step_km))
@@ -279,11 +299,11 @@ func _search(first: Vector2, last: Vector2, road_class: String, start_tangent: V
 			if step_cost < INF and search_costs[current] + step_cost + float(turn * turn) * turn_weight < search_costs[other_state]:
 				_relax(other_state, current, search_costs[current] + step_cost + float(turn * turn) * turn_weight, false, other, goal)
 			# Tunnels continue the approach heading and emerge on dry ground.
-			if heading_slot != direction or not cell_dry or slope_here > 0.15 or (step_cost < INF and slope_here < 0.04):
+			if tunnel_limit_km <= 0.0 or heading_slot != direction or not cell_dry or slope_here > 0.15 or (step_cost < INF and slope_here < 0.04):
 				continue
-			for span_cells in range(2, ceili(20.0 / step_km) + 1, maxi(1, roundi(4.0 / step_km))):
+			for span_cells in range(2, floori(tunnel_limit_km / (Vector2(DIRECTIONS[direction]).length() * step_km)) + 1, (1 if generated_highway else maxi(1, roundi(4.0 / step_km)))):
 				var exit_cell: Vector2i = cell + DIRECTIONS[direction] * span_cells
-				if exit_cell == goal or cell == start_cell or not rect.has_point(Vector2(exit_cell) * step_km):
+				if exit_cell == goal or cell == start_cell or exit_cell.x < block_x0 or exit_cell.y < block_y0 or exit_cell.x >= block_x0 + block_width or exit_cell.y >= block_y0 + block_height:
 					continue
 				var tunnel_cost: float = _tunnel_cost(cell, exit_cell, tunnel_grade)
 				if tunnel_cost >= INF:
@@ -416,11 +436,17 @@ func _measure_tunnel(first: Vector2i, last: Vector2i) -> Vector2:
 	return Vector2(distance * 7.0 + 8.0, grade) if cover >= 60.0 else Vector2(INF, INF)
 
 
-func _smooth(trace: PackedVector2Array, road_class: String, tunnels: Array) -> PackedVector2Array:
+func _smooth(trace: PackedVector2Array, road_class: String, tunnels: Array, broad_radius: float = 0.0) -> PackedVector2Array:
 	var points := PackedVector2Array()
 	for point in trace:
 		if points.is_empty() or points[-1].distance_to(point) > 0.01:
 			points.append(point)
+	for index in range(points.size() - 2, 0, -1):
+		var portal := false
+		for tunnel in tunnels:
+			portal = portal or points[index].distance_to(tunnel["from"]) < 0.01 or points[index].distance_to(tunnel["to"]) < 0.01
+		if not portal and (points[index] - points[index - 1]).normalized().dot((points[index + 1] - points[index]).normalized()) > 0.99999:
+			points.remove_at(index)
 	if points.size() < 2:
 		return PackedVector2Array()
 	var result := PackedVector2Array([points[0]])
@@ -439,7 +465,7 @@ func _smooth(trace: PackedVector2Array, road_class: String, tunnels: Array) -> P
 			return PackedVector2Array()
 		var adjacent: float = minf(point.distance_to(points[index - 1]), point.distance_to(points[index + 1]))
 		var minimum: float = 2.1 if road_class == Roads.HIGHWAY else (0.4 if road_class == Roads.ARTERIAL else 0.15)
-		var radius: float = maxf(minimum, minf(1.4, adjacent * 0.35))
+		var radius: float = maxf(minimum, minf(broad_radius, adjacent * 0.7)) if broad_radius > 0.0 else maxf(minimum, minf(1.4, adjacent * 0.35))
 		var trim: float = radius * tan(turn * 0.5)
 		if trim > adjacent * 0.45:
 			trim = adjacent * 0.45
@@ -568,4 +594,95 @@ func _profile(points: PackedVector2Array, road_class: String, tunnels: Array) ->
 			spans[-1]["length_km"] += distance
 		else:
 			spans.append({"kind": kind, "from": points[index - 1], "to": points[index], "points": PackedVector2Array([points[index - 1], points[index]]), "elevations_m": PackedFloat32Array([heights[index - 1], heights[index]]), "length_km": distance})
+	var tunnel_total := 0.0
+	for span in spans:
+		if span.kind == "Bridge" and float(span.length_km) > 2.0:
+			return {}
+		if span.kind == "Tunnel":
+			tunnel_total += float(span.length_km)
+			if generated_highway and float(span.length_km) > 3.05:
+				return {}
+	if generated_highway and tunnel_total > length * 0.05:
+		return {}
 	return {"points": points, "elevations_m": heights, "terrain_spans": spans, "length_km": length}
+
+
+func _valley_floor(cell: Vector2i) -> float:
+	if valley_heights.has(cell): return valley_heights[cell]
+	var low := INF
+	var stride: int = maxi(1, roundi(16.0 / step_km))
+	for y in [-stride, 0, stride]:
+		for x in [-stride, 0, stride]:
+			var index := _cell_data(cell + Vector2i(x,y))
+			if index >= 0 and cell_land[index] != 0 and cell_water[index] == 0:
+				low = minf(low, cell_height_m[index])
+	valley_heights[cell] = low
+	return low
+
+
+func plan_corridor(first: Vector2, last: Vector2) -> Dictionary:
+	if not generated_highway or valley_weight != 1.5: edge_computed.fill(0)
+	generated_highway = true
+	corridor_search = true
+	tunnel_limit_km = 0.0
+	valley_weight = 1.5
+	avoid_endpoints = [first, last]
+	var trace := _search(first, last, Roads.HIGHWAY, Vector2.ZERO, true)
+	if trace.is_empty():
+		# A steeper macro guide may locate a saddle or a short tunnel opportunity.
+		# Detailed highway profiling still enforces highway grades and limits.
+		edge_computed.fill(0)
+		trace = _search(first, last, Roads.ARTERIAL, Vector2.ZERO, true)
+		edge_computed.fill(0)
+	if trace.is_empty(): return {}
+	var cost := 0.0
+	var points: PackedVector2Array = trace.points
+	for index in range(1, points.size()):
+		var a := Vector2i((points[index-1] / step_km).round())
+		var b := Vector2i((points[index] / step_km).round())
+		cost += points[index-1].distance_to(points[index]) + absf(region.terrain.elevation_at(points[index]) - region.terrain.elevation_at(points[index-1])) * 0.012
+		cost += points[index-1].distance_to(points[index]) * maxf(0.0, region.terrain.elevation_at(points[index]) - minf(_valley_floor(a), _valley_floor(b))) / 400.0
+	trace["cost"] = cost
+	return trace
+
+
+func align_corridor(guide: PackedVector2Array) -> Dictionary:
+	generated_highway = true
+	tunnel_limit_km = 0.0
+	valley_weight = 1.5
+	# The coarse guide is often already a valid surface alignment.
+	for radius in [24.0, 8.0, 0.0]:
+		var smooth := _smooth(guide, Roads.HIGHWAY, [], radius)
+		if not smooth.is_empty():
+			var direct := _profile(smooth, Roads.HIGHWAY, [])
+			if not direct.is_empty(): return direct
+	# Refine bounded windows. No partial route is published if a window fails.
+	var anchors := PackedInt32Array([0])
+	var distance := 0.0
+	for i in range(1, guide.size()):
+		distance += guide[i-1].distance_to(guide[i])
+		if distance >= 120.0 and i < guide.size()-2:
+			anchors.append(i)
+			distance = 0.0
+	anchors.append(guide.size()-1)
+	var combined := PackedVector2Array()
+	var tunnels: Array[Dictionary] = []
+	for i in range(1, anchors.size()):
+		var first: int = anchors[i-1]
+		var last: int = anchors[i]
+		var incoming := Vector2.ZERO if first == 0 else (guide[first+1] - guide[first-1]).normalized()
+		var outgoing := Vector2.ZERO if last == guide.size()-1 else (guide[last+1] - guide[last-1]).normalized()
+		var part: Dictionary = route(guide[first], guide[last], Roads.HIGHWAY, incoming, outgoing, true, false)
+		if part.is_empty():
+			part = route(guide[first], guide[last], Roads.HIGHWAY, incoming, outgoing, false, true)
+		if part.is_empty():
+			var tunnel_planner = get_script().new(region, 1.0)
+			tunnel_planner.generated_highway = true
+			tunnel_planner.valley_weight = 1.5
+			tunnel_planner.tunnel_limit_km = 3.0
+			part = tunnel_planner.route(guide[first], guide[last], Roads.HIGHWAY, incoming, outgoing, false, true)
+		if part.is_empty(): return {}
+		combined.append_array(part.points if combined.is_empty() else part.points.slice(1))
+		for span in part.terrain_spans:
+			if span.kind == "Tunnel": tunnels.append({"from":span.from, "to":span.to})
+	return _profile(combined, Roads.HIGHWAY, tunnels)

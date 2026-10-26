@@ -176,6 +176,8 @@ static func _copy_large_region(source):
 		link.owner_jurisdiction_id = original.owner_jurisdiction_id
 		link.toll_forward = original.toll_forward
 		link.toll_reverse = original.toll_reverse
+		link.map_major = original.map_major
+		link.trunk_route_id = original.trunk_route_id
 		link.corridor_id = original.corridor_id
 		link.corridor_start_km = original.corridor_start_km
 		link.managed_neighborhood_id = original.managed_neighborhood_id

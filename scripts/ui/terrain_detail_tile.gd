@@ -2,6 +2,7 @@ extends RefCounted
 
 # CPU-only terrain tile rendering. RegionMap creates GPU textures on the main
 # thread after the visible tiles finish on background workers.
+const Style = preload("res://scripts/ui/map_style.gd")
 const PIXELS = 128
 const CartographicTile = preload("res://scripts/ui/cartographic_tile.gd")
 
@@ -78,21 +79,17 @@ static func render(terrain, land: PackedVector2Array, origin: Vector2, step_km: 
 			slope_image.set_pixel(x, y, slope_color(gradient))
 			contour_image.set_pixel(x, y, contour_color(elevation, gradient, step_km, contour_interval_m))
 	var result := {"color": image, "terrain": terrain_image, "satellite": satellite_image, "slope": slope_image, "contours": contour_image}
-	result.merge(CartographicTile.build(terrain, land, origin, step_km * PIXELS, land_color))
+	result.merge(CartographicTile.build(terrain, land, origin, step_km * PIXELS))
 	return result
 
 
-static func land_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, _ground_detail: float = 0.0) -> Color:
-	var base: Color = _base_color(elevation, cover)
-	var upland: float = smoothstep(300.0, 1050.0, elevation)
-	var facet: float = floorf(smoothstep(0.035, 0.18, gradient.length()) * 4.0 + 0.5) / 4.0
-	var tint: Color = Color("d5d0c4").lerp(Color("a8d7bb"), cover.x)
-	return base.lerp(tint, upland * 0.06 + facet * 0.18)
+static func land_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, ground_detail: float = 0.0) -> Color:
+	return Style.land_color(elevation, gradient, cover, ground_detail)
 
 
 static func terrain_color(elevation: float, gradient: Vector2, cover: Vector3 = Vector3.ZERO, ground_detail: float = 0.0, broad_gradient: Vector2 = Vector2.INF) -> Color:
 	var macro_gradient: Vector2 = broad_gradient if broad_gradient.is_finite() else gradient
-	var base: Color = land_color(elevation, macro_gradient, cover, ground_detail)
+	var base: Color = _base_color(elevation, cover)
 	base = base.lerp(Color("d8d4c9"), cover.z * 0.25)
 	var broad_light: float = clampf(1.0 - (macro_gradient.x + macro_gradient.y) * 0.9, 0.72, 1.16)
 	var detail_gradient: Vector2 = gradient - macro_gradient
