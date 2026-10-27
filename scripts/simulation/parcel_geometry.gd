@@ -68,12 +68,34 @@ static func parcels(block: Dictionary, zone: String, density: int, character: St
 			var build_x1: float = x1 - side - variation
 			var build_y0: float = y0 + front
 			var build_y1: float = y1 - rear
+			# The lot is not the building: keep back gardens and service yards.
+			var depth:float = rng.randf_range(.015,.020)
+			var frontage:float = rng.randf_range(.005,.008)
+			if profile==Character.GARDEN and zone=="Residential" and density<2:
+				depth=rng.randf_range(.010,.018)
+				frontage=rng.randf_range(.008,.014)
+			elif profile==Character.COURTYARD and zone in ["Residential","Mixed"]:
+				depth=build_y1-build_y0
+				frontage=build_x1-build_x0
+			elif zone=="Industry":
+				depth=rng.randf_range(.020,.050)
+				frontage=rng.randf_range(.025,.060)
+			elif zone=="Office":
+				depth=rng.randf_range(.015,.025)
+				frontage=rng.randf_range(.018,.035)
+			elif zone in ["Commercial","Mixed"] or density==2:
+				depth=rng.randf_range(.012,.025 if zone=="Commercial" else .020)
+				frontage=rng.randf_range(.012,.024)
+			build_x1=minf(build_x1,build_x0+frontage)
+			if row==0: build_y1=minf(build_y1,build_y0+depth)
+			else: build_y0=maxf(build_y0,build_y1-depth)
 			var footprints: Array[PackedVector2Array] = []
 			if build_x1 - build_x0 >= 0.004 and build_y1 - build_y0 >= 0.005:
 				var envelopes: Array[Rect2] = [Rect2(Vector2(build_x0, build_y0), Vector2(build_x1 - build_x0, build_y1 - build_y0))]
 				if profile == Character.COURTYARD and build_x1 - build_x0 >= 0.023 and build_y1 - build_y0 >= 0.030:
-					var court_width: float = (build_x1 - build_x0) * 0.34
-					var court_height: float = (build_y1 - build_y0) * 0.38
+					var wing:float=rng.randf_range(.010,.016)
+					var court_width: float = maxf(.003,build_x1-build_x0-wing*2)
+					var court_height: float = maxf(.003,build_y1-build_y0-wing*2)
 					var court_x0: float = (build_x0 + build_x1 - court_width) * 0.5
 					var court_x1: float = court_x0 + court_width
 					var court_y0: float = (build_y0 + build_y1 - court_height) * 0.5
@@ -99,6 +121,7 @@ static func parcels(block: Dictionary, zone: String, density: int, character: St
 
 
 static func update_buildings(neighborhood) -> void:
+	if neighborhood.building_model_version>0: return
 	if neighborhood.street_layout == null or not neighborhood.development_approved:
 		return
 	var plan = neighborhood.development_plan

@@ -18,18 +18,16 @@ func _initialize() -> void:
 func _run() -> void:
 	var start: int = Time.get_ticks_usec()
 	var large: bool = OS.get_cmdline_user_args().has("--large")
-	var region = RegionGenerator.generate_large_region(8752568, 256) if large else RegionGenerator.generate_region(8752568)
-	RoadNetworkGenerator.generate(region)
+	var setup:Dictionary=preload("res://scripts/simulation/region_setup.gd").build(8752568,256 if large else 32,0.1)
+	var region=setup.region
 	print("Generate: %.1f ms" % [float(Time.get_ticks_usec() - start) / 1000.0])
 	start = Time.get_ticks_usec()
 	DevelopmentPlanner.refresh_candidates(region)
 	print("First candidates: %.1f ms, %d total" % [float(Time.get_ticks_usec() - start) / 1000.0, region.development_candidates.size()])
 	region.dev_mode = true
-	var clock = CalendarClock.new()
-	AccessibilityCalculator.recalculate(region)
-	var flow = TripFlowCalculator.build(region)
-	TripFlowCalculator.populate_day(flow, region.generation_seed, clock.unix_seconds, clock.is_weekend())
-	var traffic = MultiScaleTraffic.new_day(region, flow, clock.unix_seconds)
+	var clock = setup.clock
+	var flow = setup.flow
+	var traffic = setup.traffic_state
 	var city_id := -1
 	for step in range(12):
 		var candidate_id := -1
@@ -45,6 +43,7 @@ func _run() -> void:
 		start = Time.get_ticks_usec()
 		var approved: Dictionary = DevelopmentPlanner.set_approval(region, candidate_id, true)
 		var approval_ms: float = float(Time.get_ticks_usec() - start) / 1000.0
+		print("Approval breakdown: %s"%approved.get("stages_us",{}))
 		if not approved.get("ok", false):
 			push_error("Approval %d failed: %s" % [step, approved])
 			quit(1)

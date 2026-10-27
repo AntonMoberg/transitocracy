@@ -16,6 +16,7 @@ var lakes: Array[Dictionary] = []
 var lake_cells: Dictionary = {}
 var rivers: Array[Dictionary] = []
 var river_cells: Dictionary = {}
+var river_segment_cells: Dictionary = {}
 var detail_noise: FastNoiseLite
 var visual_relief_noise: FastNoiseLite
 var visual_detail_noise: FastNoiseLite
@@ -136,6 +137,21 @@ func water_at(point: Vector2) -> bool:
 
 
 func river_surface_at(point: Vector2) -> float:
+	if not river_segment_cells.is_empty():
+		var cell:=Vector2i(floori(point.x/2.0),floori(point.y/2.0))
+		var level:=INF
+		for address in river_segment_cells.get(cell,[]):
+			var river:Dictionary=rivers[address.x]
+			var line:PackedVector2Array=river.points
+			var widths:PackedFloat32Array=river.get("widths_km",PackedFloat32Array())
+			var i:int=address.y
+			var radius:float=(widths[i-1]+widths[i])*.25 if widths.size()==line.size() else float(river.width_km)*.5
+			var closest:Vector2=Geometry2D.get_closest_point_to_segment(point,line[i-1],line[i])
+			if point.distance_to(closest)<=radius:
+				var segment:Vector2=line[i]-line[i-1]
+				var fraction:float=clampf((closest-line[i-1]).dot(segment)/maxf(segment.length_squared(),.000001),0,1)
+				level=minf(level,lerpf(river.levels[i-1],river.levels[i],fraction))
+		return level
 	if river_cells.is_empty():
 		return INF
 	var cell := Vector2i(floori(point.x / 2.0), floori(point.y / 2.0))
@@ -222,6 +238,7 @@ func buildable_fraction(polygon: PackedVector2Array, resolution: int = 6) -> flo
 
 func index_rivers() -> void:
 	river_cells.clear()
+	river_segment_cells.clear()
 	for river_id in range(rivers.size()):
 		var line: PackedVector2Array = rivers[river_id]["points"]
 		var bounds_for_river := Rect2(line[0], Vector2.ZERO)
@@ -231,10 +248,14 @@ func index_rivers() -> void:
 		river["bounds"] = bounds_for_river.grow(float(river["width_km"]))
 		rivers[river_id] = river
 		for i in range(1, line.size()):
-			var box := Rect2(line[i - 1].min(line[i]), (line[i] - line[i - 1]).abs()).grow(0.25)
+			var widths:PackedFloat32Array=river.get("widths_km",PackedFloat32Array())
+			var radius:float=(widths[i-1]+widths[i])*.25 if widths.size()==line.size() else float(river.width_km)*.5
+			var box := Rect2(line[i - 1].min(line[i]), (line[i] - line[i - 1]).abs()).grow(maxf(.25,radius))
 			for y in range(floori(box.position.y / 2.0), floori(box.end.y / 2.0) + 1):
 				for x in range(floori(box.position.x / 2.0), floori(box.end.x / 2.0) + 1):
 					var key := Vector2i(x, y)
+					if not river_segment_cells.has(key): river_segment_cells[key]=[]
+					river_segment_cells[key].append(Vector2i(river_id,i))
 					if not river_cells.has(key):
 						river_cells[key] = []
 					if not river_cells[key].has(river_id):

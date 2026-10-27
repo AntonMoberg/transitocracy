@@ -103,10 +103,20 @@ func _run() -> void:
 	for offset in range(80):
 		region.current_day_key += 1
 		Dynamics.advance_day(region)
-	_check(neighborhood.households <= roundi(plan.target_housing * 0.35) and neighborhood.jobs <= roundi(plan.target_jobs * 0.35), "unbuilt phases must not receive population or jobs")
-	neighborhood.households = roundi(plan.target_housing * 0.35 * 0.8)
+	var served:Vector2i=preload("res://scripts/simulation/building_inventory.gd").serviced_capacity(neighborhood)
+	_check(neighborhood.households <= served.x and neighborhood.jobs <= served.y, "unbuilt phases must not receive population or jobs")
+	for building in neighborhood.buildings:
+		_check(building.state!="Complete" or building.phase<=plan.completed_phase,"buildings cannot finish before their access street opens")
+	# The funding fixture needs occupied, completed buildings, not occupants
+	# assigned to hypothetical area-based capacity.
+	var inventory=preload("res://scripts/simulation/building_inventory.gd")
+	for building in neighborhood.buildings:
+		if building.phase<=plan.completed_phase: building.state="Complete"
+	inventory.refresh_capacity(neighborhood)
+	neighborhood.households = roundi(neighborhood.housing_capacity * 0.8)
 	neighborhood.population = roundi(neighborhood.households * neighborhood.people_per_household)
-	Dynamics._set_jobs(neighborhood, roundi(plan.target_jobs * 0.35 * 0.8))
+	Dynamics._set_jobs(neighborhood, roundi(neighborhood.job_capacity * 0.8))
+	inventory.allocate_occupancy(neighborhood)
 	Budget.advance_day(region, day + 3)
 	_check(plan.status == "Awaiting funds", "unfunded extensions must pause while existing development remains")
 	var second_cost: int = Budget.phase_cost(neighborhood, 2)
@@ -125,7 +135,7 @@ func _run() -> void:
 	var old_population: int = neighborhood.population
 	_check(Budget.queue_zoning(region, neighborhood.id, shares, density, day + 7)["ok"] and neighborhood.housing_capacity == old_housing, "rezoning must wait for its daily application")
 	Budget.advance_day(region, day + 8)
-	_check(neighborhood.zone_shares == shares and neighborhood.population == old_population, "rezoning must not instantly create or destroy residents")
+	_check(neighborhood.zone_shares == shares and neighborhood.population == old_population, "rezoning must not instantly create or destroy residents (%d -> %d, %d households / %d homes)" % [old_population,neighborhood.population,neighborhood.households,neighborhood.housing_capacity])
 	var initial = region.neighborhoods[0]
 	for existing in region.neighborhoods:
 		if existing.initially_developed and existing.street_layout != null and existing.development_plan.design_demand / existing.developable_area_ha < initial.development_plan.design_demand / initial.developable_area_ha:
@@ -149,7 +159,7 @@ func _run() -> void:
 	Budget.queue_zoning(region, initial.id, shares, low_density, day + 12)
 	Budget.advance_day(region, day + 13)
 	ParcelGeometry.update_buildings(initial)
-	_check(initial.population == initial_population and initial.block_zoning == frozen_zones, "downzoning must preserve occupied homes and existing building footprints")
+	_check(initial.population == initial_population and initial.block_zoning == frozen_zones, "downzoning must preserve occupied homes and existing building footprints (%d -> %d)" % [initial_population,initial.population])
 	_check(not Budget.allocate(region, initial.id, -1)["ok"] and not Budget.allocate(region, initial.id, 1000000000000)["ok"], "transfers must not overdraw reserves or city funds")
 	var state = setup["traffic_state"]
 	var start: int = state.unix_seconds

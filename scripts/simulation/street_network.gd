@@ -13,8 +13,9 @@ const BorderSeams = preload("res://scripts/simulation/city_border_seams.gd")
 const RoadTerrain = preload("res://scripts/simulation/road_terrain.gd")
 
 
-static func attach(region, neighborhood, layout, completed: bool = false) -> void:
+static func attach(region, neighborhood, layout, completed: bool = false, prepare_buildings: bool = true) -> void:
 	neighborhood.street_layout = layout
+	preload("res://scripts/simulation/street_names.gd").assign_layout(region.generation_seed,layout)
 	if neighborhood.character_profile.is_empty():
 		neighborhood.character_profile = Character.resolve(region, neighborhood.city_id, neighborhood.position_km, layout.interior_style, neighborhood.zone_shares, neighborhood.zone_density)
 	var plan = Plan.new()
@@ -34,6 +35,9 @@ static func attach(region, neighborhood, layout, completed: bool = false) -> voi
 		open_phase(region, neighborhood, 3)
 		plan.status = "Completed"
 		ParcelGeometry.update_buildings(neighborhood)
+	if region.building_model_version>0 and prepare_buildings:
+		preload("res://scripts/simulation/building_inventory.gd").rebuild(region,neighborhood)
+		plan.design_demand=maxf(1,plan.target_housing*2+plan.target_jobs)
 
 
 static func ensure_node(region, point: Vector2, city_id: int, preferred_id: int = -1) -> int:
@@ -197,6 +201,8 @@ static func open_phase(region, neighborhood, phase: int) -> bool:
 	if not neighborhood.initially_developed:
 		_join_adjacent_districts(region, neighborhood)
 	region.road_geometry_revision += 1
+	if region.building_model_version>0:
+		preload("res://scripts/simulation/street_names.gd").assign(region)
 	return true
 
 

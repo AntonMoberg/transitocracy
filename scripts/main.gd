@@ -77,6 +77,8 @@ var map_size_selector: OptionButton
 var generate_button: Button
 var generation_thread: Thread
 var road_rebuild_thread: Thread
+var last_road_rebuild_publish_us:int=0
+var last_road_rebuild_stages_us:Dictionary={}
 var discard_road_rebuild: bool = false
 var summary_label: Label
 var dynamics_label: Label
@@ -1575,6 +1577,17 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 		text_lines.append("Connected land is attracting residents and jobs each day.")
 	text_lines.append("Population: %s" % _format_count(neighborhood.population))
 	text_lines.append("Households: %s / %s homes" % [_format_count(neighborhood.households), _format_count(neighborhood.housing_capacity)])
+	if neighborhood.building_model_version>0:
+		var constructing:=0
+		var planned:=0
+		var completed:=0
+		for building in neighborhood.buildings:
+			if building.state=="Constructing": constructing+=1
+			elif building.state=="Complete": completed+=1
+			else: planned+=1
+		text_lines.append("Buildings: %s planned · %s constructing · %s complete" % [_format_count(planned),_format_count(constructing),_format_count(completed)])
+		text_lines.append("Completed: %s homes · %s job spaces" % [_format_count(neighborhood.housing_capacity),_format_count(neighborhood.job_capacity)])
+		text_lines.append("Full plan: %s homes · %s job spaces" % [_format_count(neighborhood.development_plan.target_housing),_format_count(neighborhood.development_plan.target_jobs)])
 	text_lines.append("Today: %+d households" % neighborhood.last_household_change)
 	text_lines.append("People: %+d today" % neighborhood.last_population_change)
 	text_lines.append("Jobs: %s / %s capacity" % [_format_count(neighborhood.jobs), _format_count(neighborhood.job_capacity)])
@@ -1778,26 +1791,20 @@ func _apply_candidate_approval(candidate_id: int, approved: bool, allocation: in
 	if region == null or candidate_id < 0 or candidate_id >= region.development_candidates.size():
 		return
 	if _region_snapshot_busy():
-		deferred_region_edits.append(Callable(self, "_apply_candidate_approval").bind(candidate_id, approved, allocation, shares.duplicate(), density.duplicate()))
+		# Candidate indices are rebuilt after every approval. Preserve the
+		# selected district's stable key while another transaction is running.
+		deferred_region_edits.append(Callable(self, "_apply_candidate_approval_key").bind(String(region.development_candidates[candidate_id].key), approved, allocation, shares.duplicate(), density.duplicate()))
 		return
 	var candidate: Dictionary = region.development_candidates[candidate_id]
 	var neighborhood_id: int = candidate["neighborhood_id"]
 	var current: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
 	if current == approved:
 		return
-	var result: Dictionary = DevelopmentPlanner.set_approval(region, candidate_id, approved, allocation, shares, density)
-	if not result["ok"]:
-		zoning_status_label.text = result["reason"]
-		return
-	_discard_pending_day()
-	_refresh_region_summary()
-	if result["new_neighborhood"]:
-		_rebuild_after_road_change([int(candidate["city_id"])], true)
-	else:
-		_invalidate_traffic_forecast()
-		_queue_next_day(last_dynamics_day_key)
-	_refresh_inspector(false)
-	map_view.queue_redraw()
+	_start_region_edit({"kind":"approval","candidate_id":candidate_id,"approved":approved,"allocation":allocation,"shares":shares.duplicate(),"density":density.duplicate()})
+
+
+func _apply_candidate_approval_key(key:String,approved:bool,allocation:int,shares:Dictionary,density:Dictionary) -> void:
+	_apply_candidate_approval(int(region.development_candidate_keys.get(key,-1)),approved,allocation,shares,density)
 
 
 func _on_development_allocation(neighborhood_id: int, amount: int) -> void:
@@ -2177,26 +2184,21 @@ func _on_road_build_pressed() -> void:
 	if _region_snapshot_busy():
 		deferred_region_edits.append(Callable(self, "_on_road_build_pressed"))
 		return
-	if pending_road_preview.get("kind", "") == RoadPlanner.DEMOLISH:
-		var demolition: Dictionary = RoadPlanner.demolish(region, pending_road_preview["target_link_id"])
-		if not demolition["ok"]:
-			road_status_label.text = demolition["reason"]
-			return
-		selected_road_link_id = -1
-		_refresh_toll_controls()
-		map_view.set_selected_road_link(-1)
-		_cancel_road_preview()
-		_rebuild_after_road_change()
-		road_status_label.text = "Road demolished. %d neighborhood road group%s remain." % [demolition["components_after"], "s" if demolition["components_after"] != 1 else ""]
+	_start_region_edit({"kind":"road","preview":pending_road_preview.duplicate(true),"day_key":_current_day_key()})
+
+
+func _start_region_edit(request:Dictionary) -> void:
+	var worker:=Thread.new()
+	var task:=Callable(RoadRebuild,"edit").bind(region,traffic_state,calendar_clock.unix_seconds,flow_profile,request)
+	if worker.start(task,Thread.PRIORITY_NORMAL)!=OK:
+		road_status_label.text="Could not start construction planning. Please retry."
 		return
-	var result: Dictionary = RoadPlanner.commit(region, pending_road_preview, _current_day_key())
-	if not result["ok"]:
-		road_status_label.text = result["reason"]
-		return
-	var project = result["project"]
-	_cancel_road_preview()
-	_rebuild_after_road_change()
-	road_status_label.text = "%s funded. Opens in %d days." % [project.kind, project.days_remaining(_current_day_key())]
+	road_rebuild_thread=worker
+	road_build_button.disabled=true
+	discard_road_rebuild=false
+	_discard_pending_day()
+	road_status_label.text="Preparing construction and road access…"
+	if request.kind in ["approval","approvals"]: zoning_status_label.text="Preparing development…"
 
 
 func _cancel_road_preview() -> void:
@@ -2219,6 +2221,10 @@ func _cancel_road_preview() -> void:
 
 func _update_road_status() -> void:
 	if road_status_label == null or region == null:
+		return
+	if road_rebuild_thread!=null:
+		road_build_button.disabled=true
+		road_status_label.text="Preparing construction and road access…"
 		return
 	if map_view != null and map_view.map_mode == "Zoning":
 		road_status_label.text = zoning_tool_message
@@ -2352,9 +2358,16 @@ func _poll_road_rebuild() -> void:
 	if discard_road_rebuild:
 		discard_road_rebuild = false
 		return
+	if result.get("edit_failed",false):
+		_update_road_status()
+		road_status_label.text=result.reason
+		if result.edit_kind in ["approval","approvals"]: zoning_status_label.text=result.reason
+		return
 	if result.is_empty() or not result["errors"].is_empty():
 		push_error("Road recalculation failed.")
 		return
+	var publish_started:=Time.get_ticks_usec()
+	last_road_rebuild_stages_us=result.get("stages_us",{})
 	var old_data: Dictionary = {"region": region, "flow": flow_profile, "traffic_state": traffic_state, "traffic_profile": traffic_profile}
 	region = result["region"]
 	region.dev_mode = dev_mode_enabled
@@ -2362,6 +2375,15 @@ func _poll_road_rebuild() -> void:
 	traffic_state = result["traffic_state"]
 	traffic_profile = traffic_state.profile
 	map_view.region = region
+	if result.get("edit_kind","")=="road":
+		_cancel_road_preview()
+		if result.edit_outcome.has("components_after"):
+			selected_road_link_id=-1
+			map_view.set_selected_road_link(-1)
+	if result.get("edit_kind","")=="approval": zoning_status_label.text="Development updated."
+	if result.get("edit_kind","")=="approvals":
+		zoning_tool_message="%d projects approved. %s"%[result.edit_outcome.approved,result.edit_outcome.reason]
+		zoning_status_label.text=zoning_tool_message
 	map_view.set_hour_carry_summary({})
 	map_view.set_flow_profile(flow_profile)
 	map_view.set_traffic_profile(traffic_profile)
@@ -2373,7 +2395,15 @@ func _poll_road_rebuild() -> void:
 	_refresh_region_summary()
 	_refresh_inspector(false)
 	_update_road_status()
+	_refresh_toll_controls()
+	if result.get("edit_kind","")=="road":
+		if result.edit_outcome.has("components_after"):
+			road_status_label.text="Road demolished. %d neighborhood road groups remain."%result.edit_outcome.components_after
+		elif result.edit_outcome.has("project"):
+			var project=result.edit_outcome.project
+			road_status_label.text="%s funded. Opens in %d days."%[project.kind,project.days_remaining(_current_day_key())]
 	map_view.queue_redraw()
+	last_road_rebuild_publish_us=Time.get_ticks_usec()-publish_started
 
 
 func _refresh_inspector(reset_scroll: bool = true) -> void:
@@ -2448,28 +2478,7 @@ func _approve_review_keys(keys: Array[String]) -> void:
 	if _region_snapshot_busy():
 		deferred_region_edits.append(Callable(self, "_approve_review_keys").bind(keys))
 		return
-	var approved := 0
-	var last_reason := ""
-	var changed_city_ids: Array[int] = []
-	var new_district_only := true
-	for key in keys:
-		var candidate_id: int = int(region.development_candidate_keys.get(key, -1))
-		if candidate_id < 0:
-			continue
-		var result: Dictionary = DevelopmentPlanner.set_approval(region, candidate_id, true)
-		if result["ok"]:
-			approved += 1
-			new_district_only = new_district_only and bool(result["new_neighborhood"])
-			var city_id: int = int(region.development_candidates[candidate_id]["city_id"])
-			if not changed_city_ids.has(city_id):
-				changed_city_ids.append(city_id)
-		else:
-			last_reason = result["reason"]
-	if approved > 0:
-		_discard_pending_day()
-		_rebuild_after_road_change(changed_city_ids, new_district_only)
-	zoning_tool_message = "%d project%s approved.%s" % [approved, "s" if approved != 1 else "", "  " + last_reason if not last_reason.is_empty() else ""]
-	_refresh_review_queue()
+	_start_region_edit({"kind":"approvals","keys":keys.duplicate()})
 
 
 func _refresh_toll_controls() -> void:

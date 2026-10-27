@@ -146,6 +146,8 @@ static func set_candidate_character(region, candidate_id: int, profile: String) 
 
 
 static func set_approval(region, candidate_id: int, approved: bool, allocation: int = -1, shares: Dictionary = {}, density: Dictionary = {}) -> Dictionary:
+	var approval_started:=Time.get_ticks_usec()
+	var stages:Dictionary={}
 	if candidate_id < 0 or candidate_id >= region.development_candidates.size():
 		return {"ok": false, "reason": "Select a neighborhood plan."}
 	var candidate: Dictionary = region.development_candidates[candidate_id]
@@ -194,13 +196,15 @@ static func set_approval(region, candidate_id: int, approved: bool, allocation: 
 		region.neighborhood_development_connected.append(0)
 		region.neighborhood_accessible.append(0)
 		region.accessibility.append(0.0)
-		StreetNetwork.attach(region, neighborhood, candidate["layout"])
+		StreetNetwork.attach(region, neighborhood, candidate["layout"], false, false)
+		stages["attach"]=Time.get_ticks_usec()-approval_started
 		if candidate.has("urban_sector"):
 			region.urban_sector_claims[UrbanGraph.sector_key(neighborhood.city_id, candidate["urban_sector"])] = neighborhood.id
 			for cell in candidate.get("urban_cells", []):
 				region.urban_block_claims[UrbanGraph.block_key(neighborhood.city_id, cell)] = neighborhood.id
 			UrbanGraph.register_layout(region, neighborhood.street_layout, neighborhood.id)
-		RoadLand.apply_to_new_neighborhood(region, neighborhood)
+		RoadLand.apply_to_new_neighborhood(region, neighborhood,stages)
+		neighborhood.development_plan.design_demand=maxf(1,neighborhood.development_plan.target_housing*2+neighborhood.development_plan.target_jobs)
 		candidate["neighborhood_id"] = neighborhood.id
 	else:
 		neighborhood = region.neighborhoods[neighborhood_id]
@@ -216,7 +220,7 @@ static func set_approval(region, candidate_id: int, approved: bool, allocation: 
 	if not shares.is_empty():
 		Budget.queue_zoning(region, neighborhood.id, shares, density, region.current_day_key)
 	region.road_geometry_revision += 1
-	return {"ok": true, "new_neighborhood": new_neighborhood, "allocated": allocation}
+	return {"ok": true, "new_neighborhood": new_neighborhood, "allocated": allocation,"stages_us":stages}
 
 
 static func _initialize_empty(neighborhood) -> void:

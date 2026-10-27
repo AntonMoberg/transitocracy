@@ -67,7 +67,17 @@ func _run() -> void:
 				break
 		var untouched_polygon: PackedVector2Array = original.blocks[unaffected]["polygon"].duplicate() if unaffected >= 0 else PackedVector2Array()
 		var old_count: int = original.blocks.size()
+		var remote_revisions:Dictionary={}
+		var corridor_bounds:=Rect2(points[0],Vector2.ZERO)
+		for point in points: corridor_bounds=corridor_bounds.expand(point)
+		for other in region.neighborhoods:
+			if other.street_layout!=null and not other.street_layout.bounds.intersects(corridor_bounds.grow(1.0)):
+				remote_revisions[other.id]=other.building_geometry_revision
 		RoadLand.apply(region, points, "Arterial", 77, impact)
+		for id in remote_revisions:
+			if region.neighborhoods[id].building_geometry_revision!=remote_revisions[id]:
+				errors.append("Road funding must not regenerate buildings outside the affected corridor.")
+				break
 		for block_id in item["block_ids"]:
 			if not target.street_layout.blocks[block_id].get("demolished", false):
 				errors.append("Funding must clear each affected old block.")

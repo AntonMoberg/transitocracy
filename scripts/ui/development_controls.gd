@@ -14,6 +14,7 @@ const ZoneTypes = ["Residential", "Commercial", "Office", "Mixed", "Industry"]
 var neighborhood_id: int = -1
 var candidate_id: int = -1
 var neighborhood = null
+var current_region = null
 var style_input: OptionButton
 var character_input: OptionButton
 var allocation_input: SpinBox
@@ -143,6 +144,7 @@ func _ready() -> void:
 
 
 func show_plan(region, candidate: Dictionary, reset: bool = true) -> void:
+	current_region=region
 	dev_mode = region.dev_mode
 	candidate_id = candidate["id"]
 	neighborhood_id = candidate["neighborhood_id"]
@@ -214,7 +216,7 @@ func _preview() -> void:
 		preview_label.text = "Land use totals %d%%; it must total 100%%." % total
 		editor_status_label.text = preview_label.text
 	elif neighborhood != null and neighborhood.development_plan != null:
-		var estimate: Dictionary = Budget.zoning_estimate(neighborhood, shares(), densities())
+		var estimate: Dictionary = Budget.zoning_estimate(neighborhood, shares(), densities(),current_region)
 		if not custom_allocation:
 			suppress_preview = true
 			allocation_input.value = 0 if dev_mode else estimate["top_up"]

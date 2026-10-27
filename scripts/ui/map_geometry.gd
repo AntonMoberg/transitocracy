@@ -6,6 +6,14 @@ const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const GRID = 64
 const MAX_VERTICES = 12288
 
+static func building_parts(feature:Dictionary) -> Array:
+	var parts:Array=[]
+	for polygon in feature.footprints:
+		parts.append({"polygon":polygon,"indices":Geometry2D.triangulate_polygon(polygon),"color":Color("cdd1dc",.85)})
+		for inset in Geometry2D.offset_polygon(polygon,-.00018):
+			parts.append({"polygon":inset,"indices":Geometry2D.triangulate_polygon(inset),"color":Color("f3f2f1",.8) if feature.constructing else feature.color})
+	return parts
+
 static func bounds(points: PackedVector2Array) -> Rect2:
 	if points.is_empty():
 		return Rect2()
@@ -22,6 +30,24 @@ static func index_source(source: Dictionary) -> Dictionary:
 			var expanded: Array[PackedVector2Array] = Geometry2D.offset_polygon(feature.points, 0.012)
 			if not expanded.is_empty(): feature.points = expanded[0]
 	_prepare_junctions_and_crossings(source)
+	preload("res://scripts/ui/street_detail_geometry.gd").prepare(source)
+	var prepared:Dictionary={}
+	var prepared_bytes:=0
+	for feature in source.features:
+		if feature.kind!="building_inventory": continue
+		var stamp:int=hash([feature.footprints,feature.color,feature.constructing])
+		var old:Dictionary=source.get("prepared_buildings",{}).get(feature.identity,{})
+		var parts:Array=[]
+		if old.get("stamp",0)==stamp: parts=old.parts
+		else: parts=building_parts(feature)
+		var bytes:=0
+		for part in parts: bytes+=part.polygon.size()*8+part.indices.size()*4
+		if prepared_bytes+bytes<=64*1024*1024:
+			feature["render_parts"]=parts
+			prepared[feature.identity]={"stamp":stamp,"parts":parts}
+			prepared_bytes+=bytes
+	source["prepared_buildings"]=prepared
+	source["prepared_building_bytes"]=prepared_bytes
 	var grid := {}
 	var fingerprints := {}
 	var changed := {}
@@ -123,7 +149,7 @@ static func build(source: Dictionary, key: Vector3i, layer: String) -> Dictionar
 					append_line(buffer, chunks, points, rect, Color(lanes * lane_m + median_m + 3.0, 4.5, -2.0, 0.0))
 				var local: bool = feature.get("local", false)
 				var body_min: float = 0.5 if local else (1.55 if highway else (0.7 if int(buffer.style) == Style.RoadStyle.COLLECTOR else 1.0))
-				var road_half_m: float = lanes * lane_m + median_m
+				var road_half_m: float = preload("res://scripts/simulation/street_cross_section.gd").carriageway("Highway" if highway else "Local",lanes)*.5
 				# A continuous road bed remains visible at every scale. Individual
 				# lanes only appear when their physical widths are resolvable.
 				append_line(buffer, chunks, points, rect, Color(road_half_m + (2.0 if highway else 0.8), body_min + (0.35 if local else 0.45), slot + 1, 1.0))
@@ -158,11 +184,13 @@ static func build(source: Dictionary, key: Vector3i, layer: String) -> Dictionar
 				var polygon: PackedVector2Array = buildings[building_id]
 				if not bounds(polygon).intersects(rect) or RoadLand.polygon_intersects_masks(polygon, feature.masks):
 					continue
-				if ppk >= 300.0:
-					var shadow := Transform2D(0.0, Vector2(1.0,1.5) * minf(3.0, ppk * 0.002) / ppk) * polygon
-					append_polygon(buffer, chunks, shadow, Color("14252a",0.7), rect)
 				append_polygon(buffer, chunks, polygon, feature.color, rect)
 				count += 1
+		elif feature.kind == "building_inventory":
+			var render_parts:Array=feature.render_parts if feature.has("render_parts") else building_parts(feature)
+			for part in render_parts:
+				if bounds(part.polygon).intersects(rect): append_polygon(buffer,chunks,part.polygon,part.color,rect,part.indices)
+			count+=feature.footprints.size()
 	flush(buffer, chunks)
 	return {"key": key, "layer": layer, "parts": chunks, "buildings": count, "streets": streets, "districts": districts, "epoch": source.epoch}
 
@@ -216,9 +244,9 @@ static func append_line(buffer: Dictionary, chunks: Array, points: PackedVector2
 		emit_triangle(buffer, chunks, [a, a, b], [-a_normal, a_normal, b_normal], color, [-1.0, 1.0, 1.0])
 		emit_triangle(buffer, chunks, [a, b, b], [-a_normal, b_normal, -b_normal], color, [-1.0, 1.0, -1.0])
 
-static func append_polygon(buffer: Dictionary, chunks: Array, polygon: PackedVector2Array, color: Color, rect: Rect2) -> void:
+static func append_polygon(buffer: Dictionary, chunks: Array, polygon: PackedVector2Array, color: Color, rect: Rect2, prepared:PackedInt32Array=PackedInt32Array()) -> void:
 	# Clip triangles, not concave polygons, so disconnected pieces remain valid.
-	var indices := Geometry2D.triangulate_polygon(polygon)
+	var indices := prepared if not prepared.is_empty() else Geometry2D.triangulate_polygon(polygon)
 	for i in range(0, indices.size(), 3):
 		var triangle := PackedVector2Array([polygon[indices[i]], polygon[indices[i + 1]], polygon[indices[i + 2]]])
 		var clipped := clip_polygon(triangle, rect)

@@ -11,7 +11,9 @@ uniform sampler2D traffic_previous : filter_nearest, repeat_disable;
 uniform sampler2D traffic_current : filter_nearest, repeat_disable;
 uniform float traffic_mix = 1.0;
 uniform float traffic_height = 2.0;
-instance uniform vec4 clip_rect;
+varying flat vec4 clip_rect;
+uniform vec2 tile_origin;
+uniform float tile_extent = 1.0;
 uniform int selected_slot = -1;
 varying vec2 world_position;
 varying flat vec4 attributes;
@@ -22,8 +24,17 @@ varying flat float half_width;
 // traffic slot + 1, and pass (0 border/water, 1 casing, 2 forward, 3 reverse, 4 road bed).
 // CUSTOM1 stores side, cartographic class, fade start and fade end in pixels/km.
 void vertex() {
+	// Canvas shaders expose CUSTOM0/1 only. COLOR stores the low 16 bits
+	// of each tile coordinate; CUSTOM1.x packs level, high bits and side.
+	int tile_meta = int(abs(CUSTOM1.x)) - 1;
+	vec4 tile_bytes = floor(COLOR * 255.0 + 0.5);
+	vec2 tile_index = vec2(tile_bytes.x + tile_bytes.y * 256.0 + float((tile_meta / 32) % 4) * 65536.0,
+		tile_bytes.z + tile_bytes.w * 256.0 + float(tile_meta / 128) * 65536.0);
+	float tile_size = tile_extent / exp2(float(tile_meta % 32));
+	vec2 tile_start = tile_origin + tile_index * tile_size;
+	clip_rect = vec4(tile_start, tile_start + vec2(tile_size));
 	attributes = CUSTOM0;
-	side = CUSTOM1.x;
+	side = sign(CUSTOM1.x);
 	cartography = CUSTOM1.yzw;
 	half_width = max(CUSTOM0.r * pixels_per_km * 0.001, CUSTOM0.g);
 	VERTEX += UV * (half_width + 0.75) / pixels_per_km;
@@ -43,6 +54,10 @@ void fragment() {
 		if (slot == -3) color = vec4(0.72,0.79,0.82,1.0);
 		if (slot == -4) color = vec4(0.66,0.85,0.89,0.82);
 		if (slot == -5) color = vec4(0.71,0.64,0.80,0.72);
+		if (slot == -6) color = vec4(0.98,0.92,0.69,1.0);
+		if (slot == -7) color = vec4(0.96,0.96,0.94,1.0);
+		if (slot == -8) color = vec4(0.98,0.98,0.97,1.0);
+		if (slot == -9) color = vec4(0.78,0.79,0.80,0.55);
 	} else if (pass < 1.5) {
 		color = mix(road_colors[int(cartography.x)], vec4(0.48,0.57,0.65,1.0), 0.28);
 	} else {
@@ -55,6 +70,7 @@ void fragment() {
 			}
 		} else {
 			color = road_colors[int(cartography.x)];
+			if (cartography.x < 1.5) color = mix(color,vec4(0.68,0.74,0.80,1.0),smoothstep(500.0,1500.0,pixels_per_km));
 		}
 		if (slot == selected_slot && slot >= 0) color = vec4(0.97,0.89,0.63,1.0);
 	}

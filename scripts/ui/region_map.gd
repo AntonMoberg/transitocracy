@@ -51,6 +51,7 @@ const TERRAIN_DETAIL_MAX_WORKERS = 2
 
 var region
 var urban_layer = UrbanMapLayer.new()
+var street_labels = preload("res://scripts/ui/street_labels.gd").new()
 var flow_profile
 var next_day_profile
 var traffic_profile
@@ -966,6 +967,7 @@ func _draw_dynamic_content(pen) -> void:
 	last_draw_stages_us["neighborhoods"] = Time.get_ticks_usec() - draw_started
 	_ensure_jurisdiction_labels()
 	_draw_jurisdiction_labels(pen)
+	street_labels.draw(self,pen)
 	last_draw_stages_us["labels"] = Time.get_ticks_usec() - draw_started
 	_draw_jurisdiction_key(pen)
 	if map_mode == "Roads":
@@ -1880,7 +1882,7 @@ func _draw_road_legend(pen) -> void:
 		pen.draw_string(font, base + Vector2(164, -39), "saturated / queued", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	else:
 		pen.draw_string(font, base + Vector2(0, -39), "Traffic overlay off · Use the Traffic button to show flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction" if show_traffic_overlay else "Zoom in for street names, crossings and buildings", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	pen.draw_string(font, base + Vector2(0, 4), "Dashed = construction" if road_tool == "Inspect" else "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 

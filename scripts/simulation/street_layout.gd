@@ -3,6 +3,7 @@ extends RefCounted
 const Roads = preload("res://scripts/simulation/road_link_data.gd")
 
 var key: String = ""
+var street_names:Dictionary = {}
 var city_id: int = -1
 var interior_style: String = "Grid"
 var grid_axis: Vector2 = Vector2.ZERO

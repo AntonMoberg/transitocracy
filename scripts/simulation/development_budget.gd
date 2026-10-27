@@ -96,7 +96,7 @@ static func queue_zoning(region, neighborhood_id: int, shares: Dictionary, densi
 	return {"ok": true}
 
 
-static func zoning_estimate(neighborhood, shares: Dictionary, density: Dictionary) -> Dictionary:
+static func zoning_estimate(neighborhood, shares: Dictionary, density: Dictionary, region=null) -> Dictionary:
 	var housing := 0
 	var jobs := 0
 	for zone in shares:
@@ -106,6 +106,18 @@ static func zoning_estimate(neighborhood, shares: Dictionary, density: Dictionar
 		if RegionGenerator.JOB_YIELDS.has(zone):
 			jobs += roundi(area * RegionGenerator.JOB_YIELDS[zone][int(density[zone])])
 	var base_demand: float = neighborhood.development_plan.design_demand
+	if neighborhood.building_model_version>0:
+		if shares==neighborhood.zone_shares and density==neighborhood.zone_density:
+			housing=neighborhood.base_housing_capacity
+			jobs=neighborhood.base_job_capacity
+		else:
+			housing=0
+			jobs=0
+			var inventory=preload("res://scripts/simulation/building_inventory.gd")
+			var masks:Array=inventory.masks_for(region,neighborhood.street_layout) if region!=null else []
+			for building in inventory.generate(neighborhood,region.terrain if region!=null else null,masks,shares,density):
+				housing+=building.housing
+				jobs+=building.jobs
 	var new_demand: float = float(housing) * 2.0 + float(jobs)
 	var multiplier: float = clampf(new_demand / (base_demand * 1.25), 1.0, 3.0)
 	var remaining := 0
@@ -194,6 +206,9 @@ static func advance_day(region, day_key: int, changed_city_ids: Array[int] = [])
 			plan.status = "Awaiting road access"
 			continue
 		var capacity: float = float(plan.target_housing + plan.target_jobs) * plan.serviced_fraction()
+		if neighborhood.building_model_version>0:
+			var serviced:Vector2i=preload("res://scripts/simulation/building_inventory.gd").serviced_capacity(neighborhood)
+			capacity=serviced.x+serviced.y
 		if plan.completed_phase > 0 and float(neighborhood.households + neighborhood.jobs) < capacity * 0.60:
 			plan.status = "Awaiting demand"
 			continue
@@ -218,7 +233,7 @@ static func _apply_zoning(region, neighborhood) -> void:
 	var plan = neighborhood.development_plan
 	var shares: Dictionary = plan.pending_zoning["shares"]
 	var density: Dictionary = plan.pending_zoning["density"]
-	var estimate: Dictionary = zoning_estimate(neighborhood, shares, density)
+	var estimate: Dictionary = zoning_estimate(neighborhood, shares, density,region)
 	var template = preload("res://scripts/simulation/neighborhood_data.gd").new()
 	template.developable_area_ha = neighborhood.developable_area_ha
 	template.zone_shares = shares.duplicate()
@@ -228,10 +243,15 @@ static func _apply_zoning(region, neighborhood) -> void:
 	RegionGenerator._populate_capacity_and_occupancy(template, rng, 0)
 	neighborhood.zone_shares = shares.duplicate()
 	neighborhood.zone_density = density.duplicate()
-	neighborhood.housing_capacity = maxi(neighborhood.households, estimate["housing"])
-	neighborhood.job_capacity = maxi(neighborhood.jobs, estimate["jobs"])
-	plan.target_housing = estimate["housing"]
-	plan.target_jobs = estimate["jobs"]
+	if neighborhood.building_model_version>0:
+		# A zoning change governs future construction; demolition/acquisition
+		# belongs to the explicit road/redevelopment workflow.
+		preload("res://scripts/simulation/building_inventory.gd").rebuild(region,neighborhood,false,true)
+	else:
+		neighborhood.housing_capacity = maxi(neighborhood.households, estimate["housing"])
+		neighborhood.job_capacity = maxi(neighborhood.jobs, estimate["jobs"])
+		plan.target_housing = estimate["housing"]
+		plan.target_jobs = estimate["jobs"]
 	plan.capacity_multiplier = estimate["multiplier"]
 	plan.target_jobs_by_skill = template.jobs_by_skill.duplicate()
 	neighborhood.development_jobs_by_skill = template.jobs_by_skill.duplicate()

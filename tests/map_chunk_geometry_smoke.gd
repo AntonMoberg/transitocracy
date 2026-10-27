@@ -64,6 +64,17 @@ func _run() -> void:
 			destination_jobs += 1
 	_check(destination_jobs > 0, "destination detail is requested immediately")
 	renderer.free()
+	var streets:Dictionary={"features":[]}
+	for path in [PackedVector2Array([Vector2(-.1,0),Vector2.ZERO]),PackedVector2Array([Vector2.ZERO,Vector2(.1,0)]),PackedVector2Array([Vector2.ZERO,Vector2(0,.1)])]:
+		streets.features.append({"identity":"local:%s" % streets.features.size(),"layer":"roads","kind":"line","points":path,"local":true,"lanes":1,"street_name":"Oak Street"})
+	preload("res://scripts/ui/street_detail_geometry.gd").prepare(streets)
+	_check(streets.features.any(func(f):return f.layer=="junctions"),"three-arm urban junction gets connected pavement")
+	_check(streets.features.any(func(f):return f.identity.begins_with("crosswalk:")),"urban junction gets pedestrian crossings")
+	for feature in streets.features:
+		if ":center:" in feature.identity:
+			_check(not feature.points.has(Vector2.ZERO),"centerlines stop before junction interiors")
+	var names=preload("res://scripts/simulation/street_names.gd")
+	_check(names.local_key(0,PackedVector2Array([Vector2(-.1,0),Vector2.ZERO]))==names.local_key(0,PackedVector2Array([Vector2(.1,0),Vector2.ZERO])),"street identity survives segmentation and reversed geometry")
 	print("Chunk geometry: ", "PASS" if failures == 0 else "FAIL")
 	quit(1 if failures else 0)
 func _check(ok: bool, message: String) -> void:

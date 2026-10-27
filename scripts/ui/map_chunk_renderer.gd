@@ -5,7 +5,7 @@ const LocalTraffic = preload("res://scripts/simulation/local_street_traffic.gd")
 const Geometry = preload("res://scripts/ui/map_geometry.gd")
 const FILL_SHADER = preload("res://scripts/ui/shaders/map_fill.gdshader")
 const LINE_SHADER = preload("res://scripts/ui/shaders/map_line.gdshader")
-const LAYERS = ["water", "borders", "blocks", "clearance", "roads", "structures", "buildings"]
+const LAYERS = ["water", "borders", "blocks", "clearance", "sidewalks", "roads", "junctions", "structures", "street_details", "buildings"]
 const BUDGET_US = 1000
 const CACHE_BYTES = 192 * 1024 * 1024
 const MAX_WORKERS = 2
@@ -22,6 +22,8 @@ var neighborhood_masks: Array[PackedVector2Array] = []
 var requested_signature := ""
 var epoch := 0
 var workers: Array[Dictionary] = []
+var retirement_threads:Array[Thread]=[]
+var retirement_backlog:Array[Dictionary]=[]
 var chunks: Dictionary = {}
 var requests: Dictionary = {}
 var uploads: Array[Dictionary] = []
@@ -64,6 +66,26 @@ var visible_districts := 0
 func _exit_tree() -> void:
 	for worker in workers:
 		worker.thread.wait_to_finish()
+	for thread in retirement_threads: thread.wait_to_finish()
+
+func _retire_cpu_data(payload:Dictionary) -> void:
+	# Payloads contain CPU snapshots, never scene nodes or GPU resources.
+	# Drop the renderer's references before launching this release job.
+	if retirement_threads.size()>=2:
+		retirement_backlog.append(payload)
+		return
+	var thread:=Thread.new()
+	if thread.start(Callable(preload("res://scripts/simulation/region_snapshot.gd"),"release_retired_data").bind(payload),Thread.PRIORITY_LOW)==OK:
+		retirement_threads.append(thread)
+	else: retirement_backlog.append(payload)
+
+func _reap_cpu_data() -> void:
+	for i in range(retirement_threads.size()-1,-1,-1):
+		if not retirement_threads[i].is_alive():
+			retirement_threads[i].wait_to_finish()
+			retirement_threads.remove_at(i)
+	if not retirement_backlog.is_empty() and retirement_threads.size()<2:
+		_retire_cpu_data(retirement_backlog.pop_back())
 
 func signature() -> String:
 	# O(1) gate. Daily snapshots may replace objects without changing geography.
@@ -73,7 +95,7 @@ func invalidate() -> void:
 	requested_signature = ""
 
 func _neighborhood_signature(neighborhood) -> int:
-	return hash([neighborhood.street_layout.get_instance_id() if neighborhood.street_layout != null else 0, hash(neighborhood.block_zoning), neighborhood.built_fraction, neighborhood.character_profile, neighborhood.development_plan.completed_phase if neighborhood.development_plan != null else -1])
+	return hash([neighborhood.street_layout.get_instance_id() if neighborhood.street_layout != null else 0, hash(neighborhood.block_zoning), neighborhood.built_fraction, neighborhood.character_profile, neighborhood.building_geometry_revision, neighborhood.development_plan.completed_phase if neighborhood.development_plan != null else -1])
 
 func _watch_geometry(deadline: int) -> void:
 	if not snapshot.is_empty() or map.region.neighborhoods.is_empty():
@@ -98,6 +120,7 @@ func tick() -> void:
 	if map.region == null:
 		return
 	var started := Time.get_ticks_usec()
+	_reap_cpu_data()
 	tick_id += 1
 	transform = map._screen_transform()
 	var ppk: float = map._map_scale() * map.zoom
@@ -125,6 +148,7 @@ func tick() -> void:
 	last_tick_us = Time.get_ticks_usec() - started
 
 func _start_snapshot(next_signature: String) -> void:
+	var old_data:Dictionary={"region":snapshot_region,"snapshot":snapshot}
 	epoch += 1
 	requested_signature = next_signature
 	snapshot_region = map.region
@@ -136,6 +160,8 @@ func _start_snapshot(next_signature: String) -> void:
 	snapshot_stage = 0
 	neighborhood_part = 0
 	reservation_part = 0
+	snapshot["prepared_buildings"]=source.get("prepared_buildings",{}) if same_terrain else {}
+	_retire_cpu_data(old_data)
 
 func _capture_snapshot(deadline: int) -> void:
 	if snapshot.is_empty():
@@ -153,6 +179,8 @@ func _capture_snapshot(deadline: int) -> void:
 				var slot: int = snapshot.slots.get(link.id, snapshot.slots.size())
 				snapshot.slots[link.id] = slot
 				snapshot.features.append({"identity": "road:%d" % link.id, "kind": "line", "layer": "roads", "points": link.points.duplicate(), "lanes": link.lanes_per_direction, "highway": link.road_class == "Highway", "slot": slot, "min_ppk": limits.x, "fade": limits, "style": style, "junctions": link.junctions.duplicate(true), "crossings": link.crossings.duplicate(true), "terrain_spans": link.terrain_spans.duplicate(true)})
+				snapshot.features[-1]["street_name"]=link.street_name
+				snapshot.features[-1]["urban"]=link.managed_neighborhood_id>=0 or (region.road_nodes[link.from_node_id].is_urban_street and region.road_nodes[link.to_node_id].is_urban_street)
 			1:
 				if snapshot_cursor >= region.jurisdictions.size():
 					_next_stage()
@@ -234,9 +262,22 @@ func _capture_neighborhood(neighborhood) -> bool:
 			snapshot.slots[address] = slot
 			snapshot.local_slots.append(address)
 			snapshot.features.append({"slot": slot, "identity": "street:%d:%d" % [neighborhood.id, edge_id], "kind": "line", "layer": "roads", "points": points.duplicate(), "lanes": 1, "local": true, "style": Style.RoadStyle.LOCAL, "fade": Style.road_range(Style.RoadStyle.LOCAL), "min_ppk": 110.0})
+			var name_key:=preload("res://scripts/simulation/street_names.gd").local_key(neighborhood.city_id,points)
+			snapshot.features[-1]["street_name"]=layout.street_names.get(name_key,"")
+			snapshot.features[-1]["separated"]=layout.grade_separated_edges.has(edge_id)
 		return false
 	var block_id: int = neighborhood_part - layout.edges.size()
 	if block_id >= layout.blocks.size():
+		var building_id:int=block_id-layout.blocks.size()
+		if neighborhood.building_model_version>0 and building_id<neighborhood.buildings.size():
+			neighborhood_part+=1
+			var building:Dictionary=neighborhood.buildings[building_id]
+			if building.state!="Planned":
+				snapshot.features.append({"identity":"building:"+building.id,"kind":"building_inventory","layer":"buildings","points":building.parcel,"footprints":building.footprints.duplicate(),"constructing":building.state=="Constructing","color":map.urban_layer.ZoneColors[building.zone],"min_ppk":100.0})
+				var parcel:PackedVector2Array=building.parcel.duplicate()
+				parcel.append(parcel[0])
+				snapshot.features.append({"identity":"parcel:"+building.id,"kind":"line","layer":"street_details","points":parcel,"meters":.10,"pixels":.4,"slot":-9,"min_ppk":1000.0})
+			return false
 		neighborhood_part = 0
 		return true
 	neighborhood_part += 1
@@ -244,6 +285,7 @@ func _capture_neighborhood(neighborhood) -> bool:
 	if int(block.phase) > plan.completed_phase or block.get("demolished", false):
 		return false
 	snapshot.features.append({"identity": "block:%d:%d" % [neighborhood.id, block_id], "kind": "block", "layer": "blocks", "points": block.polygon.duplicate(), "color": Style.PARK if block.park else Style.URBAN, "urban_fill": not block.park, "min_ppk": 0.0})
+	if neighborhood.building_model_version>0: return false
 	if block.park or block_id >= neighborhood.block_zoning.size() or neighborhood.block_zoning[block_id] == 0:
 		return false
 	var code: int = neighborhood.block_zoning[block_id] - 1
@@ -263,9 +305,13 @@ func _poll_workers() -> void:
 		workers.remove_at(i)
 		if int(job.epoch) != epoch:
 			discarded_count += 1
+			var discarded:Dictionary={"result":result}
+			result={}
+			_retire_cpu_data(discarded)
 			continue
 		if job.kind == "index":
 			# Old chunks remain visible until their replacements are published.
+			var old_source:Dictionary={"source":source}
 			source = result
 			for id in chunks:
 				var fields: PackedStringArray = id.split(":")
@@ -284,6 +330,7 @@ func _poll_workers() -> void:
 			traffic_signature = ""
 			if resized:
 				_setup_traffic()
+			_retire_cpu_data(old_source)
 		else:
 			for packet in result.get("results", [result]):
 				packet["part"] = 0
@@ -308,7 +355,7 @@ func _select_chunks(ppk: float) -> void:
 	visible_streets = 0
 	visible_districts = 0
 	for layer in LAYERS:
-		var minimum: float = 200.0 if layer == "buildings" else 0.0
+		var minimum: float = 100.0 if layer == "buildings" else 0.0
 		if ppk < minimum:
 			continue
 		# Request the destination LOD immediately, not a staircase of parents.
@@ -357,7 +404,7 @@ func _job_priority(job: Dictionary) -> float:
 	var priority: float = 0.0 if visible else 100.0
 	if job.key.x == 0:
 		priority -= 10.0
-	priority += ["roads","blocks","buildings","clearance","structures","water","borders"].find(job.layer)
+	priority += ["roads","buildings","blocks","sidewalks","junctions","street_details","clearance","structures","water","borders"].find(job.layer)
 	return priority + minf(0.9, rect.get_center().distance_to(visible_world.get_center()) / maxf(1.0,visible_world.size.length()) * 0.1)
 
 func _start_jobs() -> void:
@@ -412,15 +459,30 @@ func _publish(deadline: int) -> void:
 			arrays.resize(Mesh.ARRAY_MAX)
 			arrays[Mesh.ARRAY_VERTEX] = part.vertices
 			arrays[Mesh.ARRAY_TEX_UV] = part.uv
+			var tile_bounds := Geometry.tile_rect(source.bounds, result.key)
 			var flags := 0
 			# Line metadata uses float custom attributes, not clamped vertex colors.
 			var is_line: bool = part.get("line", false)
 			if is_line:
 				arrays[Mesh.ARRAY_CUSTOM0] = part.colors.to_byte_array().to_float32_array()
-				arrays[Mesh.ARRAY_CUSTOM1] = part.styles
+				var styles:PackedFloat32Array=part.styles.duplicate()
+				var tile_meta:int=1+result.key.x+32*(result.key.y>>16)+128*(result.key.z>>16)
+				for vertex in range(part.vertices.size()): styles[vertex*4]*=tile_meta
+				arrays[Mesh.ARRAY_CUSTOM1] = styles
+				# Vertex metadata avoids Godot's finite global instance-uniform
+				# buffer, including for retained/offscreen and retiring meshes.
+				var tiles:=PackedColorArray()
+				tiles.resize(part.vertices.size())
+				tiles.fill(Color((result.key.y&255)/255.0,((result.key.y>>8)&255)/255.0,(result.key.z&255)/255.0,((result.key.z>>8)&255)/255.0))
+				arrays[Mesh.ARRAY_COLOR]=tiles
 				flags = (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT) | (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM1_SHIFT)
 			else:
 				arrays[Mesh.ARRAY_COLOR] = part.colors
+				var role:float={"water":0,"blocks":1,"buildings":2,"clearance":3,"roads":5,"junctions":6,"street_details":7}.get(result.layer,4)
+				var roles:=PackedVector2Array()
+				roles.resize(part.vertices.size())
+				roles.fill(Vector2(role,0))
+				arrays[Mesh.ARRAY_TEX_UV]=roles
 			var mesh := ArrayMesh.new()
 			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, flags)
 			if mesh.get_surface_count() == 0:
@@ -431,21 +493,17 @@ func _publish(deadline: int) -> void:
 				push_error("Map mesh upload failed; retaining previous coverage.")
 				continue
 			var node := MeshInstance2D.new()
-			var tile_bounds := Geometry.tile_rect(source.bounds, result.key)
 			mesh.custom_aabb = AABB(Vector3(tile_bounds.position.x, tile_bounds.position.y, 0.0), Vector3(tile_bounds.size.x, tile_bounds.size.y, 0.0))
 			node.mesh = mesh
 			node.visible = false
 			node.z_index = LAYERS.find(result.layer) * 2
 			if is_line:
 				node.material = line_material
-				var rect := Geometry.tile_rect(source.bounds, result.key)
-				node.set_instance_shader_parameter("clip_rect", Vector4(rect.position.x, rect.position.y, rect.end.x, rect.end.y))
 			else:
 				node.material = fill_material
-				node.set_instance_shader_parameter("fill_role", {"water": 0, "blocks": 1, "buildings": 2, "clearance": 3, "roads": 5}.get(result.layer, 4))
 			add_child(node)
 			result.nodes.append(node)
-			result.bytes += part.vertices.size() * (48 if is_line else 32)
+			result.bytes += part.vertices.size() * (52 if is_line else 32)
 			result.parts[result.part] = {} # Release CPU arrays as each part reaches the GPU.
 			result.part += 1
 			continue
@@ -537,8 +595,11 @@ func _update_traffic(deadline: int) -> void:
 func _update_materials(ppk: float) -> void:
 	fill_material.set_shader_parameter("pixels_per_km", ppk)
 	fill_material.set_shader_parameter("zoning", map.map_mode == "Zoning")
+	fill_material.set_shader_parameter("traffic_enabled",map.show_traffic_overlay)
 	var mix_value: float = clampf(float(Time.get_ticks_msec() - traffic_published) / 67.0, 0.0, 1.0)
 	for material in current_materials:
+		material.set_shader_parameter("tile_origin",source.bounds.position)
+		material.set_shader_parameter("tile_extent",source.bounds.size.x)
 		material.set_shader_parameter("pixels_per_km", ppk)
 		material.set_shader_parameter("traffic_enabled", map.show_traffic_overlay)
 		material.set_shader_parameter("trips", map.map_mode == "Trips")

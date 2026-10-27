@@ -3,6 +3,7 @@ extends RefCounted
 const FiscalCalculator = preload("res://scripts/simulation/fiscal_calculator.gd")
 const AccessibilityCalculator = preload("res://scripts/simulation/accessibility_calculator.gd")
 const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
+const Buildings = preload("res://scripts/simulation/building_inventory.gd")
 
 # One aggregate update per simulated day. Income is a proxy derived from the
 # local job mix; tax, housing costs, job access and amenities affect migration.
@@ -93,6 +94,8 @@ static func advance_day(region) -> void:
 			neighborhood.rent_level = float(neighborhood.monthly_rent)
 			if neighborhood.people_per_household <= 0.0:
 				neighborhood.people_per_household = 2.25
+		if neighborhood.building_model_version>0:
+			Buildings.advance_day(region,neighborhood,connected)
 		var after_tax_income: float = FiscalCalculator.after_income_tax(region, neighborhood)
 		var monthly_surplus: float = after_tax_income - float(neighborhood.monthly_rent) - FiscalCalculator.property_cost_monthly(region, neighborhood) - 0.35 * float(neighborhood.average_monthly_income) - 500.0
 		neighborhood.average_household_wealth = clampf(neighborhood.average_household_wealth + monthly_surplus / 30.0 * 0.35, 0.0, float(neighborhood.average_monthly_income) * 12.0)
@@ -110,7 +113,7 @@ static func advance_day(region) -> void:
 		var exact_change: float = daily_change + neighborhood.migration_remainder
 		var requested_change: int = roundi(exact_change)
 		var housing_limit: int = neighborhood.housing_capacity
-		if neighborhood.development_plan != null:
+		if neighborhood.development_plan != null and neighborhood.building_model_version==0:
 			housing_limit = maxi(old_households, roundi(neighborhood.development_plan.target_housing * neighborhood.development_plan.serviced_fraction()))
 		var next_households: int = clampi(old_households + requested_change, 0, mini(neighborhood.housing_capacity, housing_limit))
 		neighborhood.last_household_change = next_households - old_households
@@ -128,12 +131,13 @@ static func advance_day(region) -> void:
 		var exact_jobs: float = daily_jobs + neighborhood.job_growth_remainder
 		var job_change: int = roundi(exact_jobs)
 		var job_limit: int = neighborhood.job_capacity
-		if neighborhood.development_plan != null:
+		if neighborhood.development_plan != null and neighborhood.building_model_version==0:
 			job_limit = maxi(neighborhood.jobs, roundi(neighborhood.development_plan.target_jobs * neighborhood.development_plan.serviced_fraction()))
 		var next_jobs: int = clampi(neighborhood.jobs + job_change, 0, mini(neighborhood.job_capacity, job_limit))
 		neighborhood.job_growth_remainder = exact_jobs - float(job_change) if next_jobs == neighborhood.jobs + job_change else 0.0
 		_set_jobs(neighborhood, next_jobs)
 		ParcelGeometry.update_buildings(neighborhood)
+		if neighborhood.building_model_version>0: Buildings.allocate_occupancy(neighborhood)
 		if neighborhood.households == 0:
 			neighborhood.average_monthly_income = 0
 			neighborhood.average_household_wealth = 0.0

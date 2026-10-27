@@ -20,6 +20,7 @@ static func _copy_large_region(source):
 	# a neighborhood, so worker snapshots need their own copies of those lists.
 	var copy = RegionData.new()
 	copy.generation_seed = source.generation_seed
+	copy.building_model_version = source.building_model_version
 	copy.terrain = source.terrain
 	copy.dev_mode = source.dev_mode
 	copy.road_project_notice = source.road_project_notice
@@ -123,6 +124,11 @@ static func _copy_large_region(source):
 		n.built_fraction = original.built_fraction
 		n.block_zoning = original.block_zoning.duplicate()
 		n.character_profile = original.character_profile
+		n.building_model_version = original.building_model_version
+		n.buildings = original.buildings.duplicate(true)
+		n.building_geometry_revision = original.building_geometry_revision
+		n.building_occupancy_revision = original.building_occupancy_revision
+		n.building_plan_signature = original.building_plan_signature
 		copy.neighborhoods.append(n)
 	for original in source.jurisdictions:
 		var j = JurisdictionData.new()
@@ -181,6 +187,8 @@ static func _copy_large_region(source):
 		link.map_major = original.map_major
 		link.trunk_route_id = original.trunk_route_id
 		link.corridor_id = original.corridor_id
+		link.street_id = original.street_id
+		link.street_name = original.street_name
 		link.corridor_start_km = original.corridor_start_km
 		link.managed_neighborhood_id = original.managed_neighborhood_id
 		link.crossings = original.crossings.duplicate(true)

@@ -1,4 +1,5 @@
 extends RefCounted
+var building_model_version:int = 0
 
 const JurisdictionData = preload("res://scripts/simulation/jurisdiction_data.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
@@ -297,6 +298,23 @@ func validation_errors() -> PackedStringArray:
 			errors.append("Land shares do not total 100%% in %s." % neighborhood.name)
 		if neighborhood.households < 0 or neighborhood.population < 0 or neighborhood.jobs < 0 or neighborhood.households > neighborhood.housing_capacity or neighborhood.jobs > neighborhood.job_capacity:
 			errors.append("Invalid population or occupancy in %s." % neighborhood.name)
+		if neighborhood.building_model_version>0:
+			var building_homes:=0
+			var building_jobs:=0
+			var occupied_homes:=0
+			var occupied_jobs:=0
+			var building_ids:Dictionary={}
+			for building in neighborhood.buildings:
+				if building_ids.has(building.id): errors.append("Duplicate building in %s." % neighborhood.name)
+				building_ids[building.id]=true
+				if building.state=="Complete":
+					building_homes+=building.housing
+					building_jobs+=building.jobs
+				elif building.occupied_homes+building.occupied_jobs>0: errors.append("Unfinished building occupied in %s." % neighborhood.name)
+				occupied_homes+=building.occupied_homes
+				occupied_jobs+=building.occupied_jobs
+			if building_homes!=neighborhood.housing_capacity or building_jobs!=neighborhood.job_capacity or occupied_homes!=neighborhood.households or occupied_jobs!=neighborhood.jobs:
+				errors.append("Building capacity or occupancy does not reconcile in %s." % neighborhood.name)
 		if neighborhood.desirability < 0.0 or neighborhood.desirability > 100.0 or neighborhood.average_household_wealth < 0.0:
 			errors.append("Invalid household dynamics in %s." % neighborhood.name)
 		if neighborhood.shopping_attraction < 0.0 or neighborhood.shopping_attraction > neighborhood.jobs:

@@ -339,6 +339,7 @@ static func advance_day(region, day_key: int) -> bool:
 		changed = true
 	region.road_projects = remaining
 	if changed:
+		preload("res://scripts/simulation/street_names.gd").assign(region)
 		region.road_geometry_revision += 1
 		refresh_upkeep(region)
 	return changed

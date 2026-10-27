@@ -34,6 +34,10 @@ func _run() -> void:
 		for node in entry.nodes:
 			_check(node.mesh.get_surface_count() > 0, "GPU mesh upload failed")
 	var focus: Vector2 = payload.region.neighborhoods[0].street_layout.bounds.get_center()
+	await _building_latency(map,focus,false)
+	map.reset_view()
+	for frame in range(4): await process_frame
+	await _building_latency(map,focus,true)
 	var count_before: int = renderer.build_count
 	await _navigate(map, focus)
 	deadline = Time.get_ticks_msec() + 15000
@@ -114,9 +118,9 @@ func _run() -> void:
 	await process_frame
 	quit(0 if errors.is_empty() else 1)
 func _navigate(map, focus: Vector2) -> void:
-	for frame in range(180):
+	for frame in range(240):
 		var started := Time.get_ticks_usec()
-		var ppk: float = [1.0,3.0,25.0,60.0,200.0,1000.0][mini(5, frame / 30)]
+		var ppk: float = [1.0,3.0,25.0,60.0,200.0,1000.0,3000.0,8000.0][mini(7, frame / 30)]
 		map.zoom = maxf(1.0, ppk / map._map_scale())
 		map.pan = -(focus - map._world_center()) * map._map_scale() * map.zoom + Vector2(sin(frame * 0.1) * 150.0, cos(frame * 0.13) * 100.0)
 		await process_frame
@@ -131,6 +135,34 @@ func _navigate(map, focus: Vector2) -> void:
 
 func percentile(values: Array[float], q: float) -> float:
 	return values[mini(values.size()-1, floori(values.size()*q))]
+
+func _building_latency(map,focus:Vector2,warm:bool) -> void:
+	var renderer=map.chunk_renderer
+	var started:=Time.get_ticks_msec()
+	var first:=-1
+	var complete:=-1
+	map.zoom=8000.0/map._map_scale()
+	map.pan=-(focus-map._world_center())*8000.0
+	while Time.get_ticks_msec()-started<5000:
+		await process_frame
+		if DisplayServer.get_name()!="headless": await RenderingServer.frame_post_draw
+		if renderer.visible_buildings>0 and first<0: first=Time.get_ticks_msec()-started
+		var covered:=0.0
+		for id in renderer.chunks:
+			var entry:Dictionary=renderer.chunks[id]
+			if not id.begins_with("buildings:") or not entry.wanted or entry.epoch!=renderer.epoch: continue
+			var fields:PackedStringArray=id.split(":")
+			if int(fields[1])!=renderer.target_level: continue
+			var tile:Rect2=renderer.Geometry.tile_rect(renderer.source.bounds,Vector3i(int(fields[1]),int(fields[2]),int(fields[3])))
+			covered+=tile.intersection(renderer.visible_world).get_area()
+		if first>=0 and covered>=renderer.visible_world.get_area()*.95:
+			complete=Time.get_ticks_msec()-started
+			break
+	print("Building refinement %s: first=%d ms, 95%% coverage=%d ms" % ["warm" if warm else "cold",first,complete])
+	_check(first>=0 and complete>=0,"buildings failed to refine after rapid zoom")
+	if OS.get_cmdline_user_args().has("--enforce-frame-budget"):
+		_check(first<=(100 if warm else 250),"building first-pixel latency exceeded target")
+		_check(complete<=(250 if warm else 750),"building 95% coverage latency exceeded target")
 func _check(ok: bool, message: String) -> void:
 	if not ok and not errors.has(message):
 		errors.append(message)

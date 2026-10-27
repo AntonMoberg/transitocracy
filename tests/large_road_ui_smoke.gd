@@ -32,10 +32,9 @@ func _run() -> void:
 	while main.road_rebuild_thread != null and Time.get_ticks_msec() < deadline:
 		await process_frame
 	var errors := PackedStringArray()
-	# The heavy recalculation must run on the rebuild thread; the press handler
-	# only performs the edit itself. A momentary hitch is fine — the guard is
-	# against synchronous recalculation freezes that block for whole seconds.
-	if action_ms >= 250.0:
+	# Both the edit and recalculation belong on the worker, including land and
+	# building clearance. The press handler must return within two 60 Hz frames.
+	if action_ms >= 33.4:
 		errors.append("Road action blocked the UI for %.1f ms." % action_ms)
 	if main.road_rebuild_thread != null:
 		errors.append("Road recalculation did not finish.")

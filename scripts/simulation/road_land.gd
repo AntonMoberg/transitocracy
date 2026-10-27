@@ -145,6 +145,9 @@ static func preview(region, points: PackedVector2Array, road_class: String, surf
 		var baseline_area: float = maxf(0.000001, neighborhood.baseline_developable_area_ha)
 		var next_housing: int = maxi(0, neighborhood.housing_capacity - roundi(float(neighborhood.base_housing_capacity) * hectares / baseline_area))
 		var next_jobs: int = maxi(0, neighborhood.job_capacity - roundi(float(neighborhood.base_job_capacity) * hectares / baseline_area))
+		if building_impact.get("exact",false):
+			next_housing=neighborhood.households-displaced_homes
+			next_jobs=neighborhood.jobs-displaced_jobs
 		displaced_homes = maxi(displaced_homes, neighborhood.households - next_housing)
 		displaced_jobs = maxi(displaced_jobs, neighborhood.jobs - next_jobs)
 		developed_ha += hectares if block_ids.is_empty() and (neighborhood.households > 0 or neighborhood.jobs > 0) else 0.0
@@ -184,14 +187,20 @@ static func apply(region, points: PackedVector2Array, road_class: String, projec
 		var neighborhood = region.neighborhoods[int(item["id"])]
 		_displace(neighborhood, int(item["homes"]), int(item["jobs"]))
 		_demolish_blocks(neighborhood, item.get("block_ids", PackedInt32Array()), clearance_masks, item.get("bridge_edges", PackedInt32Array()), item.get("through_edges", PackedInt32Array()))
-	region.road_reservations.append(_reservation(points, road_class, -1, project_id, surface_paths))
+	var reservation:=_reservation(points, road_class, -1, project_id, surface_paths)
+	region.road_reservations.append(reservation)
+	var affected:Dictionary={}
+	for item in impact.get("neighborhoods",[]): affected[int(item.id)]=true
 	for neighborhood in region.neighborhoods:
+		var bounds:Rect2=neighborhood.street_layout.bounds if neighborhood.street_layout!=null else region.jurisdictions[neighborhood.jurisdiction_id].bounds_km
+		if not affected.has(neighborhood.id) and not bounds.intersects(reservation.bounds.grow(.15)): continue
 		if neighborhood.baseline_developable_area_ha <= 0.0:
 			neighborhood.baseline_developable_area_ha = neighborhood.developable_area_ha
 		_recalculate_neighborhood(region, neighborhood)
 
 
-static func apply_to_new_neighborhood(region, neighborhood) -> void:
+static func apply_to_new_neighborhood(region, neighborhood, timings:Dictionary={}) -> void:
+	var started:=Time.get_ticks_usec()
 	neighborhood.baseline_developable_area_ha = neighborhood.developable_area_ha
 	var masks: Array[PackedVector2Array] = masks_for_bounds(region, neighborhood.street_layout.bounds) if neighborhood.street_layout != null else []
 	var affected: PackedInt32Array = _affected_blocks(neighborhood.street_layout, masks) if neighborhood.street_layout != null else PackedInt32Array()
@@ -211,11 +220,14 @@ static func apply_to_new_neighborhood(region, neighborhood) -> void:
 		for reservation in region.road_reservations:
 			if reservation["bounds"].intersects(neighborhood.street_layout.bounds):
 				parcel_masks.append_array(reservation.get("parcel_masks", reservation["masks"]))
-		_rebuild_blocks(neighborhood, affected, parcel_masks, -1)
+		_rebuild_blocks(neighborhood, affected, _local_masks(parcel_masks,neighborhood.street_layout.bounds.grow(.15)), -1)
 		for reservation in region.road_reservations:
 			if reservation["bounds"].intersects(neighborhood.street_layout.bounds):
 				_rebuild_streets(neighborhood, reservation["points"], reservation["road_class"], reservation.get("clearance_masks", reservation["masks"]))
-	_recalculate_neighborhood(region, neighborhood)
+	timings["land_geometry"]=Time.get_ticks_usec()-started
+	started=Time.get_ticks_usec()
+	_recalculate_neighborhood(region, neighborhood,timings)
+	timings["land_capacity"]=Time.get_ticks_usec()-started
 
 
 static func rebuild_project(region, project) -> void:
@@ -245,9 +257,12 @@ static func mark_open(region, project_id: int, link_id: int) -> void:
 
 
 static func release_project(region,project_id:int) -> void:
+	var removed:Array[Rect2]=[]
 	for i in range(region.road_reservations.size()-1,-1,-1):
-		if int(region.road_reservations[i].project_id)==project_id: region.road_reservations.remove_at(i)
-	for neighborhood in region.neighborhoods: _recalculate_neighborhood(region,neighborhood)
+		if int(region.road_reservations[i].project_id)==project_id:
+			removed.append(region.road_reservations[i].bounds)
+			region.road_reservations.remove_at(i)
+	_recalculate_near_reservations(region,removed)
 
 
 static func split_link_reservation(region, old_id: int, new_id: int, first: PackedVector2Array, second: PackedVector2Array) -> void:
@@ -267,11 +282,21 @@ static func split_link_reservation(region, old_id: int, new_id: int, first: Pack
 
 
 static func release_link(region, link_id: int) -> void:
+	var removed:Array[Rect2]=[]
 	for index in range(region.road_reservations.size() - 1, -1, -1):
 		if int(region.road_reservations[index]["link_id"]) == link_id:
+			removed.append(region.road_reservations[index].bounds)
 			region.road_reservations.remove_at(index)
+	_recalculate_near_reservations(region,removed)
+
+
+static func _recalculate_near_reservations(region, bounds_list:Array[Rect2]) -> void:
 	for neighborhood in region.neighborhoods:
-		_recalculate_neighborhood(region, neighborhood)
+		var bounds:Rect2=neighborhood.street_layout.bounds if neighborhood.street_layout!=null else region.jurisdictions[neighborhood.jurisdiction_id].bounds_km
+		for changed in bounds_list:
+			if bounds.intersects(changed.grow(.15)):
+				_recalculate_neighborhood(region, neighborhood)
+				break
 
 
 static func contains_reserved(region, point: Vector2) -> bool:
@@ -290,7 +315,20 @@ static func masks_for_bounds(region, bounds: Rect2) -> Array[PackedVector2Array]
 		if not bounds.intersects(reservation["bounds"]):
 			continue
 		for mask in reservation.get("clearance_masks", reservation["masks"]):
-			result.append(mask)
+			if bounds.intersects(_bounds(mask)): result.append(mask)
+	return _local_masks(result,bounds.grow(.15))
+
+
+static func _local_masks(masks:Array[PackedVector2Array],bounds:Rect2) -> Array[PackedVector2Array]:
+	# Clip long regional corridors once, before testing every parcel against them.
+	# Callers include a margin so the crop edge stays outside the district.
+	var result:Array[PackedVector2Array]=[]
+	var rectangle:=PackedVector2Array([bounds.position,Vector2(bounds.end.x,bounds.position.y),bounds.end,Vector2(bounds.position.x,bounds.end.y)])
+	for mask in masks:
+		var mask_bounds:=_bounds(mask)
+		if not bounds.intersects(mask_bounds): continue
+		if bounds.encloses(mask_bounds): result.append(mask)
+		else: result.append_array(Geometry2D.intersect_polygons(mask,rectangle))
 	return result
 
 
@@ -681,6 +719,15 @@ static func _segment_intersects_masks(first: Vector2, last: Vector2, masks: Arra
 
 
 static func _building_displacement(region, neighborhood, new_masks: Array[PackedVector2Array], block_ids: PackedInt32Array) -> Dictionary:
+	if neighborhood.building_model_version>0:
+		var homes:=0
+		var jobs:=0
+		for building in neighborhood.buildings:
+			var hit:bool=block_ids.has(building.block_id)
+			for polygon in building.footprints:
+				if polygon_intersects_masks(polygon,new_masks): hit=true
+			if hit: homes+=building.occupied_homes; jobs+=building.occupied_jobs
+		return {"homes_hit":homes,"jobs_hit":jobs,"home_fraction":float(homes)/maxf(1,neighborhood.households),"job_fraction":float(jobs)/maxf(1,neighborhood.jobs),"exact":true}
 	var layout = neighborhood.street_layout
 	if layout == null or neighborhood.block_zoning.is_empty():
 		return {}
@@ -751,7 +798,8 @@ static func _displace(neighborhood, homes: int, jobs: int) -> void:
 	neighborhood.shopping_attraction = minf(neighborhood.shopping_attraction, float(neighborhood.jobs))
 
 
-static func _recalculate_neighborhood(region, neighborhood) -> void:
+static func _recalculate_neighborhood(region, neighborhood,timings:Dictionary={}) -> void:
+	var started:=Time.get_ticks_usec()
 	var polygon: PackedVector2Array = region.jurisdictions[neighborhood.jurisdiction_id].polygon_km
 	var remaining := _area(polygon)
 	for reservation_index in range(region.road_reservations.size()):
@@ -763,6 +811,10 @@ static func _recalculate_neighborhood(region, neighborhood) -> void:
 	var reserved_ha: float = maxf(0.0, _area(polygon) - remaining) * 100.0
 	var ratio: float = clampf(1.0 - reserved_ha / maxf(0.000001, neighborhood.baseline_developable_area_ha), 0.0, 1.0)
 	neighborhood.developable_area_ha = neighborhood.baseline_developable_area_ha * ratio
+	timings["land_area"]=Time.get_ticks_usec()-started
+	if region.building_model_version>0:
+		preload("res://scripts/simulation/building_inventory.gd").rebuild(region,neighborhood,false,false,timings)
+		return
 	neighborhood.housing_capacity = roundi(float(neighborhood.base_housing_capacity) * ratio)
 	neighborhood.job_capacity = roundi(float(neighborhood.base_job_capacity) * ratio)
 	if neighborhood.households > neighborhood.housing_capacity:

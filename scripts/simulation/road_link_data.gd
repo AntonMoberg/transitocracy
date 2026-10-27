@@ -9,6 +9,8 @@ const CONSTRUCTION_COSTS = {HIGHWAY: 1800000.0, ARTERIAL: 600000.0, COLLECTOR: 2
 const UPKEEP_COSTS = {HIGHWAY: 600.0, ARTERIAL: 200.0, COLLECTOR: 50.0, LOCAL: 40.0}
 
 var id: int = -1
+var street_id:String = ""
+var street_name:String = ""
 var from_node_id: int = -1
 var to_node_id: int = -1
 var road_class: String = ARTERIAL

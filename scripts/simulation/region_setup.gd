@@ -16,6 +16,9 @@ static func build(seed_value: int, city_count: int, state_tax_rate: float) -> Di
 	var region = RegionGenerator.generate_region(seed_value) if city_count == 32 else RegionGenerator.generate_large_region(seed_value, city_count)
 	RoadNetworkGenerator.generate(region)
 	RoadLand.initialize(region)
+	preload("res://scripts/simulation/building_inventory.gd").initialize(region)
+	region.building_model_version=1
+	preload("res://scripts/simulation/street_names.gd").assign(region)
 	DevelopmentPlanner.refresh_candidates(region)
 	AccessibilityCalculator.recalculate(region)
 	region.jurisdictions[0].income_tax_rate = state_tax_rate
