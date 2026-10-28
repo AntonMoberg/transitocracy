@@ -4,6 +4,7 @@ class FixtureMain:
 	extends "res://scripts/main.gd"
 	var fixture_size := 0
 	func _ready() -> void:
+		set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		get_window().min_size = Vector2i(1024, 700)
 		generation_rng.seed = 1729
 		_build_interface()
@@ -17,7 +18,7 @@ static func attach(tree: SceneTree, size_index: int):
 	var main = FixtureMain.new()
 	main.fixture_size = size_index
 	tree.root.add_child(main)
-	while main.generation_thread != null:
+	while main.generation_start_pending or main.generation_thread != null or main.generation_render_pending:
 		await tree.process_frame
 	return main
 

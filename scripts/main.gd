@@ -75,6 +75,11 @@ var seed_generate_button: Button
 var generation_rng := RandomNumberGenerator.new()
 var map_size_selector: OptionButton
 var generate_button: Button
+var generation_progress
+var generation_overlay
+var generation_render_pending:=false
+var generation_start_pending:=false
+var generation_previous_playing:=false
 var generation_thread: Thread
 var road_rebuild_thread: Thread
 var last_road_rebuild_publish_us:int=0
@@ -190,6 +195,8 @@ func _process(delta: float) -> void:
 	_reap_finished_data_threads()
 	_poll_day_worker()
 	_poll_compact_hour_worker()
+	if generation_start_pending or generation_thread!=null or generation_render_pending:
+		return
 	if pending_inspector_refresh:
 		pending_inspector_refresh = false
 		_refresh_inspector(false)
@@ -291,6 +298,7 @@ func _process(delta: float) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if is_instance_valid(generation_overlay) or generation_start_pending or generation_thread!=null or generation_render_pending: return
 	if not event is InputEventKey:
 		return
 	var key_event := event as InputEventKey
@@ -1050,8 +1058,21 @@ func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
 
 
 func _generate_region(seed_value: int) -> void:
-	if generation_thread != null:
+	if generation_thread != null or generation_start_pending or generation_render_pending:
 		return
+	generation_start_pending=true
+	if generation_progress==null or not generation_progress.status().failed:
+		generation_previous_playing=playing
+	playing=false
+	_discard_pending_day()
+	generation_progress=preload("res://scripts/simulation/generation_progress.gd").new()
+	if is_instance_valid(generation_overlay): generation_overlay.queue_free()
+	generation_overlay=preload("res://scripts/ui/generation_overlay.gd").new()
+	generation_overlay.reporter=generation_progress
+	generation_overlay.can_return=region!=null
+	generation_overlay.retry_requested.connect(func():_generate_region(seed_value))
+	generation_overlay.back_requested.connect(_dismiss_generation_failure)
+	add_child(generation_overlay)
 	discard_road_rebuild = road_rebuild_thread != null
 	seed_input.set_value_no_signal(seed_value)
 	seed_input.editable = false
@@ -1060,19 +1081,31 @@ func _generate_region(seed_value: int) -> void:
 	seed_generate_button.disabled = true
 	map_size_selector.disabled = true
 	summary_label.text = "Generating %s…" % map_size_selector.get_item_text(map_size_selector.selected)
+	# Show the loading interface before starting CPU work. Drain old workers
+	# asynchronously so generation cannot race their shared routing helpers.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	while not retired_day_threads.is_empty() or road_rebuild_thread!=null or road_preview_thread!=null:
+		await get_tree().process_frame
+	generation_start_pending=false
 	var worker := Thread.new()
-	var task := Callable(RegionSetup, "build").bind(seed_value, city_count, tax_input.value / 100.0)
+	var task := Callable(RegionSetup, "build").bind(seed_value, city_count, tax_input.value / 100.0,generation_progress)
 	if worker.start(task, Thread.PRIORITY_NORMAL) != OK:
 		generate_button.disabled = false
 		seed_generate_button.disabled = false
 		seed_input.editable = true
 		map_size_selector.disabled = false
 		push_error("Could not start region generation worker.")
+		_generation_failed("Could not start generation. Please retry.")
 		return
 	generation_thread = worker
 
 
 func _poll_generation() -> void:
+	if generation_render_pending and map_view.chunk_renderer.is_settled() and not map_view.terrain_base_textures.is_empty():
+		generation_render_pending=false
+		generation_overlay.queue_free()
+		playing=true
 	if generation_thread == null or generation_thread.is_alive():
 		return
 	var result: Dictionary = generation_thread.wait_to_finish()
@@ -1083,8 +1116,31 @@ func _poll_generation() -> void:
 	map_size_selector.disabled = false
 	if result.is_empty():
 		push_error("Region generation returned no data.")
+		_generation_failed("Generation returned no data. Please retry.")
+		return
+	if not result.get("errors",PackedStringArray()).is_empty():
+		push_error("Invalid generated region: "+str(result.errors))
+		_generation_failed("The generated world failed validation. Try another seed or retry.")
+		_retire_simulation_data(result)
 		return
 	_apply_generated_region(result)
+	playing=false
+	generation_progress.report("Drawing the map")
+	generation_render_pending=true
+
+
+func _generation_failed(message:String) -> void:
+	generation_progress.report(message)
+	generation_progress.mutex.lock()
+	generation_progress.failed=true
+	generation_progress.mutex.unlock()
+	playing=false
+
+
+func _dismiss_generation_failure() -> void:
+	if is_instance_valid(generation_overlay): generation_overlay.queue_free()
+	playing=generation_previous_playing
+	if region!=null: _refresh_region_summary()
 
 
 func _apply_generated_region(result: Dictionary) -> void:

@@ -47,6 +47,46 @@ static func project(points: PackedVector2Array, point: Vector2) -> Dictionary:
 		travelled += distance
 	return result
 
+class PathQuery:
+	extends RefCounted
+	var points:PackedVector2Array
+	var starts:=PackedFloat64Array()
+	var lengths:=PackedFloat64Array()
+	var boxes:Array[Rect2]=[]
+	func _init(path:PackedVector2Array) -> void:
+		points=path
+		var travelled:=0.0
+		for i in range(1,path.size()):
+			starts.append(travelled)
+			var distance:=path[i-1].distance_to(path[i])
+			lengths.append(distance)
+			boxes.append(Rect2(path[i-1],Vector2.ZERO).expand(path[i]))
+			if distance>=.0000001: travelled+=distance
+	func sample_at(station:float) -> Dictionary:
+		var low:=0
+		var high:=lengths.size()-1
+		while low<high:
+			var middle:int=(low+high)/2
+			if starts[middle]+lengths[middle]>=station: high=middle
+			else: low=middle+1
+		while low<lengths.size() and lengths[low]<.0000001: low+=1
+		if low>=lengths.size(): return {"point":points[0],"direction":Vector2.ZERO}
+		return {"point":points[low].lerp(points[low+1],clampf((station-starts[low])/lengths[low],0,1)),"direction":(points[low+1]-points[low])/lengths[low]}
+	func project_at(point:Vector2) -> Dictionary:
+		var result:Dictionary={"point":Vector2.ZERO,"station":0.0,"distance":INF,"direction":Vector2.ZERO}
+		for i in range(lengths.size()):
+			if lengths[i]<.0000001: continue
+			# Bounds reject distant segments; exact projection and tie ordering
+			# remain identical to the uncached query.
+			var box:Rect2=boxes[i]
+			var nearest:=Vector2(clampf(point.x,box.position.x,box.end.x),clampf(point.y,box.position.y,box.end.y))
+			if nearest.distance_to(point)>result.distance+.000001: continue
+			var near:=Geometry2D.get_closest_point_to_segment(point,points[i],points[i+1])
+			var gap:=near.distance_to(point)
+			if gap<result.distance:
+				result={"point":near,"station":starts[i]+near.distance_to(points[i]),"distance":gap,"direction":(points[i+1]-points[i])/lengths[i]}
+		return result
+
 static func slice(points: PackedVector2Array, first: float, last: float) -> PackedVector2Array:
 	if last < first:
 		var reverse := slice(points,last,first)
@@ -67,18 +107,44 @@ static func approaches(region, excluded_id: int = -1) -> Array:
 	for i in range(result.size()): result[i] = []
 	for link in region.road_links:
 		if link.id == excluded_id or link.points.size()<2: continue
-		var chain := [{"node_id":link.from_node_id,"station_km":0.0}]
-		chain.append_array(link.junctions)
-		chain.append({"node_id":link.to_node_id,"station_km":link.length_km})
-		for i in range(1,chain.size()):
-			var a: int = chain[i-1].node_id
-			var b: int = chain[i].node_id
-			var low: float = chain[i-1].station_km
-			var high: float = chain[i].station_km
-			if a==b or high-low<0.000001: continue
-			result[a].append({"link":link,"station":low,"other_station":high,"other":b,"direction":sample(link.points,low+0.00001).direction})
-			result[b].append({"link":link,"station":high,"other_station":low,"other":a,"direction":-sample(link.points,high-0.00001).direction})
+		_append_approaches(result,link)
 	return result
+
+
+static func _append_approaches(result:Array,link) -> void:
+	var chain := [{"node_id":link.from_node_id,"station_km":0.0}]
+	chain.append_array(link.junctions)
+	chain.append({"node_id":link.to_node_id,"station_km":link.length_km})
+	for i in range(1,chain.size()):
+		var a: int = chain[i-1].node_id
+		var b: int = chain[i].node_id
+		var low: float = chain[i-1].station_km
+		var high: float = chain[i].station_km
+		if a==b or high-low<0.000001: continue
+		result[a].append({"link":link,"station":low,"other_station":high,"other":b,"direction":sample(link.points,low+0.00001).direction})
+		result[b].append({"link":link,"station":high,"other_station":low,"other":a,"direction":-sample(link.points,high-0.00001).direction})
+
+static func refresh_approaches(region, arms:Array, changed:Array) -> void:
+	# Operation-local index: recompute geometry only for edited links.
+	while arms.size()<region.road_nodes.size(): arms.append([])
+	var touched:Dictionary={}
+	for node_id in range(arms.size()):
+		for i in range(arms[node_id].size()-1,-1,-1):
+			if arms[node_id][i].link in changed:
+				arms[node_id].remove_at(i)
+				touched[node_id]=true
+	var order:Dictionary={}
+	for i in range(region.road_links.size()): order[region.road_links[i].id]=i
+	for link in changed:
+		if not order.has(link.id) or link.points.size()<2: continue
+		_append_approaches(arms,link)
+		touched[link.from_node_id]=true
+		touched[link.to_node_id]=true
+		for junction in link.junctions: touched[junction.node_id]=true
+	for node_id in touched:
+		arms[node_id].sort_custom(func(a,b):
+			if a.link==b.link: return a.station<b.station or a.station==b.station and a.other_station<b.other_station
+			return order[a.link.id]<order[b.link.id])
 
 static func settlement_nodes(region) -> Dictionary:
 	# Administrative city polygons cover countryside too. Protect only actual
@@ -328,10 +394,13 @@ static func consolidate_approaches(region,focus_id:int=-1) -> int:
 					var limit:float=minf(absf(branch.other_station-branch.station)-.05,absf(trunk.other_station-trunk.station)-.05)
 					var distance:=0.0
 					var target_station:float=trunk.station
+					# Queries live only for this pair, before any edit or rollback.
+					var branch_query:=PathQuery.new(link.points)
+					var trunk_query:=PathQuery.new(trunk.link.points)
 					for step in range(1,ceili(limit/.025)+1):
 						var along:float=minf(step*.025,limit)
-						var position:=sample(link.points,branch.station+signf(branch.other_station-branch.station)*along)
-						var near:=project(trunk.link.points,position.point)
+						var position:=branch_query.sample_at(branch.station+signf(branch.other_station-branch.station)*along)
+						var near:=trunk_query.project_at(position.point)
 						if near.distance>.025 or structured(link,position.point) or structured(trunk.link,near.point): break
 						if (near.station-trunk.station)*signf(trunk.other_station-trunk.station)<0: break
 						if absf(near.station-trunk.station)>absf(trunk.other_station-trunk.station)-.025: break
@@ -552,13 +621,46 @@ static func apply_geometry(link, packet: Dictionary) -> void:
 	link.recalculate_length()
 
 static func repair_join(region, node_id: int, arms: Array) -> bool:
-	if arms.size()!=2 or arms[0].link==arms[1].link: return false
+	return apply_join_plan(region,node_id,arms,plan_join(region,node_id,arms))
+
+static func apply_join_plan(region,node_id:int,arms:Array,packet:Dictionary) -> bool:
+	if packet.is_empty(): return false
+	apply_geometry(arms[0].link,packet.first)
+	apply_geometry(arms[1].link,packet.second)
+	region.road_nodes[node_id].position_km=packet.joint
+	region.street_spatial_cache={}
+	return true
+
+static func _join_stamp(region,node_id:int,arms:Array) -> int:
+	return hash([region.road_nodes[node_id].position_km,arms.map(func(a):return [a.link.id,a.link.points,a.link.junctions])])
+
+static func _prepare_join_repairs(region,arms:Array,urban:Dictionary) -> Dictionary:
+	var jobs:Array[int]=[]
+	var prepared:Dictionary={}
+	for node_id in range(arms.size()):
+		if urban.has(node_id) or arms[node_id].size()!=2: continue
+		var highway:bool=arms[node_id].any(func(a):return a.link.road_class==Roads.HIGHWAY)
+		if join_error(arms[node_id])<=(.25 if highway else 1.0): continue
+		jobs.append(node_id)
+		prepared[node_id]={"stamp":_join_stamp(region,node_id,arms[node_id]),"packet":{}}
+	if jobs.size()<4: return {}
+	# Workers only calculate packets against a frozen graph. No scene access,
+	# geometry mutations, or shared planner state occurs until all jobs finish.
+	var slots:Array=[]
+	for node_id in jobs: slots.append(prepared[node_id])
+	var work:=func(index:int): slots[index].packet=plan_join(region,jobs[index],arms[jobs[index]])
+	var task:=WorkerThreadPool.add_group_task(work,jobs.size(),maxi(1,mini(8,OS.get_processor_count()-1)),false,"Junction geometry")
+	WorkerThreadPool.wait_for_group_task_completion(task)
+	return prepared
+
+static func plan_join(region, node_id: int, arms: Array) -> Dictionary:
+	if arms.size()!=2 or arms[0].link==arms[1].link: return {}
 	var a: Dictionary=arms[0]
 	var b: Dictionary=arms[1]
 	# Only true endpoint pairs can move together. Interior joins on a single
 	# road already have a common tangent; a third arm is a real intersection.
-	if a.station>EPS and a.station<a.link.length_km-EPS: return false
-	if b.station>EPS and b.station<b.link.length_km-EPS: return false
+	if a.station>EPS and a.station<a.link.length_km-EPS: return {}
+	if b.station>EPS and b.station<b.link.length_km-EPS: return {}
 	var road_class: String=a.link.road_class if rank(a.link.road_class)>=rank(b.link.road_class) else b.link.road_class
 	var minimum: float=minimum_radius(road_class)
 	var bridge_minimum:float=minf(minimum_radius(a.link.road_class),minimum_radius(b.link.road_class))
@@ -646,12 +748,8 @@ static func repair_join(region, node_id: int, arms: Array) -> bool:
 		var first:=geometry_packet(region,a.link,paths[0])
 		var second:=geometry_packet(region,b.link,paths[1])
 		if first.is_empty() or second.is_empty(): continue
-		apply_geometry(a.link,first)
-		apply_geometry(b.link,second)
-		region.road_nodes[node_id].position_km=joint_point
-		region.street_spatial_cache={}
-		return true
-	return false
+		return {"first":first,"second":second,"joint":joint_point}
+	return {}
 
 static func _trim_leaf(region, arm: Dictionary) -> void:
 	var link=arm.link
@@ -701,15 +799,16 @@ static func _remove_redundant_detour(region,arms:Array) -> bool:
 			queue.append(edge.other)
 	return false
 
-static func cleanup(region,depth:int=0) -> Dictionary:
+static func cleanup(region,depth:int=0,parallel:bool=true) -> Dictionary:
 	var corners:=smooth_corners(region)
 	var urban:=settlement_nodes(region)
 	var pruned:=0
 	var repaired:=0
 	var removed_detour:=false
+	var indexed_arms:=approaches(region)
 	# Unused rural sampling sites must not become arbitrary destinations.
 	for _pass in range(region.road_links.size()+1):
-		var arms:=approaches(region)
+		var arms:=indexed_arms
 		var changed:=false
 		for node_id in range(arms.size()):
 			if urban.has(node_id): continue
@@ -723,6 +822,7 @@ static func cleanup(region,depth:int=0) -> Dictionary:
 					if project(other,point).distance>EPS: coincident=false; break
 				if coincident:
 					_trim_leaf(region,pair[1])
+					refresh_approaches(region,indexed_arms,[pair[1].link])
 					changed=true
 					break
 			if pair.size()!=1: continue
@@ -731,23 +831,32 @@ static func cleanup(region,depth:int=0) -> Dictionary:
 			# tail beyond its final interchange.
 			if arm.link.road_class==Roads.HIGHWAY and arm.link.junctions.is_empty(): continue
 			_trim_leaf(region,arm)
+			refresh_approaches(region,indexed_arms,[arm.link])
 			pruned+=1
 			changed=true
 			break
 		if not changed: break
 	for _pass in range(3):
-		var arms:=approaches(region)
+		var prepared:Dictionary=_prepare_join_repairs(region,indexed_arms,urban) if parallel else {}
+		var arms:=indexed_arms
 		var changed:=false
 		for node_id in range(arms.size()):
 			if urban.has(node_id) or arms[node_id].size()!=2: continue
 			var highway: bool=arms[node_id][0].link.road_class==Roads.HIGHWAY or arms[node_id][1].link.road_class==Roads.HIGHWAY
 			if join_error(arms[node_id])<=(0.25 if highway else 1.0): continue
 			# Earlier repairs may have changed the other end of these links.
-			var current:Array=approaches(region)[node_id]
-			if repair_join(region,node_id,current):
+			var current:Array=indexed_arms[node_id].duplicate()
+			var packet:Dictionary
+			if prepared.has(node_id) and prepared[node_id].stamp==_join_stamp(region,node_id,current):
+				packet=prepared[node_id].packet
+			else:
+				packet=plan_join(region,node_id,current)
+			if apply_join_plan(region,node_id,current,packet):
+				refresh_approaches(region,indexed_arms,[current[0].link,current[1].link])
 				repaired+=1
 				changed=true
 			elif _remove_redundant_detour(region,current):
+				refresh_approaches(region,indexed_arms,[current[0].link,current[1].link])
 				removed_detour=true
 				pruned+=2
 				changed=true
@@ -755,7 +864,7 @@ static func cleanup(region,depth:int=0) -> Dictionary:
 	region.road_geometry_revision+=1
 	region.street_spatial_cache={}
 	if removed_detour and depth<4:
-		var next:=cleanup(region,depth+1)
+		var next:=cleanup(region,depth+1,parallel)
 		next.pruned+=pruned
 		next.repaired+=repaired
 		return next

@@ -7,6 +7,17 @@ const Link=preload("res://scripts/simulation/road_link_data.gd")
 const Generator=preload("res://scripts/simulation/road_network_generator.gd")
 var errors: Array[String]=[]
 func _initialize() -> void:
+	var query_path:=PackedVector2Array([Vector2(1400,500),Vector2(1400,500),Vector2(1401,502),Vector2(1406,501),Vector2(1410,507)])
+	var query:=Topology.PathQuery.new(query_path)
+	for i in range(101):
+		var station:float=Topology.length(query_path)*i/100.0
+		var expected:Dictionary=Topology.sample(query_path,station)
+		var actual:Dictionary=query.sample_at(station)
+		_check(expected.point.distance_to(actual.point)<.00001 and expected.direction.distance_to(actual.direction)<.00001,"cached path sampling must match reference")
+		var point:=Vector2(1398+i*.15,504)
+		expected=Topology.project(query_path,point)
+		actual=query.project_at(point)
+		_check(expected.point.distance_to(actual.point)<.00001 and absf(expected.station-actual.station)<.00001,"cached path projection must match reference")
 	var region=Region.new()
 	var state=Jurisdiction.new()
 	state.id=0
@@ -23,6 +34,8 @@ func _initialize() -> void:
 	var arms:=Topology.approaches(region)
 	_check(arms[1].size()==2 and Topology.join_error(arms[1])>89,"two links must be a sharp continuation, not a junction")
 	_check(Topology.repair_join(region,1,arms[1]),"a rural elbow must become a smooth connection")
+	Topology.refresh_approaches(region,arms,region.road_links.duplicate())
+	_check(arms==Topology.approaches(region),"incremental connections must match a full rebuild after geometry repair")
 	var result:=Topology.audit(region)
 	_check(result.kinks.is_empty() and result.attachments.is_empty(),"repair must keep geometry and graph aligned")
 	_add(region,1,3)
@@ -34,6 +47,17 @@ func _initialize() -> void:
 	middle.position_km=Topology.sample(trunk.points,trunk.length_km*.5).point
 	region.road_nodes.append(middle)
 	trunk.junctions.append({"node_id":middle.id,"station_km":trunk.length_km*.5})
+	Topology.refresh_approaches(region,arms,region.road_links.duplicate())
+	_check(arms==Topology.approaches(region),"incremental connections must match new links and interior junctions")
+	var saved_points:PackedVector2Array=trunk.points.duplicate()
+	trunk.points=PackedVector2Array([trunk.points[0],trunk.points[-1]])
+	trunk.recalculate_length()
+	Topology.refresh_approaches(region,arms,[trunk])
+	_check(arms==Topology.approaches(region),"incremental connections must match edited geometry")
+	trunk.points=saved_points
+	trunk.recalculate_length()
+	Topology.refresh_approaches(region,arms,[trunk])
+	_check(arms==Topology.approaches(region),"incremental connections must match rolled-back geometry")
 	_check(Topology.approaches(region)[middle.id].size()==2,"interior stations must count both through approaches")
 	_check(Topology.join_error(Topology.approaches(region)[middle.id])<.01,"an unsplit through road must be continuous")
 	# Float32 world coordinates must not turn a shared sampled chord into a kink.

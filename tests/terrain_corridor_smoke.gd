@@ -49,15 +49,25 @@ func _initialize() -> void:
 	var highway: Dictionary = reused.route(Vector2(80,80),Vector2(160,80),"Highway",Vector2.ZERO,Vector2.ZERO,false)
 	var fresh := Planner.new(reused.region,4.0)
 	_check(highway == fresh.route(Vector2(80,80),Vector2(160,80),"Highway",Vector2.ZERO,Vector2.ZERO,false),"route result must not depend on previous road class")
+	var unbounded:=Planner.new(reused.region,4.0)
+	unbounded.use_tunnel_cost_bound=false
+	_check(highway==unbounded.route(Vector2(80,80),Vector2(160,80),"Highway",Vector2.ZERO,Vector2.ZERO,false),"cost bound must preserve mountain route results")
 	var tunnel_region := Region.new()
 	tunnel_region.terrain = NarrowRidge.new()
 	var tunneling := Planner.new(tunnel_region,1.0)
 	tunneling.generated_highway = true
 	tunneling.tunnel_limit_km = 3.0
 	_check(tunneling._tunnel_cost(Vector2i(119,60),Vector2i(121,60),.04) < INF,"short tunnel with valid cover must be feasible")
+	var tunnel_fresh:=Planner.new(tunnel_region,1.0)
+	for grade_limit in [.01,.04,.06]:
+		_check(tunneling._tunnel_cost(Vector2i(119,60),Vector2i(121,60),grade_limit)==tunnel_fresh._tunnel_cost(Vector2i(119,60),Vector2i(121,60),grade_limit),"retained tunnel measurements must preserve grade decisions")
 	var line := PackedVector2Array()
 	for x in range(32,449): line.append(Vector2(x*.5,60))
 	var short_tunnel := tunneling._profile(line,"Highway",[{"from":Vector2(119,60),"to":Vector2(121,60)}])
+	var profile_only:=Planner.new(tunnel_region,1.0)
+	_check(profile_only.cell_filled.is_empty() and profile_only.edge_costs.is_empty(),"unused planners must not allocate terrain search grids")
+	profile_only._profile(line,"Collector",[])
+	_check(profile_only.cell_filled.is_empty() and profile_only.edge_costs.is_empty(),"geometry validation must not allocate terrain search grids")
 	_check(not short_tunnel.is_empty(),"exceptional short tunnel must pass final profile validation")
 	_check(tunneling._profile(line,"Highway",[{"from":Vector2(112,60),"to":Vector2(128,60)}]).is_empty(),"long tunnel must fail final profile validation")
 	print("Terrain corridors: ", "PASS" if errors.is_empty() else errors)

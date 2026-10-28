@@ -56,6 +56,7 @@ static func initialize(region) -> void:
 		for reservation in region.road_reservations:
 			if reservation["road_class"] == "Highway" and reservation["bounds"].intersects(neighborhood.street_layout.bounds):
 				highway_masks.append_array(reservation["clearance_masks"])
+		highway_masks=_local_masks(highway_masks,neighborhood.street_layout.bounds.grow(.15))
 		var affected: PackedInt32Array = _affected_blocks(neighborhood.street_layout, highway_masks)
 		if not affected.is_empty():
 			_demolish_blocks(neighborhood, affected, highway_masks)
@@ -63,7 +64,7 @@ static func initialize(region) -> void:
 			for reservation in region.road_reservations:
 				if reservation["road_class"] == "Highway" and reservation["bounds"].intersects(neighborhood.street_layout.bounds):
 					parcel_masks.append_array(reservation["parcel_masks"])
-			_rebuild_blocks(neighborhood, affected, parcel_masks, -1)
+			_rebuild_blocks(neighborhood, affected, _local_masks(parcel_masks,neighborhood.street_layout.bounds.grow(.15)), -1)
 			for reservation in region.road_reservations:
 				if reservation["road_class"] == "Highway" and reservation["bounds"].intersects(neighborhood.street_layout.bounds):
 					_rebuild_streets(neighborhood, reservation["points"], reservation["road_class"], reservation["clearance_masks"])

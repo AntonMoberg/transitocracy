@@ -13,7 +13,7 @@ const COUNTRYSIDE_SPACING_KM = 30.0
 static var install_phase_us: Dictionary = {}
 
 
-static func generate(region) -> void:
+static func generate(region,progress=null) -> void:
 	region.road_geometry_revision += 1
 	region.street_spatial_cache = {}
 	region.road_nodes.clear()
@@ -46,6 +46,7 @@ static func generate(region) -> void:
 		region.road_nodes.append(node)
 		region.city_hub_node_ids.append(node.id)
 		region.city_highway_access_node_ids.append(-1)
+	if progress!=null: progress.report("Placing city streets",region)
 	for city in region.cities:
 		UrbanGraph.build_starting_city(region, city)
 	var planner = Planner.new(region)
@@ -55,20 +56,29 @@ static func generate(region) -> void:
 	if sites.size() >= 2:
 		# Layered phases: trunk corridors first, then the rural web spreads
 		# from their interchanges and the city gates, avoiding trunk valleys.
+		if progress!=null: progress.report("Routing highways",region)
 		var highways: Dictionary = _build_highways(region, planner, sites)
 		var candidates: Array[Dictionary] = _proximity_edges(region, sites)
 		if not highways.is_empty():
 			planner.set_avoidance(highways["avoid_costs"], highways["avoid_origin"], highways["avoid_step"], highways["avoid_size"])
-		_build_countryside(region, planner, sites, candidates, highways)
+		if progress!=null: progress.report("Connecting regional roads",region)
+		_build_countryside(region, planner, sites, candidates, highways,progress)
 		print("Countryside roads: %d links in %d ms" % [region.road_links.size(), Time.get_ticks_msec() - generation_started])
 		_assign_highway_access(region, planner, highways.get("gate_cities", {}))
 		_promote_access_spurs(region)
+		if progress!=null: progress.report("Refining road connections",region)
+		var topology_started:=Time.get_ticks_msec()
 		print("Shared corridors: ", Topology.consolidate(region))
+		print("Corridor consolidation ms: ",Time.get_ticks_msec()-topology_started)
+		topology_started=Time.get_ticks_msec()
 		print("Road topology: ", Topology.cleanup(region))
+		print("Topology cleanup ms: ",Time.get_ticks_msec()-topology_started)
+		topology_started=Time.get_ticks_msec()
 		# Prune unused branches first: otherwise a temporary third arm can
 		# hide a bend that becomes impossible once its overlapping fork moves.
 		var short_merges:=Topology.consolidate_approaches(region)
 		print("Shared approaches: ",short_merges)
+		print("Approach consolidation ms: ",Time.get_ticks_msec()-topology_started)
 		if short_merges>0: print("Final road topology: ",Topology.cleanup(region))
 		_assign_highway_access(region, planner, highways.get("gate_cities", {}))
 		_mark_map_backbone(region)
@@ -184,10 +194,13 @@ static func _root(parents: PackedInt32Array, id: int) -> int:
 	return cursor
 
 
-static func _build_countryside(region, planner, sites: Array[Dictionary], candidates: Array[Dictionary], highways: Dictionary = {}) -> void:
+static func _build_countryside(region, planner, sites: Array[Dictionary], candidates: Array[Dictionary], highways: Dictionary = {},progress=null) -> void:
 	var route_started: int = Time.get_ticks_usec()
-	var alignments := _precompute_routes(region, sites, candidates, highways)
-	print("Countryside routes: %d candidates in %d ms" % [candidates.size(), (Time.get_ticks_usec() - route_started) / 1000])
+	var alignments:Array=[]
+	alignments.resize(candidates.size())
+	var route_pool:Array=[]
+	var routed_count:=0
+	var next_preview_ms:=Time.get_ticks_msec()+500
 	var parents := PackedInt32Array()
 	var degrees := PackedInt32Array()
 	var neighbors: Array[Dictionary] = []
@@ -251,11 +264,37 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 				var direct: float = sites[a]["point"].distance_to(sites[b]["point"])
 				if direct > 75.0 or _nearby_distance(neighbors, a, b, direct * 1.85) <= direct * 1.85:
 					continue
+			if alignments[edge_index]==null:
+				# Route a bounded lookahead only after inexpensive graph tests.
+				# Eligibility is checked again when applying results in original order.
+				var batch:Array[Dictionary]=[]
+				var indices:Array[int]=[]
+				for next in range(edge_index,candidates.size()):
+					if alignments[next]!=null: continue
+					var choice:Dictionary=candidates[next]
+					var same:bool=_root(parents,choice.a)==_root(parents,choice.b)
+					if not loops and same: continue
+					if loops:
+						if not same or degrees[choice.a]>=3 or degrees[choice.b]>=3: continue
+						var direct:float=sites[choice.a].point.distance_to(sites[choice.b].point)
+						if direct>75.0 or _nearby_distance(neighbors,choice.a,choice.b,direct*1.85)<=direct*1.85: continue
+					batch.append(choice)
+					indices.append(next)
+					if batch.size()>=64: break
+				var prepared:=_precompute_routes(region,sites,batch,highways,null,route_pool)
+				for i in range(indices.size()): alignments[indices[i]]=prepared[i]
+				routed_count+=batch.size()
+				if progress!=null:
+					progress.report("Connecting regional roads",region)
+					progress.advance(routed_count,candidates.size())
 			var alignment: Dictionary = alignments[edge_index]
 			if alignment.is_empty():
 				continue
 			var install_started: int = Time.get_ticks_usec()
 			_install(region, sites[a]["node"], sites[b]["node"], Roads.COLLECTOR, alignment)
+			if progress!=null and Time.get_ticks_msec()>=next_preview_ms:
+				progress.report("Installing regional roads",region)
+				next_preview_ms=Time.get_ticks_msec()+500
 			install_us += Time.get_ticks_usec() - install_started
 			installed[key] = true
 			parents[_root(parents, b)] = _root(parents, a)
@@ -264,6 +303,14 @@ static func _build_countryside(region, planner, sites: Array[Dictionary], candid
 			neighbors[a][b] = alignment["length_km"]
 			neighbors[b][a] = alignment["length_km"]
 	print("Countryside installs: %d in %d ms phases=%s surface=%s" % [installed.size(), install_us / 1000, install_phase_us, RoadPlanner.surface_phase_us])
+	print("Countryside searches: %d / %d candidates in %.2f seconds"%[routed_count,candidates.size(),(Time.get_ticks_usec()-route_started)/1000000.0])
+	if OS.get_cmdline_user_args().has("--profile-generation"):
+		var totals:Dictionary={}
+		for worker in route_pool:
+			for stage in worker.profile_us: totals[stage]=int(totals.get(stage,0))+worker.profile_us[stage]
+		print("Rural worker CPU microseconds (search includes cells/edges/tunnels): ",totals)
+	for i in range(alignments.size()):
+		if alignments[i]==null: alignments[i]={}
 	_connect_isolated_cities(region, planner, sites, candidates, alignments, parents, degrees, neighbors, installed, city_roots)
 	var segment_cells: Dictionary = region.street_spatial_cache.get("segments", {})
 	var total_entries := 0
@@ -483,7 +530,7 @@ static func _avoidance_planner(region, highways: Dictionary):
 	return local
 
 
-static func _precompute_routes(region, sites: Array[Dictionary], candidates: Array[Dictionary], highways: Dictionary = {}) -> Array:
+static func _precompute_routes(region, sites: Array[Dictionary], candidates: Array[Dictionary], highways: Dictionary = {},progress=null,pool:Array=[]) -> Array:
 	var results: Array = []
 	results.resize(candidates.size())
 	var routed := 0
@@ -493,11 +540,16 @@ static func _precompute_routes(region, sites: Array[Dictionary], candidates: Arr
 	if jobs.is_empty():
 		return results
 	var workers: int = maxi(1, mini(8, OS.get_processor_count() - 1))
+	if pool.is_empty():
+		for i in range(workers): pool.append(_avoidance_planner(region,highways))
 	var started: int = Time.get_ticks_usec()
 	if workers == 1 or jobs.size() < 8:
-		var local = _avoidance_planner(region, highways)
+		var local = pool[0]
+		local.edge_computed.fill(0)
+		if local.tunnel_cache.size()>=65536: local.tunnel_cache.clear()
 		for index in jobs:
 			results[index] = _route_candidate(local, sites, candidates[index])
+			if progress!=null: progress.advance(1,jobs.size())
 			routed += 1
 		print("Countryside routes: %d sequential in %d ms" % [routed, (Time.get_ticks_usec() - started) / 1000])
 		return results
@@ -516,17 +568,28 @@ static func _precompute_routes(region, sites: Array[Dictionary], candidates: Arr
 	chunk_slots.resize(chunk_count)
 	for chunk in range(chunk_count):
 		chunk_slots[chunk] = []
-	var route_chunk := func(chunk: int) -> void:
-		var local = _avoidance_planner(region, highways)
-		var slot: Array = chunk_slots[chunk]
-		var start: int = chunk * chunk_size
-		var finish: int = mini(start + chunk_size, order.size())
-		var chunk_started: int = Time.get_ticks_usec()
-		for position in range(start, finish):
-			var candidate_index: int = order[position]
-			slot.append([candidate_index, _route_candidate(local, sites, candidates[candidate_index])])
-		print("route chunk %d: %d routes in %d ms" % [chunk, finish - start, (Time.get_ticks_usec() - chunk_started) / 1000])
-	var task_id := WorkerThreadPool.add_group_task(route_chunk, chunk_count, workers, true, "Countryside routes")
+	var dispatch:Dictionary={"next":0}
+	var dispatch_mutex:=Mutex.new()
+	var route_chunk := func(worker_id: int) -> void:
+		var local = pool[worker_id]
+		# Immutable terrain samples and tunnel measurements survive a batch. Route-dependent caches
+		# reset, so dynamic scheduling cannot change a candidate's result.
+		while true:
+			dispatch_mutex.lock()
+			var chunk:int=dispatch.next
+			dispatch.next+=1
+			dispatch_mutex.unlock()
+			if chunk>=chunk_count: break
+			local.edge_computed.fill(0)
+			if local.tunnel_cache.size()>=65536: local.tunnel_cache.clear()
+			var slot: Array = chunk_slots[chunk]
+			var start: int = chunk * chunk_size
+			var finish: int = mini(start + chunk_size, order.size())
+			for position in range(start, finish):
+				var candidate_index: int = order[position]
+				slot.append([candidate_index, _route_candidate(local, sites, candidates[candidate_index])])
+				if progress!=null: progress.advance(1,jobs.size())
+	var task_id := WorkerThreadPool.add_group_task(route_chunk, workers, workers, true, "Countryside routes")
 	WorkerThreadPool.wait_for_group_task_completion(task_id)
 	var failures := 0
 	for chunk in range(chunk_count):

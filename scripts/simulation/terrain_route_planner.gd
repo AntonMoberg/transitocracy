@@ -28,6 +28,9 @@ var valley_weight := 0.0
 var tunnel_limit_km := 20.0
 var corridor_search := false
 var cached_grade := -1.0
+var profiling:bool=OS.get_cmdline_user_args().has("--profile-generation")
+var use_tunnel_cost_bound:=true
+var profile_us:Dictionary={"route":0,"search":0,"cells":0,"edges":0,"tunnels":0,"smooth":0,"geometry":0}
 var valley_heights := {}
 var fine_planner
 # Read-only penalty grid stamped from already-built trunk corridors, so later
@@ -58,6 +61,12 @@ func _init(source, spacing: float = 4.0) -> void:
 	origin_cell = Vector2i(floori(bounds.position.x / step_km), floori(bounds.position.y / step_km))
 	field_width = maxi(1, ceili(bounds.end.x / step_km) - origin_cell.x + 1)
 	field_height = maxi(1, ceili(bounds.end.y / step_km) - origin_cell.y + 1)
+
+
+func _ensure_terrain_grid() -> void:
+	# Geometry validation only calls _profile: do not allocate an entire
+	# state-sized search grid for every attempted junction repair.
+	if not cell_filled.is_empty(): return
 	var cells := field_width * field_height
 	cell_filled.resize(cells)
 	cell_land.resize(cells)
@@ -100,6 +109,12 @@ func _avoid_penalty_km(a: Vector2, b: Vector2) -> float:
 
 
 func route(first: Vector2, last: Vector2, road_class: String, start_tangent: Vector2 = Vector2.ZERO, end_tangent: Vector2 = Vector2.ZERO, allow_fine: bool = true, long_range: bool = false) -> Dictionary:
+	var started:int=Time.get_ticks_usec() if profiling else 0
+	var result:=_route_impl(first,last,road_class,start_tangent,end_tangent,allow_fine,long_range)
+	if profiling: profile_us.route+=Time.get_ticks_usec()-started
+	return result
+
+func _route_impl(first: Vector2, last: Vector2, road_class: String, start_tangent: Vector2, end_tangent: Vector2, allow_fine: bool, long_range: bool) -> Dictionary:
 	if first.distance_to(last) < 0.05:
 		return {}
 	avoid_endpoints = [first, last]
@@ -157,12 +172,14 @@ func route(first: Vector2, last: Vector2, road_class: String, start_tangent: Vec
 
 
 func _cell_data(cell: Vector2i) -> int:
+	if cell_filled.is_empty(): _ensure_terrain_grid()
 	var x: int = cell.x - origin_cell.x
 	var y: int = cell.y - origin_cell.y
 	if x < 0 or y < 0 or x >= field_width or y >= field_height:
 		return -1
 	var index: int = y * field_width + x
 	if cell_filled[index] == 0:
+		var started:int=Time.get_ticks_usec() if profiling else 0
 		cell_filled[index] = 1
 		var point: Vector2 = Vector2(cell) * step_km
 		if region.jurisdictions[0].contains_point(point):
@@ -170,6 +187,7 @@ func _cell_data(cell: Vector2i) -> int:
 			cell_height_m[index] = region.terrain.elevation_at(point)
 			cell_slope[index] = region.terrain.slope_at(point)
 			cell_water[index] = 1 if region.terrain.water_at(point) else 0
+		if profiling: profile_us.cells+=Time.get_ticks_usec()-started
 	return index
 
 
@@ -192,6 +210,7 @@ func _travel_cost(first_cell: Vector2i, last_cell: Vector2i, direction: int, gra
 			var water_length := 0.0
 			var longest_water := 0.0
 			var parts: int = maxi(2, ceili(a.distance_to(b)))
+			var probe_started:int=Time.get_ticks_usec() if profiling else 0
 			for part in range(1, parts + 1):
 				var point: Vector2 = a.lerp(b, float(part) / float(parts))
 				var height: float = region.terrain.elevation_at(point)
@@ -199,6 +218,7 @@ func _travel_cost(first_cell: Vector2i, last_cell: Vector2i, direction: int, gra
 				previous = height
 				water_length = water_length + a.distance_to(b) / float(parts) if region.terrain.water_at(point) else 0.0
 				longest_water = maxf(longest_water, water_length)
+			if profiling: profile_us.edges+=Time.get_ticks_usec()-probe_started
 			if maximum <= grade_limit * 1.25 and longest_water <= 2.0:
 				cost = Vector2(first_cell - last_cell).length() * step_km * (1.0 + maximum * maximum * 180.0 + (cell_slope[first_index] + cell_slope[last_index]) * 2.0) + longest_water * 8.0
 				if valley_weight > 0.0:
@@ -213,6 +233,12 @@ func _travel_cost(first_cell: Vector2i, last_cell: Vector2i, direction: int, gra
 
 
 func _search(first: Vector2, last: Vector2, road_class: String, start_tangent: Vector2, long_range: bool = false) -> Dictionary:
+	var started:int=Time.get_ticks_usec() if profiling else 0
+	var result:=_search_impl(first,last,road_class,start_tangent,long_range)
+	if profiling: profile_us.search+=Time.get_ticks_usec()-started
+	return result
+
+func _search_impl(first: Vector2, last: Vector2, road_class: String, start_tangent: Vector2, long_range: bool) -> Dictionary:
 	var start_cell := Vector2i(roundi(first.x / step_km), roundi(first.y / step_km))
 	var goal := Vector2i(roundi(last.x / step_km), roundi(last.y / step_km))
 	if start_cell == goal:
@@ -305,10 +331,15 @@ func _search(first: Vector2, last: Vector2, road_class: String, start_tangent: V
 				var exit_cell: Vector2i = cell + DIRECTIONS[direction] * span_cells
 				if exit_cell == goal or cell == start_cell or exit_cell.x < block_x0 or exit_cell.y < block_y0 or exit_cell.x >= block_x0 + block_width or exit_cell.y >= block_y0 + block_height:
 					continue
+				var exit_state: int = _state_index(exit_cell, direction)
+				# Every valid tunnel has this construction cost. Reject candidates
+				# that cannot improve the search before sampling their terrain.
+				var lower_cost:float=search_costs[current]+Vector2(exit_cell-cell).length()*step_km*7.0+8.0
+				if use_tunnel_cost_bound and (lower_cost>=search_costs[exit_state]+.0001 or lower_cost+_heuristic(exit_cell,goal)>cost_ceiling+.0001):
+					continue
 				var tunnel_cost: float = _tunnel_cost(cell, exit_cell, tunnel_grade)
 				if tunnel_cost >= INF:
 					continue
-				var exit_state: int = _state_index(exit_cell, direction)
 				var tunnel_candidate: float = search_costs[current] + tunnel_cost
 				if tunnel_candidate < search_costs[exit_state]:
 					_relax(exit_state, current, tunnel_candidate, true, exit_cell, goal)
@@ -407,8 +438,13 @@ func _tunnel_cost(first: Vector2i, last: Vector2i, grade_limit: float) -> float:
 	if tunnel_cache.has(key):
 		var cached: Vector2 = tunnel_cache[key]
 		return cached.x if cached.y <= grade_limit else INF
+	var started:int=Time.get_ticks_usec() if profiling else 0
+	var previous_cells:int=profile_us.cells if profiling else 0
 	var result: Vector2 = _measure_tunnel(first, last)
-	tunnel_cache[key] = result
+	if profiling: profile_us.tunnels+=Time.get_ticks_usec()-started-(profile_us.cells-previous_cells)
+	# Measurements are independent of route endpoints and requested grade;
+	# grade is applied below. Bound retained terrain data on large worlds.
+	if tunnel_cache.size()<65536: tunnel_cache[key] = result
 	return result.x if result.y <= grade_limit else INF
 
 
@@ -437,6 +473,12 @@ func _measure_tunnel(first: Vector2i, last: Vector2i) -> Vector2:
 
 
 func _smooth(trace: PackedVector2Array, road_class: String, tunnels: Array, broad_radius: float = 0.0) -> PackedVector2Array:
+	var started:int=Time.get_ticks_usec() if profiling else 0
+	var result:=_smooth_impl(trace,road_class,tunnels,broad_radius)
+	if profiling: profile_us.smooth+=Time.get_ticks_usec()-started
+	return result
+
+func _smooth_impl(trace: PackedVector2Array, road_class: String, tunnels: Array, broad_radius: float) -> PackedVector2Array:
 	var points := PackedVector2Array()
 	for point in trace:
 		if points.is_empty() or points[-1].distance_to(point) > 0.01:
@@ -549,6 +591,12 @@ static func _arc(points: PackedVector2Array, a: Vector2, b: Vector2, incoming: V
 
 
 func _profile(points: PackedVector2Array, road_class: String, tunnels: Array) -> Dictionary:
+	var started:int=Time.get_ticks_usec() if profiling else 0
+	var result:=_profile_impl(points,road_class,tunnels)
+	if profiling: profile_us.geometry+=Time.get_ticks_usec()-started
+	return result
+
+func _profile_impl(points: PackedVector2Array, road_class: String, tunnels: Array) -> Dictionary:
 	var heights := PackedFloat32Array()
 	var kinds := PackedStringArray()
 	var limit: float = 0.06 if road_class == Roads.HIGHWAY else 0.08
