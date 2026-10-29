@@ -93,41 +93,41 @@ func set_week_window(start_day_key: int, clock_seconds: float, daily_totals: Dic
 
 
 func _draw() -> void:
-	draw_rect(Rect2(Vector2.ZERO, size), Color("152235"))
+	draw_rect(Rect2(Vector2.ZERO, size), Color("f7f8f3"))
 	if flow_profile == null:
 		return
 	if week_mode:
 		_draw_week()
 		return
 	var font := get_theme_default_font()
-	draw_string(font, Vector2(LEFT_MARGIN, 16), "WEEKEND FLOW / H" if weekend else "WEEKDAY FLOW / H", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("a9bfd0"))
+	draw_string(font, Vector2(LEFT_MARGIN, 16), "WEEKEND FLOW / H" if weekend else "WEEKDAY FLOW / H", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("526d75"))
 	var line_color: Color = _purpose_color()
 	var line_label: String = "All = Work + Commercial + Social" if selected_purpose == FlowProfile.ALL else selected_purpose
 	draw_line(Vector2(160, 12), Vector2(176, 12), line_color, 3.0, true)
-	draw_string(font, Vector2(182, 16), line_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("a9bfd0"))
+	draw_string(font, Vector2(182, 16), line_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("526d75"))
 	var chart_width: float = maxf(1.0, size.x - LEFT_MARGIN - RIGHT_MARGIN)
 	var slot_width: float = chart_width / 24.0
 	var baseline: float = size.y - 22.0
 	var chart_height: float = maxf(1.0, baseline - 32.0)
 	var actual_x: float = LEFT_MARGIN + (actual_hour + actual_fraction) * slot_width
 	draw_rect(Rect2(Vector2(actual_x, 27.0), Vector2(maxf(0.0, size.x - RIGHT_MARGIN - actual_x), baseline - 25.0)), Color(0.50, 0.64, 0.80, 0.08))
-	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 185.0, 32.0), "Forecast →", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("9bb3c5"))
+	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 185.0, 32.0), "Forecast →", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("667d83"))
 	var values: PackedFloat32Array = _hourly_values(selected_purpose)
 	var peak: float = 1.0
 	for hour in range(25):
 		peak = maxf(peak, values[hour])
-	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 116.0, 16), "Peak %d/h" % roundi(peak), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("8fa4ba"))
+	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 116.0, 16), "Peak %d/h" % roundi(peak), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("667d83"))
 	for fraction in [0.0, 0.5, 1.0]:
 		var guide_y: float = baseline - chart_height * fraction
-		draw_line(Vector2(LEFT_MARGIN, guide_y), Vector2(size.x - RIGHT_MARGIN, guide_y), Color(0.65, 0.78, 0.89, 0.13), 1.0)
+		draw_line(Vector2(LEFT_MARGIN, guide_y), Vector2(size.x - RIGHT_MARGIN, guide_y), Color(0.30, 0.45, 0.48, 0.18), 1.0)
 	var points: PackedVector2Array = _curve_points(values, peak, baseline, chart_height, slot_width)
 	draw_polyline(points, line_color, 3.0, true)
-	draw_line(Vector2(actual_x, 27.0), Vector2(actual_x, baseline + 2.0), Color("f2b678", 0.8), 1.0)
+	draw_line(Vector2(actual_x, 27.0), Vector2(actual_x, baseline + 2.0), Color("ad752c", 0.8), 1.0)
 	var marker_x: float = LEFT_MARGIN + (selected_hour + hour_fraction) * slot_width
-	draw_line(Vector2(marker_x, 27), Vector2(marker_x, baseline + 2.0), Color(1.0, 1.0, 1.0, 0.78), 2.0)
+	draw_line(Vector2(marker_x, 27), Vector2(marker_x, baseline + 2.0), Color(0.20, 0.29, 0.34, 0.78), 2.0)
 	for labeled_hour in [0, 6, 12, 18, 24]:
 		var x: float = LEFT_MARGIN + labeled_hour * slot_width
-		draw_string(font, Vector2(x - 9.0, size.y - 5.0), "%02d" % labeled_hour, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("8fa4ba"))
+		draw_string(font, Vector2(x - 9.0, size.y - 5.0), "%02d" % labeled_hour, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("667d83"))
 
 
 func _draw_week() -> void:
@@ -136,24 +136,24 @@ func _draw_week() -> void:
 	var font := get_theme_default_font()
 	var line_color: Color = _purpose_color()
 	var line_label: String = "All = Work + Commercial + Social" if selected_purpose == FlowProfile.ALL else selected_purpose
-	draw_string(font, Vector2(LEFT_MARGIN, 16), "SEVEN-DAY TRIPS / DAY", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("a9bfd0"))
+	draw_string(font, Vector2(LEFT_MARGIN, 16), "SEVEN-DAY TRIPS / DAY", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("526d75"))
 	draw_line(Vector2(192, 12), Vector2(208, 12), line_color, 3.0, true)
-	draw_string(font, Vector2(214, 16), line_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("a9bfd0"))
+	draw_string(font, Vector2(214, 16), line_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("526d75"))
 	var chart_width: float = maxf(1.0, size.x - LEFT_MARGIN - RIGHT_MARGIN)
 	var day_width: float = chart_width / float(WEEK_DAYS)
 	var baseline: float = size.y - 22.0
 	var chart_height: float = maxf(1.0, baseline - 32.0)
 	var actual_x: float = LEFT_MARGIN + clampf((week_clock_seconds / 86400.0 - float(week_start_day_key)) / float(WEEK_DAYS), 0.0, 1.0) * chart_width
 	draw_rect(Rect2(Vector2(actual_x, 27.0), Vector2(maxf(0.0, size.x - RIGHT_MARGIN - actual_x), baseline - 25.0)), Color(0.50, 0.64, 0.80, 0.08))
-	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 185.0, 32.0), "Forecast →", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("9bb3c5"))
+	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 185.0, 32.0), "Forecast →", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("667d83"))
 	var values: PackedFloat32Array = _week_values(selected_purpose)
 	var peak: float = 1.0
 	for value in values:
 		peak = maxf(peak, value)
-	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 135.0, 16.0), "Peak %d/day" % roundi(peak), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("8fa4ba"))
+	draw_string(font, Vector2(size.x - RIGHT_MARGIN - 135.0, 16.0), "Peak %d/day" % roundi(peak), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("667d83"))
 	for fraction in [0.0, 0.5, 1.0]:
 		var guide_y: float = baseline - chart_height * fraction
-		draw_line(Vector2(LEFT_MARGIN, guide_y), Vector2(size.x - RIGHT_MARGIN, guide_y), Color(0.65, 0.78, 0.89, 0.13), 1.0)
+		draw_line(Vector2(LEFT_MARGIN, guide_y), Vector2(size.x - RIGHT_MARGIN, guide_y), Color(0.30, 0.45, 0.48, 0.18), 1.0)
 	var estimated_color := Color(line_color.r, line_color.g, line_color.b, 0.42)
 	for day_index in range(WEEK_DAYS - 1):
 		var segment_points := PackedVector2Array()
@@ -169,11 +169,11 @@ func _draw_week() -> void:
 		var x: float = LEFT_MARGIN + (float(day_index) + 0.5) * day_width
 		var y: float = baseline - chart_height * values[day_index] / peak
 		draw_circle(Vector2(x, y), 3.0, line_color if week_totals.has(day_key) else estimated_color)
-		draw_string(font, Vector2(x - 20.0, size.y - 5.0), _week_day_label(day_key), HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("8fa4ba"))
+		draw_string(font, Vector2(x - 20.0, size.y - 5.0), _week_day_label(day_key), HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("667d83"))
 	if selected_week_day_key >= week_start_day_key and selected_week_day_key < week_start_day_key + WEEK_DAYS:
 		var selected_x: float = LEFT_MARGIN + (float(selected_week_day_key - week_start_day_key) + 0.5) * day_width
-		draw_line(Vector2(selected_x, 27.0), Vector2(selected_x, baseline + 2.0), Color(1.0, 1.0, 1.0, 0.75), 1.0)
-	draw_line(Vector2(actual_x, 27.0), Vector2(actual_x, baseline + 2.0), Color("f2b678", 0.9), 2.0)
+		draw_line(Vector2(selected_x, 27.0), Vector2(selected_x, baseline + 2.0), Color(0.20, 0.29, 0.34, 0.75), 1.0)
+	draw_line(Vector2(actual_x, 27.0), Vector2(actual_x, baseline + 2.0), Color("ad752c", 0.9), 2.0)
 
 
 func _week_values(purpose: String) -> PackedFloat32Array:
@@ -214,13 +214,13 @@ func _week_day_label(day_key: int) -> String:
 func _purpose_color() -> Color:
 	match selected_purpose:
 		FlowProfile.WORK:
-			return Color("6cc6d5")
+			return Color("287b88")
 		FlowProfile.COMMERCIAL:
-			return Color("d49bdf")
+			return Color("8e5c9b")
 		FlowProfile.SOCIAL:
-			return Color("f2b678")
+			return Color("ad752c")
 		_:
-			return Color("e6eff8")
+			return Color("287b88")
 
 
 func _hourly_values(purpose: String) -> PackedFloat32Array:

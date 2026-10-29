@@ -11,6 +11,7 @@ signal road_empty_clicked(world_position: Vector2)
 signal road_empty_double_clicked(world_position: Vector2)
 signal road_cancel_requested
 signal jurisdiction_selected(jurisdiction_id: int)
+signal overlay_changed(layer: String, enabled: bool)
 
 const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const StateGeography = preload("res://scripts/simulation/state_geography.gd")
@@ -185,6 +186,8 @@ var terrain_detail_active: Dictionary = {}
 
 
 var camera_view_size := Vector2.ZERO
+var embedded_controls_enabled := true
+var hud_insets := Vector4.ZERO
 
 func _ready() -> void:
 	set_process(true)
@@ -229,6 +232,7 @@ func _ready() -> void:
 	navigation.position = Vector2(12, 10)
 	navigation.add_theme_constant_override("separation", 4)
 	add_child(navigation)
+	navigation.visible = embedded_controls_enabled
 	for label in ["−", "+", "Fit"]:
 		var button := Button.new()
 		button.text = label
@@ -248,14 +252,14 @@ func _ready() -> void:
 	layers.position = Vector2(12, 44)
 	layers.add_theme_constant_override("separation", 4)
 	add_child(layers)
+	layers.visible = embedded_controls_enabled
 	terrain_toggle_button = Button.new()
 	terrain_toggle_button.text = "Terrain"
 	terrain_toggle_button.tooltip_text = "Show shaded terrain relief over the map colors"
 	terrain_toggle_button.toggle_mode = true
 	terrain_toggle_button.focus_mode = Control.FOCUS_NONE
 	terrain_toggle_button.toggled.connect(func(enabled: bool) -> void:
-		show_terrain_overlay = enabled
-		refresh_static()
+		set_overlay("Terrain",enabled)
 	)
 	layers.add_child(terrain_toggle_button)
 	slope_toggle_button = Button.new()
@@ -264,8 +268,7 @@ func _ready() -> void:
 	slope_toggle_button.toggle_mode = true
 	slope_toggle_button.focus_mode = Control.FOCUS_NONE
 	slope_toggle_button.toggled.connect(func(enabled: bool) -> void:
-		show_slope_overlay = enabled
-		refresh_static()
+		set_overlay("Slope",enabled)
 	)
 	layers.add_child(slope_toggle_button)
 	contour_toggle_button = Button.new()
@@ -274,8 +277,7 @@ func _ready() -> void:
 	contour_toggle_button.toggle_mode = true
 	contour_toggle_button.focus_mode = Control.FOCUS_NONE
 	contour_toggle_button.toggled.connect(func(enabled: bool) -> void:
-		show_contours = enabled
-		refresh_static()
+		set_overlay("Contours",enabled)
 	)
 	layers.add_child(contour_toggle_button)
 	traffic_toggle_button = Button.new()
@@ -285,8 +287,7 @@ func _ready() -> void:
 	traffic_toggle_button.button_pressed = show_traffic_overlay
 	traffic_toggle_button.focus_mode = Control.FOCUS_NONE
 	traffic_toggle_button.toggled.connect(func(enabled: bool) -> void:
-		show_traffic_overlay = enabled
-		refresh_static()
+		set_overlay("Traffic",enabled)
 	)
 	layers.add_child(traffic_toggle_button)
 	transit_toggle_button = Button.new()
@@ -295,8 +296,7 @@ func _ready() -> void:
 	transit_toggle_button.toggle_mode = true
 	transit_toggle_button.focus_mode = Control.FOCUS_NONE
 	transit_toggle_button.toggled.connect(func(enabled: bool) -> void:
-		show_transit_overlay = enabled
-		refresh_static()
+		set_overlay("Transit",enabled)
 	)
 	layers.add_child(transit_toggle_button)
 
@@ -504,9 +504,41 @@ func set_map_mode(mode: String) -> void:
 
 
 func set_transit_overlay(enabled: bool) -> void:
-	show_transit_overlay = enabled
-	if transit_toggle_button != null:
-		transit_toggle_button.set_pressed_no_signal(enabled)
+	set_overlay("Transit",enabled)
+
+
+# HUD placement only affects decorations, never the camera or retained tiles.
+func set_hud_insets(insets: Vector4) -> void:
+	if hud_insets==insets: return
+	hud_insets = insets
+	refresh_dynamic()
+
+
+func zoom_by(factor: float) -> void:
+	_zoom_at(size*.5,factor)
+
+
+func set_overlay(layer: String, enabled: bool) -> void:
+	var button: Button
+	match layer:
+		"Terrain":
+			show_terrain_overlay = enabled
+			button = terrain_toggle_button
+		"Slope":
+			show_slope_overlay = enabled
+			button = slope_toggle_button
+		"Contours":
+			show_contours = enabled
+			button = contour_toggle_button
+		"Traffic":
+			show_traffic_overlay = enabled
+			button = traffic_toggle_button
+		"Transit":
+			show_transit_overlay = enabled
+			button = transit_toggle_button
+		_: return
+	if button!=null: button.set_pressed_no_signal(enabled)
+	overlay_changed.emit(layer,enabled)
 	refresh_static()
 
 
@@ -978,17 +1010,17 @@ func _draw_dynamic_content(pen) -> void:
 			_draw_road_nodes(pen)
 		_draw_road_preview(pen)
 		_draw_hidden_road_selection(pen)
-		_draw_road_legend(pen)
+		if embedded_controls_enabled or show_traffic_overlay: _draw_road_legend(pen)
 	elif map_mode == "Trips":
 		_draw_legend(pen)
 	else:
-		_draw_zoning_legend(pen)
+		if embedded_controls_enabled: _draw_zoning_legend(pen)
 	_draw_map_scale(pen)
 	var font := get_theme_default_font()
 	var hint: String = "Pinch / wheel: zoom  •  Two fingers / drag: pan"
 	var hint_width: float = font.get_string_size(hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
-	var hint_y: float = 55.0 if size.x < 800.0 else size.y - 12.0
-	pen.draw_string(font, Vector2(size.x - hint_width - 14.0, hint_y), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+	var hint_y: float = 55.0 if size.x < 800.0 else size.y - maxf(12.0,hud_insets.w) - 8.0
+	pen.draw_string(font, Vector2(size.x - maxf(14.0,hud_insets.z) - hint_width, hint_y), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("667d83"))
 	last_overlay_us = Time.get_ticks_usec() - draw_started
 
 
@@ -1875,27 +1907,27 @@ func _link_near_crossing(preferred_id: int, point: Vector2, excluded_id: int):
 
 func _draw_road_legend(pen) -> void:
 	var font := get_theme_default_font()
-	var base := Vector2(18.0, size.y - 16.0)
-	pen.draw_rect(Rect2(base - Vector2(9, 95), Vector2(440, 116)), Color(0.04, 0.09, 0.16, 0.90))
-	pen.draw_string(font, base + Vector2(0, -76), "ROAD FLOW / CAPACITY + QUEUES" if show_traffic_overlay else "ROAD NETWORK", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
+	var base := Vector2(18.0, size.y - maxf(16.0,hud_insets.w) - 8.0)
+	pen.draw_rect(Rect2(base - Vector2(9, 95), Vector2(440, 116)), (Color(0.04, 0.09, 0.16, 0.90) if embedded_controls_enabled else Color("f7f8f3",.97)))
+	pen.draw_string(font, base + Vector2(0, -76), "ROAD FLOW / CAPACITY + QUEUES" if show_traffic_overlay else "ROAD NETWORK", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("d7e7f1") if embedded_controls_enabled else Color("344957")))
 	if show_traffic_overlay:
 		for index in range(12):
 			pen.draw_rect(Rect2(base + Vector2(index * 18.0, -64), Vector2(17, 9)), _congestion_color(float(index) / 7.0))
-		pen.draw_string(font, base + Vector2(0, -39), "clear", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-		pen.draw_string(font, base + Vector2(164, -39), "saturated / queued", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_string(font, base + Vector2(0, -39), "clear", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
+		pen.draw_string(font, base + Vector2(164, -39), "saturated / queued", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 	else:
-		pen.draw_string(font, base + Vector2(0, -39), "Traffic overlay off · Use the Traffic button to show flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction" if show_traffic_overlay else "Zoom in for street names, crossings and buildings", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, base + Vector2(0, 4), "Dashed = construction" if road_tool == "Inspect" else "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+		pen.draw_string(font, base + Vector2(0, -39), "Traffic overlay off · Use the Traffic button to show flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
+	pen.draw_string(font, base + Vector2(0, -17), "One line = one lane  •  Arrows = travel direction" if show_traffic_overlay else "Zoom in for street names, crossings and buildings", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
+	pen.draw_string(font, base + Vector2(0, 4), "Dashed = construction" if road_tool == "Inspect" else "Dashed = construction  •  Gold = interchange  •  Hollow = dormant", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 
 
 func _draw_zoning_legend(pen) -> void:
 	var font := get_theme_default_font()
 	var base := Vector2(18.0, size.y - 16.0)
-	pen.draw_rect(Rect2(base - Vector2(9, 60), Vector2(440, 81)), Color(0.04, 0.09, 0.16, 0.90))
-	pen.draw_string(font, base + Vector2(0, -42), "ZONING · SUGGESTED DISTRICTS", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
-	pen.draw_string(font, base + Vector2(0, -17), "Amber dots or outlines = suggested · Green = approved", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, base + Vector2(0, 4), "Zoom toward a city, then click a suggestion to approve", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
+	pen.draw_rect(Rect2(base - Vector2(9, 60), Vector2(440, 81)), (Color(0.04, 0.09, 0.16, 0.90) if embedded_controls_enabled else Color("f7f8f3",.97)))
+	pen.draw_string(font, base + Vector2(0, -42), "ZONING · SUGGESTED DISTRICTS", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("d7e7f1") if embedded_controls_enabled else Color("344957")))
+	pen.draw_string(font, base + Vector2(0, -17), "Amber dots or outlines = suggested · Green = approved", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
+	pen.draw_string(font, base + Vector2(0, 4), "Zoom toward a city, then click a suggestion to approve", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 
 
 func _draw_zoning_candidates(pen) -> void:
@@ -2380,8 +2412,8 @@ func _draw_jurisdiction_labels(pen) -> void:
 
 func _draw_jurisdiction_key(pen) -> void:
 	var font := get_theme_default_font()
-	var start := Vector2(size.x - 362.0, 42.0 if size.x < 720.0 else 10.0)
-	pen.draw_rect(Rect2(start, Vector2(352.0, 25.0)), Color("0b1927", 0.94))
+	var start := Vector2(size.x - maxf(10.0,hud_insets.z) - 352.0, 42.0 if size.x < 720.0 else 10.0)
+	pen.draw_rect(Rect2(start, Vector2(352.0, 25.0)), (Color("0b1927", 0.94) if embedded_controls_enabled else Color("f7f8f3",.97)))
 	for item in [
 		{"kind": "Region", "label": "Region", "offset": 9.0},
 		{"kind": "County", "label": "County", "offset": 85.0},
@@ -2390,6 +2422,7 @@ func _draw_jurisdiction_key(pen) -> void:
 	]:
 		var x: float = start.x + item["offset"]
 		var color: Color = _jurisdiction_color(item["kind"])
+		if not embedded_controls_enabled: color = color.darkened(.3)
 		pen.draw_line(Vector2(x, start.y + 13.0), Vector2(x + 12.0, start.y + 13.0), color, 3.0, true)
 		pen.draw_string(font, Vector2(x + 17.0, start.y + 17.0), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 11, color)
 
@@ -2878,8 +2911,8 @@ func _flows_for_purpose(purpose: String) -> Array[Dictionary]:
 
 
 func _draw_legend(pen) -> void:
-	var origin := Vector2(18, size.y - 44)
-	pen.draw_rect(Rect2(origin - Vector2(9, 110), Vector2(420, 139)), Color(0.04, 0.09, 0.16, 0.90))
+	var origin := Vector2(18, size.y - maxf(44.0,hud_insets.w+32.0))
+	pen.draw_rect(Rect2(origin - Vector2(9, 110), Vector2(420, 139)), (Color(0.04, 0.09, 0.16, 0.90) if embedded_controls_enabled else Color("f7f8f3",.97)))
 	var font := get_theme_default_font()
 	for item in [
 		{"purpose": FlowProfile.WORK, "label": "Work", "x": 0.0},
@@ -2891,21 +2924,21 @@ func _draw_legend(pen) -> void:
 		if selected_purpose != FlowProfile.ALL and selected_purpose != item["purpose"]:
 			swatch_color.a = 0.35
 		pen.draw_line(origin + Vector2(x, -84), origin + Vector2(x + 15.0, -84), swatch_color, 3.0, true)
-		pen.draw_string(font, origin + Vector2(x + 21.0, -80), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_string(font, origin + Vector2(x + 21.0, -80), item["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 	if selected_id >= 0:
 		_draw_flow_stroke(pen, origin + Vector2(0, -62), origin + Vector2(28, -62), Color("dce8f2"), 2.0, true)
-		pen.draw_string(font, origin + Vector2(35, -58), "OUT from selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_string(font, origin + Vector2(35, -58), "OUT from selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 		pen.draw_line(origin + Vector2(191, -62), origin + Vector2(219, -62), Color("dce8f2"), 2.0, true)
-		pen.draw_string(font, origin + Vector2(226, -58), "IN to selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_string(font, origin + Vector2(226, -58), "IN to selected", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 	else:
-		pen.draw_string(font, origin + Vector2(0, -58), "Select a neighborhood for direction styles", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, origin + Vector2(0, -39), "Arrow width and opacity = route flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("9db3c5"))
-	pen.draw_string(font, origin + Vector2(0, -14), "JOB ACCESSIBILITY", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, origin + Vector2(205, -14), "Node ring = desirability", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+		pen.draw_string(font, origin + Vector2(0, -58), "Select a neighborhood for direction styles", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
+	pen.draw_string(font, origin + Vector2(0, -39), "Arrow width and opacity = route flow", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("9db3c5") if embedded_controls_enabled else Color("526d75")))
+	pen.draw_string(font, origin + Vector2(0, -14), "JOB ACCESSIBILITY", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
+	pen.draw_string(font, origin + Vector2(205, -14), "Node ring = desirability", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 	for step in range(8):
 		pen.draw_rect(Rect2(origin + Vector2(step * 17.0, 0), Vector2(16, 9)), _access_color(float(step) / 7.0))
-	pen.draw_string(font, origin + Vector2(0, 26), "lower", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
-	pen.draw_string(font, origin + Vector2(102, 26), "higher", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, origin + Vector2(0, 26), "lower", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
+	pen.draw_string(font, origin + Vector2(102, 26), "higher", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, (Color("aebfd0") if embedded_controls_enabled else Color("526d75")))
 
 
 func _draw_map_scale(pen) -> void:
@@ -2919,14 +2952,14 @@ func _draw_map_scale(pen) -> void:
 		if magnitude * multiplier <= maximum_km:
 			distance_km = magnitude * multiplier
 			break
-	var origin := Vector2(size.x - 150.0, 94.0 if size.x < 800.0 else size.y - 48.0)
+	var origin := Vector2(size.x - maxf(10.0,hud_insets.z) - 140.0, 94.0 if size.x < 800.0 else size.y - maxf(48.0,hud_insets.w+32.0))
 	var width: float = distance_km * pixels_per_km
-	pen.draw_rect(Rect2(origin - Vector2(10, 24), Vector2(140, 38)), Color("0b1927", 0.9))
+	pen.draw_rect(Rect2(origin - Vector2(10, 24), Vector2(140, 38)), (Color("0b1927", 0.9) if embedded_controls_enabled else Color("f7f8f3",.97)))
 	var label: String = "%.0f km" % distance_km if distance_km >= 1.0 else "%.0f m" % (distance_km * 1000.0)
-	pen.draw_string(get_theme_default_font(), origin + Vector2(0, -7), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("d7e7f1"))
-	pen.draw_line(origin, origin + Vector2(width, 0), Color("d7e7f1"), 2.0)
+	pen.draw_string(get_theme_default_font(), origin + Vector2(0, -7), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, (Color("d7e7f1") if embedded_controls_enabled else Color("344957")))
+	pen.draw_line(origin, origin + Vector2(width, 0), (Color("d7e7f1") if embedded_controls_enabled else Color("344957")), 2.0)
 	for offset in [0.0, width]:
-		pen.draw_line(origin + Vector2(offset, -3), origin + Vector2(offset, 3), Color("d7e7f1"), 2.0)
+		pen.draw_line(origin + Vector2(offset, -3), origin + Vector2(offset, 3), (Color("d7e7f1") if embedded_controls_enabled else Color("344957")), 2.0)
 
 
 func reset_view() -> void:

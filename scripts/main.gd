@@ -9,6 +9,7 @@ const FlowProfile = preload("res://scripts/simulation/flow_profile.gd")
 const CalendarClock = preload("res://scripts/simulation/calendar_clock.gd")
 const RegionData = preload("res://scripts/simulation/region_data.gd")
 const RegionMap = preload("res://scripts/ui/region_map.gd")
+const GameHUD = preload("res://scripts/ui/game_hud.gd")
 const FlowTimeline = preload("res://scripts/ui/flow_timeline.gd")
 const RoadNetworkGenerator = preload("res://scripts/simulation/road_network_generator.gd")
 const RoadPlanner = preload("res://scripts/simulation/road_planner.gd")
@@ -69,6 +70,7 @@ var real_rate_seconds: float = 0.0
 var game_rate_seconds: float = 0.0
 var measured_rate: float = 0.0
 var map_view
+var hud
 var flow_timeline
 var seed_input: SpinBox
 var seed_generate_button: Button
@@ -130,7 +132,7 @@ var road_snap_toggle: CheckBox
 var road_length_snap_toggle: CheckBox
 var crossing_selector: OptionButton
 var crossing_level_selector: OptionButton
-var crossing_controls: HBoxContainer
+var crossing_controls: HFlowContainer
 var road_impact_label: Label
 var road_build_button: Button
 var road_cancel_button: Button
@@ -138,7 +140,7 @@ var zoning_tool_message: String = "Amber dots mark suggested districts. Zoom in 
 var toll_forward_input: SpinBox
 var toll_reverse_input: SpinBox
 var toll_label: Label
-var toll_controls: HBoxContainer
+var toll_controls: VBoxContainer
 var suppress_toll_input: bool = false
 var road_status_label: Label
 var pending_road_preview: Dictionary = {}
@@ -156,7 +158,7 @@ var road_last_click_position: Vector2 = Vector2.ZERO
 var selected_road_link_id: int = -1
 var selected_candidate_id: int = -1
 var selected_candidate_key: String = ""
-var zoning_controls: HBoxContainer
+var zoning_controls: VBoxContainer
 var zoning_button: Button
 var zoning_status_label: Label
 var development_controls
@@ -336,50 +338,38 @@ func _input(event: InputEvent) -> void:
 		KEY_E:
 			_on_speed_selected(2)
 		KEY_ESCAPE:
-			_cancel_road_preview()
+			_dismiss_hud()
 		_:
 			return
 	get_viewport().set_input_as_handled()
 
 
 func _build_interface() -> void:
-	var background := ColorRect.new()
-	background.color = Color("0b1421")
-	add_child(background)
-	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	map_view = RegionMap.new()
+	map_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	map_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	map_view.neighborhood_selected.connect(_on_neighborhood_selected)
+	map_view.candidate_selected.connect(_on_candidate_selected)
+	map_view.local_street_selected.connect(_on_local_street_selected)
+	map_view.jurisdiction_selected.connect(_on_map_jurisdiction_selected)
+	map_view.road_node_clicked.connect(_on_road_node_clicked)
+	map_view.road_link_clicked.connect(_on_road_link_clicked)
+	map_view.road_empty_clicked.connect(_on_road_empty_clicked)
+	map_view.road_empty_double_clicked.connect(_on_road_empty_double_clicked)
+	map_view.road_cancel_requested.connect(_cancel_road_preview)
+	map_view.embedded_controls_enabled = false
+	add_child(map_view)
+	map_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 18)
-	margin.add_theme_constant_override("margin_right", 18)
-	margin.add_theme_constant_override("margin_top", 16)
-	margin.add_theme_constant_override("margin_bottom", 16)
-	add_child(margin)
-	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-
-	var layout := VBoxContainer.new()
-	layout.add_theme_constant_override("separation", 12)
-	margin.add_child(layout)
-
-	var header := HBoxContainer.new()
-	header.add_theme_constant_override("separation", 14)
-	layout.add_child(header)
-	var titles := VBoxContainer.new()
-	titles.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(titles)
-	var title := Label.new()
-	title.text = "TRANSITOCRACY"
-	title.add_theme_font_size_override("font_size", 27)
-	title.add_theme_color_override("font_color", Color("e8f1f7"))
-	titles.add_child(title)
-	var subtitle := Label.new()
-	subtitle.text = "Regional trip flow prototype"
-	subtitle.add_theme_font_size_override("font_size", 13)
-	subtitle.add_theme_color_override("font_color", Color("8ea4b8"))
-	titles.add_child(subtitle)
-
+	hud = GameHUD.new()
+	add_child(hud)
+	hud.section_selected.connect(_on_hud_section)
+	hud.safe_area_changed.connect(map_view.set_hud_insets)
+	hud.funds_button.pressed.connect(func(): _on_jurisdiction_selected(selected_jurisdiction_id))
+	var header: VBoxContainer = hud.slots.Menu
 	var seed_label := Label.new()
 	seed_label.text = "Seed"
-	seed_label.add_theme_color_override("font_color", Color("b8c9d6"))
+	seed_label.add_theme_color_override("font_color", Color("667d83"))
 	header.add_child(seed_label)
 	seed_input = SpinBox.new()
 	seed_input.min_value = 1
@@ -392,7 +382,7 @@ func _build_interface() -> void:
 	header.add_child(seed_input)
 	var map_size_label := Label.new()
 	map_size_label.text = "Detail"
-	map_size_label.add_theme_color_override("font_color", Color("b8c9d6"))
+	map_size_label.add_theme_color_override("font_color", Color("667d83"))
 	header.add_child(map_size_label)
 	map_size_selector = OptionButton.new()
 	map_size_selector.add_item("32 cities", 32)
@@ -419,15 +409,17 @@ func _build_interface() -> void:
 
 	summary_label = Label.new()
 	summary_label.add_theme_font_size_override("font_size", 14)
-	summary_label.add_theme_color_override("font_color", Color("b5cad9"))
-	layout.add_child(summary_label)
+	summary_label.add_theme_color_override("font_color", Color("344957"))
+	hud.slots.Statistics.add_child(summary_label)
+	summary_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	dynamics_label = Label.new()
-	dynamics_label.add_theme_color_override("font_color", Color("93b9ac"))
-	layout.add_child(dynamics_label)
+	dynamics_label.add_theme_color_override("font_color", Color("396e60"))
+	hud.slots.Statistics.add_child(dynamics_label)
+	dynamics_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 
 	var clock_controls := HBoxContainer.new()
-	clock_controls.add_theme_constant_override("separation", 12)
-	layout.add_child(clock_controls)
+	clock_controls.add_theme_constant_override("separation", 4)
+	hud.clock_slot.add_child(clock_controls)
 	play_button = Button.new()
 	play_button.text = "Pause"
 	play_button.tooltip_text = "Space: play or pause"
@@ -438,7 +430,7 @@ func _build_interface() -> void:
 	dev_mode_button.toggle_mode = true
 	dev_mode_button.tooltip_text = "Use unlimited funds for road projects and neighborhood development."
 	dev_mode_button.toggled.connect(_on_dev_mode_toggled)
-	clock_controls.add_child(dev_mode_button)
+	header.add_child(dev_mode_button)
 	mode_selector = OptionButton.new()
 	for label in ["Second", "Minute", "Hour", "Day"]:
 		mode_selector.add_item(label)
@@ -447,7 +439,7 @@ func _build_interface() -> void:
 	mode_selector.item_selected.connect(_on_mode_selected)
 	clock_controls.add_child(mode_selector)
 	speed_selector = OptionButton.new()
-	for label in ["Normal", "Faster 2×", "Fastest 4×"]:
+	for label in ["1×", "2×", "4×"]:
 		speed_selector.add_item(label)
 	speed_selector.selected = 0
 	speed_selector.tooltip_text = "Q / W / E: choose playback pace"
@@ -456,7 +448,7 @@ func _build_interface() -> void:
 	rate_label = Label.new()
 	rate_label.text = "Actual --"
 	rate_label.custom_minimum_size.x = 120
-	clock_controls.add_child(rate_label)
+	hud.slots.Statistics.add_child(rate_label)
 	purpose_selector = OptionButton.new()
 	purpose_selector.add_item("All")
 	purpose_selector.add_item("Work")
@@ -465,31 +457,41 @@ func _build_interface() -> void:
 	purpose_selector.selected = 0
 	purpose_selector.tooltip_text = "Filter the map and chart by trip purpose"
 	purpose_selector.item_selected.connect(_on_purpose_selected)
-	clock_controls.add_child(purpose_selector)
+	hud.slots.Statistics.add_child(purpose_selector)
 	calendar_label = Label.new()
 	calendar_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	calendar_label.add_theme_font_size_override("font_size", 17)
-	calendar_label.add_theme_color_override("font_color", Color("e8f1f7"))
-	clock_controls.add_child(calendar_label)
+	calendar_label.add_theme_color_override("font_color", Color("344957"))
+	calendar_label.clip_text = true
+	calendar_label.add_theme_font_size_override("font_size", 13)
+	hud.clock_slot.add_child(calendar_label)
+	hud.clock_slot.move_child(calendar_label,0)
 	hourly_trip_label = Label.new()
-	hourly_trip_label.add_theme_color_override("font_color", Color("f5b67c"))
-	clock_controls.add_child(hourly_trip_label)
+	hourly_trip_label.add_theme_color_override("font_color", Color("9a661e"))
+	hud.slots.Statistics.add_child(hourly_trip_label)
+	hourly_trip_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 
 	var road_controls := HBoxContainer.new()
 	road_controls.add_theme_constant_override("separation", 8)
-	layout.add_child(road_controls)
+	hud.slots.Roads.add_child(road_controls)
 	map_mode_selector = OptionButton.new()
 	map_mode_selector.add_item("Roads")
 	map_mode_selector.add_item("Trips")
 	map_mode_selector.add_item("Zoning")
 	map_mode_selector.selected = 0
 	map_mode_selector.item_selected.connect(_on_map_mode_selected)
-	road_controls.add_child(map_mode_selector)
+	hud.add_child(map_mode_selector)
+	map_mode_selector.hide()
 	road_tool_selector = OptionButton.new()
 	for tool_name in ["Inspect", "Arterial", "Highway", "Growth corridor", "Rail corridor", "Station site", "Junction", "Interchange", "Widen", "Demolish"]:
 		road_tool_selector.add_item(tool_name)
 	road_tool_selector.item_selected.connect(_on_road_tool_selected)
-	road_controls.add_child(road_tool_selector)
+	hud.add_child(road_tool_selector)
+	road_tool_selector.hide()
+	for index in range(1,road_tool_selector.item_count):
+		var title: String = road_tool_selector.get_item_text(index)
+		hud.add_tool(title,index,"Planning" if index in [3,4,5] else "Roads",Callable(self,"_choose_hud_tool"))
+	hud.slots.Roads.move_child(hud.slots.RoadsTools,0)
 	road_draw_selector = OptionButton.new()
 	for mode_name in [RoadRouteBuilder.STRAIGHT, RoadRouteBuilder.CURVED, RoadRouteBuilder.MULTIPOINT]:
 		road_draw_selector.add_item(mode_name)
@@ -519,11 +521,13 @@ func _build_interface() -> void:
 	road_status_label = Label.new()
 	road_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	road_status_label.clip_text = true
-	road_status_label.add_theme_color_override("font_color", Color("a9c8d8"))
-	road_controls.add_child(road_status_label)
-	crossing_controls = HBoxContainer.new()
+	road_status_label.add_theme_color_override("font_color", Color("667d83"))
+	road_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	road_status_label.custom_minimum_size.y = 36
+	hud.slots.Roads.add_child(road_status_label)
+	crossing_controls = HFlowContainer.new()
 	crossing_controls.visible = false
-	layout.add_child(crossing_controls)
+	hud.slots.Roads.add_child(crossing_controls)
 	var crossing_label := Label.new()
 	crossing_label.text = "Highway crossing"
 	crossing_controls.add_child(crossing_label)
@@ -539,13 +543,13 @@ func _build_interface() -> void:
 	road_impact_label.clip_text = true
 	road_impact_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	crossing_controls.add_child(road_impact_label)
-	toll_controls = HBoxContainer.new()
+	toll_controls = VBoxContainer.new()
 	toll_controls.add_theme_constant_override("separation", 8)
-	layout.add_child(toll_controls)
+	hud.inspector_body.add_child(toll_controls)
 	toll_controls.visible = false
 	toll_label = Label.new()
 	toll_label.text = "Select a road to set directional tolls"
-	toll_label.custom_minimum_size.x = 260
+	toll_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	toll_controls.add_child(toll_label)
 	var forward_label := Label.new()
 	forward_label.text = "Forward toll"
@@ -571,44 +575,13 @@ func _build_interface() -> void:
 	toll_controls.add_child(toll_reverse_input)
 
 	var timeline_panel := PanelContainer.new()
-	timeline_panel.add_theme_stylebox_override("panel", _panel_style(Color("152235"), 0))
-	layout.add_child(timeline_panel)
+	timeline_panel.add_theme_stylebox_override("panel", _panel_style(Color("f7f8f3"), 0))
+	hud.slots.Statistics.add_child(timeline_panel)
 	flow_timeline = FlowTimeline.new()
 	flow_timeline.time_selected.connect(_on_time_selected)
 	timeline_panel.add_child(flow_timeline)
 
-	var content := HBoxContainer.new()
-	content.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	content.add_theme_constant_override("separation", 12)
-	layout.add_child(content)
-
-	var map_panel := PanelContainer.new()
-	map_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	map_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	map_panel.add_theme_stylebox_override("panel", _panel_style(Color("101b2b"), 0))
-	content.add_child(map_panel)
-	map_view = RegionMap.new()
-	map_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	map_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	map_view.neighborhood_selected.connect(_on_neighborhood_selected)
-	map_view.candidate_selected.connect(_on_candidate_selected)
-	map_view.local_street_selected.connect(_on_local_street_selected)
-	map_view.jurisdiction_selected.connect(_on_map_jurisdiction_selected)
-	map_view.road_node_clicked.connect(_on_road_node_clicked)
-	map_view.road_link_clicked.connect(_on_road_link_clicked)
-	map_view.road_empty_clicked.connect(_on_road_empty_clicked)
-	map_view.road_empty_double_clicked.connect(_on_road_empty_double_clicked)
-	map_view.road_cancel_requested.connect(_cancel_road_preview)
-	map_panel.add_child(map_view)
-
-	var inspector_panel := PanelContainer.new()
-	inspector_panel.custom_minimum_size = Vector2(340, 0)
-	inspector_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	inspector_panel.add_theme_stylebox_override("panel", _panel_style(Color("152235"), 16))
-	content.add_child(inspector_panel)
-	var inspector_layout := VBoxContainer.new()
-	inspector_layout.add_theme_constant_override("separation", 8)
-	inspector_panel.add_child(inspector_layout)
+	var inspector_layout: VBoxContainer = hud.inspector_body
 	var inspector_controls_scroll := ScrollContainer.new()
 	inspector_controls_scroll.custom_minimum_size.y = 200
 	inspector_controls_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -621,12 +594,12 @@ func _build_interface() -> void:
 	inspector_controls_scroll.add_child(inspector_controls)
 	flow_detail_label = Label.new()
 	flow_detail_label.add_theme_font_size_override("font_size", 14)
-	flow_detail_label.add_theme_color_override("font_color", Color("f5b67c"))
+	flow_detail_label.add_theme_color_override("font_color", Color("9a661e"))
 	flow_detail_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	flow_detail_label.custom_minimum_size.y = 58
-	inspector_controls.add_child(flow_detail_label)
+	hud.slots.Statistics.add_child(flow_detail_label)
 	flow_detail_separator = HSeparator.new()
-	inspector_controls.add_child(flow_detail_separator)
+	hud.slots.Statistics.add_child(flow_detail_separator)
 	flow_detail_label.visible = false
 	flow_detail_separator.visible = false
 	scope_breadcrumb = RichTextLabel.new()
@@ -636,17 +609,17 @@ func _build_interface() -> void:
 	scope_breadcrumb.meta_clicked.connect(_on_inspector_meta_clicked)
 	inspector_controls.add_child(scope_breadcrumb)
 	fiscal_label = Label.new()
-	fiscal_label.clip_text = true
-	fiscal_label.add_theme_color_override("font_color", Color("93b9ac"))
+	fiscal_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	fiscal_label.add_theme_color_override("font_color", Color("396e60"))
 	inspector_controls.add_child(fiscal_label)
-	zoning_controls = HBoxContainer.new()
+	zoning_controls = VBoxContainer.new()
 	zoning_controls.visible = false
 	inspector_controls.add_child(zoning_controls)
 	zoning_button = Button.new()
 	zoning_button.pressed.connect(_on_zoning_pressed)
 	zoning_controls.add_child(zoning_button)
 	zoning_status_label = Label.new()
-	zoning_status_label.clip_text = true
+	zoning_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	zoning_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	zoning_controls.add_child(zoning_status_label)
 	development_controls = DevelopmentControls.new()
@@ -663,7 +636,8 @@ func _build_interface() -> void:
 	review_queue_label = Label.new()
 	review_queue_label.text = "GROWTH REVIEW · select several to approve"
 	review_queue_label.visible = false
-	inspector_controls.add_child(review_queue_label)
+	hud.slots.Zoning.add_child(review_queue_label)
+	review_queue_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	review_queue = ItemList.new()
 	review_queue.select_mode = ItemList.SELECT_MULTI
 	review_queue.custom_minimum_size.y = 112
@@ -673,12 +647,12 @@ func _build_interface() -> void:
 			var candidate_id: int = int(region.development_candidate_keys.get(review_queue_keys[index], -1))
 			if candidate_id >= 0:
 				_on_candidate_selected(candidate_id))
-	inspector_controls.add_child(review_queue)
+	hud.slots.Zoning.add_child(review_queue)
 	review_approve_button = Button.new()
 	review_approve_button.text = "Approve selected projects"
 	review_approve_button.visible = false
 	review_approve_button.pressed.connect(_approve_review_selection)
-	inspector_controls.add_child(review_approve_button)
+	hud.slots.Zoning.add_child(review_approve_button)
 	growth_policy_controls = VBoxContainer.new()
 	growth_policy_controls.visible = false
 	inspector_controls.add_child(growth_policy_controls)
@@ -728,17 +702,91 @@ func _build_interface() -> void:
 	policy_input.custom_minimum_size.x = 105
 	policy_input.value_changed.connect(_on_policy_changed)
 	jurisdiction_policy_controls.add_child(policy_input)
-	inspector_layout.add_child(HSeparator.new())
+	inspector_controls.add_child(HSeparator.new())
 	inspector = RichTextLabel.new()
 	inspector.bbcode_enabled = true
 	inspector.selection_enabled = true
 	inspector.meta_clicked.connect(_on_inspector_meta_clicked)
-	inspector.autowrap_mode = TextServer.AUTOWRAP_OFF
+	inspector.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	inspector.custom_minimum_size.y = 90
 	inspector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	inspector.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	inspector.fit_content = true
+	inspector.scroll_active = false
 	inspector.add_theme_font_size_override("normal_font_size", 14)
-	inspector_layout.add_child(inspector)
+	inspector_controls.add_child(inspector)
+	hud.inspector_scroll = inspector_controls_scroll
+	toll_controls.reparent(inspector_controls)
+	inspector_controls.move_child(toll_controls,0)
+	_build_hud_map_controls()
+	hud._layout()
+
+
+
+func _build_hud_map_controls() -> void:
+	var navigation := HBoxContainer.new()
+	hud.slots.Map.add_child(navigation)
+	for title in ["−","+","Fit state"]:
+		var button := Button.new()
+		button.text = title
+		button.focus_mode = Control.FOCUS_NONE
+		button.pressed.connect(func():
+			if title=="Fit state": map_view.reset_view()
+			else: map_view.zoom_by(1.6 if title=="+" else .625))
+		navigation.add_child(button)
+	var layers := HFlowContainer.new()
+	hud.slots.Map.add_child(layers)
+	for title in ["Terrain","Slope","Contours","Traffic","Transit"]:
+		var toggle := CheckButton.new()
+		toggle.text = title
+		toggle.focus_mode = Control.FOCUS_NONE
+		toggle.toggled.connect(func(enabled): map_view.set_overlay(title,enabled))
+		layers.add_child(toggle)
+		hud.map_buttons[title] = toggle
+	map_view.overlay_changed.connect(func(title,enabled): hud.map_buttons[title].set_pressed_no_signal(enabled))
+	hud.trips_toggle = CheckButton.new()
+	hud.trips_toggle.text = "Show trips on map"
+	hud.trips_toggle.toggled.connect(func(enabled): _on_map_mode_selected(1 if enabled else 0))
+	hud.slots.Statistics.add_child(hud.trips_toggle)
+	hud.slots.Statistics.move_child(hud.trips_toggle,2)
+	var zoning_hint := Label.new()
+	zoning_hint.text = "Amber: proposed · Green: approved. Select a district to review its plan."
+	zoning_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hud.slots.Zoning.add_child(zoning_hint)
+	hud.slots.Zoning.move_child(zoning_hint,0)
+
+
+func _on_hud_section(value: String) -> void:
+	_on_map_mode_selected(2 if value=="Zoning" else 0)
+	_on_road_tool_selected(0)
+	if value=="Roads": _on_road_tool_selected(1)
+	elif value=="Planning": _on_road_tool_selected(3)
+	elif value=="Statistics": hud.hide_inspector()
+
+
+func _choose_hud_tool(index: int) -> void:
+	hud.select_section("Planning" if index in [3,4,5] else "Roads",false)
+	_on_map_mode_selected(0)
+	_on_road_tool_selected(index)
+
+
+func _dismiss_hud() -> void:
+	if development_controls.zoning_popup.visible:
+		development_controls.zoning_popup.hide()
+	elif road_start_node!=-1 or road_start_position.is_finite() or planning_has_start or not pending_road_preview.is_empty():
+		_cancel_road_preview()
+	elif not hud.section.is_empty():
+		hud.select_section("")
+	elif hud.inspector_panel.visible:
+		hud.hide_inspector()
+	else:
+		hud.select_section("Menu")
+
+
+func _compact_count(value: int) -> String:
+	if absi(value)>=1000000000: return "%.1fB" % (float(value)/1000000000.0)
+	if absi(value)>=1000000: return "%.1fM" % (float(value)/1000000.0)
+	if absi(value)>=10000: return "%.0fk" % (float(value)/1000.0)
+	return _format_count(value)
 
 
 func _panel_style(color: Color, padding: int) -> StyleBoxFlat:
@@ -885,6 +933,7 @@ func _on_tax_changed(value: float) -> void:
 
 
 func _on_jurisdiction_selected(area_id: int) -> void:
+	hud.show_inspector()
 	if region == null or area_id < 0 or area_id >= region.jurisdictions.size():
 		return
 	map_view.selected_local_street = Vector2i(-1, -1)
@@ -936,6 +985,7 @@ func _on_jurisdiction_selected(area_id: int) -> void:
 		_on_neighborhood_selected(area.neighborhood_ids[0])
 	else:
 		_show_jurisdiction_inspector()
+	_refresh_review_queue()
 
 
 func _on_policy_selected(index: int) -> void:
@@ -1002,6 +1052,10 @@ func _refresh_fiscal_controls() -> void:
 		area.name, _format_count(totals["population"]), _format_count(totals["jobs"]), available_text, _format_count(region.reserved_development_funds(area.id)),
 		_format_count(roundi(income)), _format_count(roundi(property)),
 		_format_count(roundi(sales)), _format_count(roundi(fees)), _format_count(roundi(grants)), _format_count(roundi(transfers)), _format_count(roundi(upkeep))]
+	hud.population_label.text = "%s people" % _compact_count(int(totals.population))
+	hud.population_label.tooltip_text = "%s • %s people" % [area.name,_format_count(int(totals.population))]
+	hud.funds_button.text = "$%s" % ("∞" if region.dev_mode else _compact_count(roundi(balance)))
+	hud.funds_button.tooltip_text = fiscal_label.tooltip_text
 	if area.kind == "Region":
 		fiscal_label.tooltip_text += "\nOther local treasuries $%s" % _format_count(roundi(child_balance))
 
@@ -1039,7 +1093,7 @@ func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
 	var totals: Dictionary = region.get_jurisdiction_totals(area.id)
 	var lines := PackedStringArray()
 	lines.append("[font_size=22][b]%s[/b][/font_size]" % area.name)
-	lines.append("[color=#91abc0]%s[/color]" % area.kind)
+	lines.append("[color=#667d83]%s[/color]" % area.kind)
 	if area.kind == "City":
 		lines.append("Development: %s" % region.city_development_state(area.id))
 	if area.kind in ["State", "Region", "County", "City"]:
@@ -1058,11 +1112,11 @@ func _show_jurisdiction_inspector(reset_scroll: bool = true) -> void:
 		var child_kind: String = region.jurisdictions[visible_children[0]].kind
 		var child_heading: String = {"County": "COUNTIES", "City": "CITIES"}.get(child_kind, child_kind.to_upper() + "S")
 		lines.append("")
-		lines.append("[color=#78c8dc][b]%s · CLICK A NAME TO OPEN[/b][/color]" % child_heading)
+		lines.append("[color=#287b88][b]%s · CLICK A NAME TO OPEN[/b][/color]" % child_heading)
 		for child_id in visible_children:
 			var child = region.jurisdictions[child_id]
 			var child_totals: Dictionary = region.get_jurisdiction_totals(child_id)
-			lines.append("[url=jurisdiction:%d][color=#9bd3ef]%s[/color][/url]" % [child_id, child.name])
+			lines.append("[url=jurisdiction:%d][color=#287b88]%s[/color][/url]" % [child_id, child.name])
 			lines.append("  %s people  •  %s jobs" % [_format_count(child_totals["population"]), _format_count(child_totals["jobs"])])
 	var previous_scroll: float = inspector.get_v_scroll_bar().value
 	inspector.text = "\n".join(lines)
@@ -1181,7 +1235,7 @@ func _apply_generated_region(result: Dictionary) -> void:
 	var errors: PackedStringArray = result["errors"]
 	if not errors.is_empty():
 		push_error("Invalid generated region: " + "; ".join(errors))
-		inspector.text = "[color=#ff8c8c]Region generation failed validation.[/color]"
+		inspector.text = "[color=#b13f3f]Region generation failed validation.[/color]"
 		return
 	next_day_profile = null
 	road_preview_serial+=1
@@ -1212,6 +1266,8 @@ func _apply_generated_region(result: Dictionary) -> void:
 	flow_timeline.set_purpose(flow_purpose)
 	_refresh_region_summary()
 	_on_jurisdiction_selected(0)
+	hud.select_section("",false)
+	hud.hide_inspector()
 	_sync_clock_view()
 	playing = true
 	play_button.text = "Pause"
@@ -1523,6 +1579,7 @@ func _sync_clock_view() -> void:
 		_format_count(roundi(flow_profile.get_interpolated_hourly_total(hour, fraction, FlowProfile.COMMERCIAL, next_day_profile))),
 		_format_count(roundi(flow_profile.get_interpolated_hourly_total(hour, fraction, FlowProfile.SOCIAL, next_day_profile))),
 	]
+	calendar_label.tooltip_text = calendar_label.text
 	flow_timeline.set_time(hour, fraction)
 	flow_timeline.set_clock_time(calendar_clock.get_hour(), calendar_clock.get_hour_fraction())
 	flow_timeline.set_weekend(weekend)
@@ -1605,6 +1662,7 @@ func _update_flow_detail() -> void:
 
 
 func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) -> void:
+	if reset_scroll: hud.show_inspector()
 	map_view.selected_local_street = Vector2i(-1, -1)
 	selected_candidate_id = -1
 	selected_candidate_key = ""
@@ -1639,13 +1697,13 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	var share_of_jobs: float = 100.0 * access / maxf(1.0, float(region_totals["jobs"]))
 	var text_lines := PackedStringArray()
 	text_lines.append("[font_size=22][b]%s[/b][/font_size]" % neighborhood.name)
-	text_lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(neighborhood.city_id), neighborhood.land_area_ha])
-	text_lines.append("[color=#91abc0]Developable area: %.0f ha[/color]" % neighborhood.developable_area_ha)
+	text_lines.append("[color=#667d83]%s City  •  %.0f ha[/color]" % [region.get_city_name(neighborhood.city_id), neighborhood.land_area_ha])
+	text_lines.append("[color=#667d83]Developable area: %.0f ha[/color]" % neighborhood.developable_area_ha)
 	if neighborhood.development_plan != null:
 		text_lines.append("[url=development:%d]Manage development budget and zoning[/url]" % neighborhood_id)
 		text_lines.append("Plan: %s • Phase %d/3 • Reserved $%d" % [neighborhood.development_plan.status, neighborhood.development_plan.completed_phase, neighborhood.development_plan.reserved])
 	text_lines.append("")
-	text_lines.append("[color=#78c8dc][b]NEIGHBORHOOD[/b][/color]")
+	text_lines.append("[color=#287b88][b]NEIGHBORHOOD[/b][/color]")
 	text_lines.append("Development: %s" % neighborhood.development_state)
 	if not neighborhood.character_profile.is_empty():
 		text_lines.append("Character: %s" % neighborhood.character_profile)
@@ -1673,29 +1731,29 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 	text_lines.append("Jobs: %s / %s capacity" % [_format_count(neighborhood.jobs), _format_count(neighborhood.job_capacity)])
 	text_lines.append("Retail jobs: %s" % _format_count(roundi(neighborhood.shopping_attraction)))
 	text_lines.append("")
-	text_lines.append("[color=#78c8dc][b]HOUSING & WEALTH[/b][/color]")
+	text_lines.append("[color=#287b88][b]HOUSING & WEALTH[/b][/color]")
 	text_lines.append("Rent: $%s/mo" % _format_count(neighborhood.monthly_rent))
 	text_lines.append("Income: $%s/mo" % _format_count(neighborhood.average_monthly_income))
 	text_lines.append("After income tax: $%s/mo" % _format_count(roundi(FiscalCalculator.after_income_tax(region, neighborhood))))
 	text_lines.append("Property tax in housing cost: $%s/mo" % _format_count(roundi(FiscalCalculator.property_cost_monthly(region, neighborhood))))
 	text_lines.append("Wealth: $%s/household" % _format_count(roundi(neighborhood.average_household_wealth)))
 	text_lines.append("")
-	text_lines.append("[color=#78c8dc][b]DESIRABILITY[/b][/color]")
+	text_lines.append("[color=#287b88][b]DESIRABILITY[/b][/color]")
 	text_lines.append("Desirability: %.1f / 100" % neighborhood.desirability)
 	text_lines.append("Job access: [b]%s[/b]" % _format_count(roundi(access)))
 	text_lines.append("Travel-weighted: %.1f%% of jobs" % share_of_jobs)
-	text_lines.append("[color=#91abc0]Rent • wealth • vacancy • tax[/color]")
-	text_lines.append("[color=#91abc0]Access • local amenities[/color]")
+	text_lines.append("[color=#667d83]Rent • wealth • vacancy • tax[/color]")
+	text_lines.append("[color=#667d83]Access • local amenities[/color]")
 	text_lines.append("")
-	text_lines.append("[color=#78c8dc][b]ZONING · SHARE / DENSITY[/b][/color]")
+	text_lines.append("[color=#287b88][b]ZONING · SHARE / DENSITY[/b][/color]")
 	for zone in RegionData.ZONE_TYPES:
 		text_lines.append("%s: %d%% / %s" % [zone, neighborhood.zone_shares[zone], RegionData.DENSITY_NAMES[neighborhood.zone_density[zone]]])
 	text_lines.append("")
-	text_lines.append("[color=#78c8dc][b]JOBS BY SKILL[/b][/color]")
+	text_lines.append("[color=#287b88][b]JOBS BY SKILL[/b][/color]")
 	for skill in ["Entry", "Skilled", "Professional"]:
 		text_lines.append("%s: %s" % [skill, _format_count(neighborhood.jobs_by_skill[skill])])
 	text_lines.append("")
-	text_lines.append("[color=#78c8dc][b]TRAVEL TIMES[/b][/color]")
+	text_lines.append("[color=#287b88][b]TRAVEL TIMES[/b][/color]")
 	var travel_order: Array[int] = []
 	if region.is_large_scale:
 		# Keep the inspector bounded at state scale. Nearby destinations are the useful ones.
@@ -1720,7 +1778,7 @@ func _on_neighborhood_selected(neighborhood_id: int, reset_scroll: bool = true) 
 		else:
 			text_lines.append("%s: %.1f min" % [region.neighborhoods[id].name, minutes])
 	text_lines.append("")
-	text_lines.append("[color=#78c8dc][b]%s CITY TOTAL[/b][/color]" % region.get_city_name(neighborhood.city_id).to_upper())
+	text_lines.append("[color=#287b88][b]%s CITY TOTAL[/b][/color]" % region.get_city_name(neighborhood.city_id).to_upper())
 	text_lines.append("Population: %s" % _format_count(city_totals["population"]))
 	text_lines.append("Jobs: %s" % _format_count(city_totals["jobs"]))
 	var previous_scroll: float = inspector.get_v_scroll_bar().value
@@ -1799,7 +1857,7 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 	_request_development_preparation(candidate)
 	var lines := PackedStringArray()
 	lines.append("[font_size=22][b]Connected growth proposal[/b][/font_size]")
-	lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(city_id), hectares])
+	lines.append("[color=#667d83]%s City  •  %.0f ha[/color]" % [region.get_city_name(city_id), hectares])
 	lines.append("Distance to city center: %.1f km" % distance)
 	lines.append("Zoning: %s" % ("Approved" if approved else "Awaiting approval"))
 	lines.append("Preview streets: %d segments  •  Full cost: $%d" % [candidate["layout"].edges.size(), candidate["layout"].total_cost()])
@@ -1817,13 +1875,13 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 			lines.append("Reserved $%d • Spent $%d" % [plan.reserved, plan.spent])
 			lines.append("Remaining construction $%d" % DevelopmentBudget.remaining_cost(neighborhood))
 		lines.append("")
-		lines.append("[color=#78c8dc][b]CURRENT LAND USE · SHARE / DENSITY[/b][/color]")
+		lines.append("[color=#287b88][b]CURRENT LAND USE · SHARE / DENSITY[/b][/color]")
 		for zone in RegionData.ZONE_TYPES:
 			lines.append("%s: %d%% / %s" % [zone, neighborhood.zone_shares[zone], RegionData.DENSITY_NAMES[neighborhood.zone_density[zone]]])
 	else:
 		var defaults: Dictionary = RegionGenerator.zone_defaults(region, city_id, candidate["grid"])
 		lines.append("")
-		lines.append("[color=#78c8dc][b]DEFAULT LAND USE · SHARE / DENSITY[/b][/color]")
+		lines.append("[color=#287b88][b]DEFAULT LAND USE · SHARE / DENSITY[/b][/color]")
 		for zone in RegionData.ZONE_TYPES:
 			lines.append("%s: %d%% / %s" % [zone, defaults["shares"][zone], RegionData.DENSITY_NAMES[defaults["density"][zone]]])
 	lines.append("")
@@ -1934,15 +1992,20 @@ func _on_development_zoning(neighborhood_id: int, shares: Dictionary, density: D
 
 
 func _on_map_mode_selected(index: int) -> void:
+	map_mode_selector.select(index)
+	if index==2: hud.select_section("Zoning",false)
+	elif index==1: hud.select_section("Statistics",false)
+	elif hud.section=="Zoning": hud.select_section("",false)
+	hud.trips_toggle.set_pressed_no_signal(index==1)
 	map_view.set_map_mode(["Roads", "Trips", "Zoning"][index])
-	road_tool_selector.visible = index == 0
+	road_tool_selector.visible = false
 	road_draw_selector.visible = index == 0 and road_tool_selector.get_item_text(road_tool_selector.selected) in ["Arterial", "Highway"]
 	road_snap_toggle.visible = road_draw_selector.visible
 	road_length_snap_toggle.visible = road_draw_selector.visible
 	road_build_button.visible = index == 0
 	road_cancel_button.visible = index == 0
-	flow_detail_label.visible = index == 1
-	flow_detail_separator.visible = index == 1
+	flow_detail_label.visible = hud.section == "Statistics"
+	flow_detail_separator.visible = hud.section == "Statistics"
 	_cancel_road_preview()
 	if index != 0:
 		map_view.selected_local_street = Vector2i(-1, -1)
@@ -2012,6 +2075,10 @@ func _on_map_jurisdiction_selected(area_id: int) -> void:
 
 
 func _on_road_tool_selected(index: int) -> void:
+	road_tool_selector.select(index)
+	hud.mark_tool(index)
+	var status_parent: Control = hud.slots.Planning if index in [3,4,5] else hud.slots.Roads
+	if road_status_label.get_parent()!=status_parent: road_status_label.reparent(status_parent)
 	map_view.set_road_tool(road_tool_selector.get_item_text(index))
 	road_draw_selector.visible = road_tool_selector.get_item_text(index) in ["Arterial", "Highway"]
 	road_snap_toggle.visible = road_draw_selector.visible
@@ -2120,6 +2187,7 @@ func _on_road_node_clicked(node_id: int) -> void:
 				_on_neighborhood_selected(node.neighborhood_id)
 			else:
 				selected_road_link_id = -1
+				hud.show_inspector()
 				inspector.text = "[font_size=21][b]%s[/b][/font_size]\n\nNode %d  •  %.1f, %.1f km\nHighway access: %s" % [node.display_name(), node_id, node.position_km.x, node.position_km.y, "yes" if node.is_interchange else "no"]
 	_update_road_status()
 
@@ -2150,6 +2218,7 @@ func _on_road_link_clicked(link_id: int, world_position: Vector2) -> void:
 		_update_road_status()
 		return
 	if tool_name != "Junction":
+		hud.show_inspector()
 		map_view.selected_local_street = Vector2i(-1, -1)
 		selected_road_link_id = link_id
 		_refresh_toll_controls()
@@ -2645,7 +2714,7 @@ func _show_road_inspector(link_id: int) -> void:
 	var link = region.road_links[index]
 	var road_metrics: Dictionary = map_view.get_road_traffic_metrics(index, link)
 	if road_metrics.is_empty():
-		inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#78c8dc]Directional road traffic for this time is still uncalculated.[/color]\nThe chart shows scheduled trip demand." % [
+		inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#287b88]Directional road traffic for this time is still uncalculated.[/color]\nThe chart shows scheduled trip demand." % [
 			link.road_class, link.id, link.length_km, link.lanes_per_direction,
 			region.jurisdictions[link.owner_jurisdiction_id].name, link.toll_forward, link.toll_reverse]
 		return
@@ -2659,7 +2728,7 @@ func _show_road_inspector(link_id: int) -> void:
 	for project in region.road_projects:
 		if project.target_link_id == link_id:
 			project_text += "\n%s: %d days left" % [project.kind, project.days_remaining(_current_day_key())]
-	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#78c8dc][b]%s[/b][/color]\nForward demand: %s vehicles/h (%.0f%%)\nReverse demand: %s vehicles/h (%.0f%%)\nForward flow: %s vehicles/h\nReverse flow: %s vehicles/h\nForward queue: %s vehicles\nReverse queue: %s vehicles\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
+	inspector.text = "[font_size=22][b]%s %d[/b][/font_size]\n\nLength: %.1f km\nLanes: %d each direction\nCapacity: %s vehicles/h each way\nOwner: %s\nToll: $%.2f forward / $%.2f reverse\n\n[color=#287b88][b]%s[/b][/color]\nForward demand: %s vehicles/h (%.0f%%)\nReverse demand: %s vehicles/h (%.0f%%)\nForward flow: %s vehicles/h\nReverse flow: %s vehicles/h\nForward queue: %s vehicles\nReverse queue: %s vehicles\nTime: %.1f / %.1f min\nFree flow: %.1f min\n\nUpkeep: $%s/day%s" % [
 		link.road_class, link.id, link.length_km, link.lanes_per_direction, _format_count(roundi(capacity)),
 		region.jurisdictions[link.owner_jurisdiction_id].name, link.toll_forward, link.toll_reverse,
 		sample_label,

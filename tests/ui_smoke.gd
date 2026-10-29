@@ -14,7 +14,7 @@ func _run_checks() -> void:
 	main._on_play_pressed()
 	await process_frame
 	_check(main.region.region_ids.size() == 4 and main.region.county_ids.size() == 8 and main.region.cities.size() == 32 and main.region.neighborhoods.size() == 62, "main scene must generate the state hierarchy")
-	_check(main.flow_timeline.size.x > 0 and main.map_view.size.y > 0, "timeline and map must be visible")
+	_check(main.map_view.size == main.size and not main.flow_timeline.is_visible_in_tree() and not main.hud.inspector_panel.visible, "map must fill the window with analysis and inspector initially closed")
 	_check(main.selected_jurisdiction_id == 0 and main.map_view.detail_level == "Neighborhood" and main.inspector.text.contains("REGIONS"), "the full map must start with the state inspector")
 	_check(main.state_tax_controls.visible and not main.jurisdiction_policy_controls.visible and not main.toll_controls.visible and not main.flow_detail_label.visible, "only controls for the selected scope and map mode should be visible")
 	_check(main.purpose_selector.item_count == 4 and main.purpose_selector.get_item_text(3) == "Social", "purpose filter must retain all trip types")
@@ -35,6 +35,7 @@ func _run_checks() -> void:
 	var distant_neighborhood = main.region.neighborhoods[-1]
 	_check(main.map_view._hit_test(main.map_view._world_to_screen(distant_neighborhood.position_km)) == distant_neighborhood.id, "selecting a region must leave distant neighborhoods visible and clickable")
 	var current_time: int = main.calendar_clock.unix_seconds
+	main.hud.select_section("Statistics")
 	main.flow_timeline.time_selected.emit(17, 30)
 	_check(main.calendar_clock.unix_seconds == current_time and not main.playing and main.inspected_hour == 17 and main.calendar_label.text.contains("forecast"), "chart scrubbing must inspect future demand without advancing the clock")
 	main._on_play_pressed()

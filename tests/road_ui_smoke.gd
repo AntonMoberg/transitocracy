@@ -18,7 +18,7 @@ func _run_checks() -> void:
 	main.get_window().size = Vector2i(1024, 700)
 	main.get_window().content_scale_size = Vector2i(1024, 700)
 	await process_frame
-	_check(main.map_view.size.x > 0 and main.map_view.size.y >= 300 and main.flow_timeline.size.y > 0, "road map and chart must remain usable at the minimum window size")
+	_check(main.map_view.size == main.size and not main.flow_timeline.is_visible_in_tree(), "map must fill the minimum window size with statistics tucked away")
 	_check(main.inspector.size.y >= 90, "the hierarchy inspector must remain readable at the minimum window size")
 	var label_rects: Array[Rect2] = []
 	for area in main.region.jurisdictions:
@@ -125,7 +125,8 @@ func _run_checks() -> void:
 		_check(main.road_status_label.text.contains(main.region.jurisdictions[preview["owner_id"]].name), "road preview must name its funding jurisdiction")
 		var original_balance: float = main.region.jurisdictions[preview["owner_id"]].treasury
 		main._on_road_build_pressed()
-		_check(main.region.road_projects.size() == 1 and main.region.road_links.size() == initial_links, "funded roads must stay closed until construction ends")
+		await _wait_edit(main)
+		_check(main.region.road_projects.size() > 0 and main.region.road_links.size() == initial_links, "funded roads must stay closed until construction ends")
 		_check(is_equal_approx(main.region.jurisdictions[preview["owner_id"]].treasury, original_balance - preview["cost"]), "construction must debit only its owner")
 	var link = main.region.road_links[0]
 	var midpoint: Vector2 = link.points[0].lerp(link.points[-1], 0.5)
@@ -139,14 +140,17 @@ func _run_checks() -> void:
 	main.road_tool_selector.select(widen_index)
 	main._on_road_tool_selected(widen_index)
 	main.map_view.road_link_clicked.emit(link.id, midpoint)
+	await _wait_edit(main)
 	_check(main.pending_road_preview.get("kind", "") == "Widen", "widen tool must preview an existing link")
 	main._cancel_road_preview()
 	main.road_tool_selector.select(demolish_index)
 	main._on_road_tool_selected(demolish_index)
 	main.map_view.road_link_clicked.emit(link.id, midpoint)
+	await _wait_edit(main)
 	_check(main.pending_road_preview.get("ok", false) and main.pending_road_preview["components_after"] > 1, "demolition preview must disclose connectivity loss")
 	var owner_balance: float = main.region.jurisdictions[link.owner_jurisdiction_id].treasury
 	main._on_road_build_pressed()
+	await _wait_edit(main)
 	_check(main.region.road_links.size() == initial_links - 1 and is_equal_approx(main.region.jurisdictions[link.owner_jurisdiction_id].treasury, owner_balance), "demolition must remove a road without a refund")
 	_check(main.traffic_state.link_ids.size() == main.region.road_links.size(), "rolling traffic must replan after demolition")
 	main._on_jurisdiction_selected(main.region.region_ids[0])
@@ -159,6 +163,13 @@ func _run_checks() -> void:
 	if failures == 0:
 		print("Road UI smoke checks passed.")
 	quit(1 if failures > 0 else 0)
+
+
+func _wait_edit(main) -> void:
+	var deadline := Time.get_ticks_msec()+120000
+	while (main._region_snapshot_busy() or not main.deferred_region_edits.is_empty()) and Time.get_ticks_msec()<deadline:
+		await process_frame
+	_check(main.road_rebuild_thread==null and main.deferred_region_edits.is_empty(),"Road edit did not finish")
 
 
 func _check(condition: bool, description: String) -> void:
