@@ -14,6 +14,7 @@ const RoadLand = preload("res://scripts/simulation/road_land.gd")
 const Character = preload("res://scripts/simulation/neighborhood_character.gd")
 const GraphGrowth = preload("res://scripts/simulation/graph_growth_planner.gd")
 const UrbanGraph = preload("res://scripts/simulation/urban_street_graph.gd")
+const GridFamily = preload("res://scripts/simulation/grid_family_layout.gd")
 
 
 static func refresh_candidates(region, changed_city_ids: Array[int] = []) -> void:
@@ -107,7 +108,7 @@ static func _register_candidate(region, layout, neighborhood_id: int, frontage_i
 		var defaults: Dictionary = RegionGenerator.zone_defaults(region, layout.city_id, grid)
 		character_profile = Character.resolve(region, layout.city_id, area.center_km, layout.interior_style, defaults["shares"], defaults["density"])
 	_index_candidate(region, {"id": candidate_id, "key": layout.key, "city_id": layout.city_id, "grid": grid, "polygon": layout.polygon, "center_km": area.center_km, "frontage_link_id": frontage_id, "neighborhood_id": neighborhood_id, "layout": layout, "character_override": Character.AUTO, "character_profile": character_profile})
-	region.development_candidates[-1]["claims_stamp"] = hash([region.road_geometry_revision, region.urban_sector_claims, region.urban_block_claims])
+	region.development_candidates[-1]["claims_stamp"] = hash([GridFamily.POLICY_VERSION, region.road_geometry_revision, region.urban_sector_claims, region.urban_block_claims])
 
 
 static func _index_candidate(region, candidate: Dictionary) -> void:
@@ -247,7 +248,7 @@ static func planning_stamp(region) -> int:
 	for candidate in region.development_candidates:
 		if int(candidate.neighborhood_id) < 0:
 			designs.append([candidate.key, candidate.get("design_variant", 0), candidate.get("character_override", "Auto")])
-	return hash([region.generation_seed, region.terrain.get_instance_id() if region.terrain != null else 0, region.road_geometry_revision, region.neighborhoods.size(), region.urban_sector_claims, region.urban_block_claims, region.urban_corridors, region.rail_reservations, region.station_sites, policies, designs])
+	return hash([GridFamily.POLICY_VERSION, region.generation_seed, region.terrain.get_instance_id() if region.terrain != null else 0, region.road_geometry_revision, region.neighborhoods.size(), region.urban_sector_claims, region.urban_block_claims, region.urban_corridors, region.rail_reservations, region.station_sites, policies, designs])
 
 
 static func preparation_stamp(region, candidate: Dictionary, shares: Dictionary, density: Dictionary) -> int:
@@ -268,7 +269,7 @@ static func ensure_candidate(region, candidate_id: int) -> bool:
 	if candidate_id < 0 or candidate_id >= region.development_candidates.size(): return false
 	var candidate: Dictionary = region.development_candidates[candidate_id]
 	if int(candidate.neighborhood_id) >= 0 or not candidate.has("urban_sector"): return true
-	var stamp := hash([region.road_geometry_revision, region.urban_sector_claims, region.urban_block_claims])
+	var stamp := hash([GridFamily.POLICY_VERSION, region.road_geometry_revision, region.urban_sector_claims, region.urban_block_claims])
 	if candidate.get("claims_stamp", -1) == stamp: return true
 	if region.urban_sector_claims.has(UrbanGraph.sector_key(candidate.city_id, candidate.urban_sector)): return false
 	var generated := UrbanGraph.make_layout(region, candidate.city_id, candidate.urban_sector, int(candidate.get("design_variant", 0)))

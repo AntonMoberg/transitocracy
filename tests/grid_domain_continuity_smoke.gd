@@ -17,33 +17,63 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	if not _around_arterial_bend():
+		return
 	var region = _region()
+	var square := PackedVector2Array([Vector2.ZERO,Vector2.RIGHT,Vector2.ONE,Vector2.DOWN])
+	if not GridFamily._physical_frontage(Vector2(-1,0),Vector2(2,0),square):
+		_fail("A road following the district boundary lost its real frontage.")
+		return
+	var original_road: PackedVector2Array = region.road_links[0].points
+	region.road_links[0].points = PackedVector2Array([Vector2(-1,-1),Vector2.ZERO])
+	region.road_geometry_revision += 1
+	if not GridFamily.separating_chart(region,0,square,region.cities[0].street_plan).is_empty():
+		_fail("A road ending at one corner seeded a grid along its imaginary extension.")
+		return
+	region.road_links[0].points = original_road
+	region.road_geometry_revision += 1
+	# The road cuts a small city-facing corner off a narrow district. The
+	# 106 m corner is genuine frontage, even though it is under 270 m deep.
+	var narrow := PackedVector2Array([Vector2(0,-1),Vector2(.3,-1),Vector2(.3,-.65),Vector2(0,-.65)])
+	var neighboring := PackedVector2Array([Vector2(.3,-1),Vector2(1.28,-1),Vector2(1.28,0),Vector2(.3,0)])
+	var narrow_chart := GridFamily.separating_chart(region,0,narrow,region.cities[0].street_plan)
+	var neighbor_chart := GridFamily.separating_chart(region,0,neighboring,region.cities[0].street_plan)
+	if narrow_chart.is_empty() or neighbor_chart.is_empty() or narrow_chart.key != neighbor_chart.key or narrow_chart.uniform_far:
+		_fail("A real road crossing at a shallow corner lost the neighboring district's rotated grid.")
+		return
+	var narrow_layout = Layout.new()
+	narrow_layout.city_id = 0
+	narrow_layout.polygon = narrow
+	narrow_layout.bounds = Geography._bounds(narrow)
+	GridFamily.fill(narrow_layout, region.cities[0].street_plan, narrow_chart, 0, {}, region.generation_seed)
+	var near_axis: Vector2 = GridFamily._chart_at(narrow_layout, Vector2(.02,-.68), region.cities[0].street_plan).axis
+	var far_axis: Vector2 = GridFamily._chart_at(narrow_layout, Vector2(.25,-.9), region.cities[0].street_plan).axis
+	if narrow_layout.grid_families.size() != 2 or absf(near_axis.dot(Vector2.RIGHT)) < .999 or absf(far_axis.dot(neighbor_chart.axis)) < .999:
+		_fail("A shallow crossing did not keep the city-facing corner regular and the far side aligned with its neighbor.")
+		return
 	var middle = UrbanGraph.make_layout(region, 0, Vector2i.ZERO)["layout"]
 	var right_before = UrbanGraph.make_layout(region, 0, Vector2i.RIGHT)["layout"]
-	if middle.grid_families.size() != 2 or right_before.grid_families.size() != 1:
-		_fail("The arterial did not establish a chart across the middle and right districts.")
+	if middle.grid_families.size() != 2 or not right_before.grid_families.is_empty():
+		_fail("Only the district with real arterial frontage should establish a new rotated chart.")
 		return
 	var domain_key: String = middle.grid_families[1]["key"]
-	if right_before.grid_families[0]["key"] != domain_key:
-		_fail("The right district did not know its arterial-side direction before middle was approved.")
-		return
 	_attach(region, middle, Vector2i.ZERO)
 	var right = UrbanGraph.make_layout(region, 0, Vector2i.RIGHT)["layout"]
 	var left = UrbanGraph.make_layout(region, 0, Vector2i.LEFT)["layout"]
 	if right.grid_families.size() != 1 or right.grid_families[0]["key"] != domain_key:
 		_fail("A differently aligned district below overrode the middle district's rotated side.")
 		return
-	if not left.grid_families.is_empty() and left.grid_families[-1].get("key", "") == domain_key:
+	if left.grid_families.size()==1 and left.grid_families[0].get("key", "") == domain_key:
 		_fail("A district on the city-facing side rotated without a visible boundary.")
 		return
 	if _shared_nodes(middle, right) < 2:
 		_fail("The middle and right districts did not share continuing street junctions.")
 		return
 	var far = UrbanGraph.make_layout(region, 0, Vector2i(8, 0))["layout"]
-	if far.grid_families.size() != 1 or far.grid_families[0]["key"] != domain_key:
-		_fail("The arterial-side chart stopped at an arbitrary projection distance.")
+	if not far.grid_families.is_empty():
+		_fail("A distant district rotated without physical road frontage or contiguous approved fabric.")
 		return
-	for layout in [middle, right, far]:
+	for layout in [narrow_layout, middle, right, far]:
 		var covered := 0.0
 		for block in layout.blocks:
 			covered += Geography.polygon_area(block["polygon"])
@@ -67,8 +97,8 @@ func _run() -> void:
 	var right_first = UrbanGraph.make_layout(reverse, 0, Vector2i.RIGHT)["layout"]
 	_attach(reverse, right_first, Vector2i.RIGHT)
 	var middle_second = UrbanGraph.make_layout(reverse, 0, Vector2i.ZERO)["layout"]
-	if right_first.grid_families[0]["key"] != domain_key or middle_second.grid_families[1]["key"] != domain_key or _shared_nodes(right_first, middle_second) < 2:
-		_fail("Approval order changed the arterial-side grid or its shared junctions.")
+	if not right_first.grid_families.is_empty() or middle_second.grid_families.size()!=2:
+		_fail("An unanchored district rotated, or a later anchored district lost its arterial boundary.")
 		return
 	var adjacent = _region()
 	var approved_middle = UrbanGraph.make_layout(adjacent, 0, Vector2i.ZERO)["layout"]
@@ -88,7 +118,7 @@ func _run() -> void:
 	intervening.road_class = Roads.HIGHWAY
 	intervening.points = PackedVector2Array([Vector2(2.0, -3.0), Vector2(2.0, 3.0)])
 	adjacent.road_links.append(intervening)
-	if GridFamily._corridor_reaches_outline(adjacent, 0, 0, Vector2(-1.0, -2.0), Vector2(1.5, 0.5), farther_outline, -1.0):
+	if GridFamily._corridor_reaches_outline(adjacent, 0, 0, Vector2(-1.0, -1.8), Vector2(1.5, .7), farther_outline, -1.0):
 		_fail("The regression did not block the arbitrary arterial reach ray.")
 		return
 	var inherited = UrbanGraph.make_layout(adjacent, 0, farther_sector)["layout"]
@@ -112,8 +142,72 @@ func _run() -> void:
 	if not isolated.grid_families.is_empty():
 		_fail("An angled grid crossed rail on the shared district edge.")
 		return
-	print("Grid directions persist by arterial side across approvals and conflicting neighboring grids.")
+	# A claimed legacy district with the same chart ID, separated by empty
+	# land, must not become a new source of diagonal grids.
+	var floating = approved_right.copy()
+	floating.polygon = UrbanGraph.sector_outline(adjacent.cities[0].street_plan,Vector2i(8,0),adjacent,0)
+	floating.bounds = Geography._bounds(floating.polygon)
+	_attach(adjacent,floating,Vector2i(8,0))
+	var beyond_floating = UrbanGraph.make_layout(adjacent,0,Vector2i(9,0)).layout
+	if not beyond_floating.grid_families.is_empty():
+		_fail("An unanchored legacy grid propagated across more empty land.")
+		return
+	adjacent.road_links.clear()
+	adjacent.rail_reservations.clear()
+	adjacent.road_geometry_revision += 1
+	if not UrbanGraph.make_layout(adjacent,0,farther_sector).layout.grid_families.is_empty():
+		_fail("Removing the source arterial left its old chart able to seed new districts.")
+		return
+	print("Rotated grids require physical arterial frontage or contiguous road-anchored neighbors.")
 	quit(0)
+
+
+func _around_arterial_bend() -> bool:
+	var region = _region()
+	region.urban_sector_claims.erase("0:1:-1")
+	# The diagonal approaches the next district, then turns north just west
+	# of it. Its imaginary diagonal extension cuts that district, but the
+	# actual road leaves an open shared edge with the approved rotated grid.
+	region.road_links[0].points = PackedVector2Array([Vector2(-1,-1.8),Vector2(1.2,.4),Vector2(1.2,2.5)])
+	region.road_geometry_revision += 1
+	var root = UrbanGraph.make_layout(region,0,Vector2i.ZERO).layout
+	_attach(region,root,Vector2i.ZERO)
+	var neighbor = UrbanGraph.make_layout(region,0,Vector2i.RIGHT).layout
+	_attach(region,neighbor,Vector2i.RIGHT)
+	var continued = UrbanGraph.make_layout(region,0,Vector2i(1,-1)).layout
+	if neighbor.grid_families.size()!=1 or continued.grid_families.size()!=1 or continued.grid_families[0].key!=neighbor.grid_families[0].key or _shared_nodes(neighbor,continued)<2:
+		_fail("A rotated grid reverted across an open approved frontage beyond the arterial's bend.")
+		return false
+	var covered := 0.0
+	for block in continued.blocks:
+		covered += Geography.polygon_area(block.polygon)
+	if absf(covered-Geography.polygon_area(continued.polygon)) > Geography.polygon_area(continued.polygon)*.001:
+		_fail("Continuing the grid around the bend left gaps in the district.")
+		return false
+	# Unlike that imaginary extension, a real crossing remains a barrier.
+	# Short curve samples must count just as much as one long road segment.
+	var boundary_points := PackedVector2Array()
+	for index in range(71):
+		boundary_points.append(Vector2(1.9,-.1+float(index)*.02))
+	for kind in [Roads.HIGHWAY,Roads.ARTERIAL,"rail"]:
+		if kind=="rail":
+			region.rail_reservations.append({"city_id":0,"points":boundary_points})
+		else:
+			var boundary = Roads.new()
+			boundary.id = region.road_links.size()
+			boundary.road_class = kind
+			boundary.points = boundary_points
+			region.road_links.append(boundary)
+		region.road_geometry_revision += 1
+		if not GridFamily.continue_chart(region,0,Vector2i(1,-1),continued.polygon,{}).is_empty():
+			_fail("A continuing grid crossed a physical %s inside the next district." % kind)
+			return false
+		if kind=="rail":
+			region.rail_reservations.pop_back()
+		else:
+			region.road_links.pop_back()
+		region.road_geometry_revision += 1
+	return true
 
 
 func _region():
@@ -136,7 +230,7 @@ func _region():
 	road.from_node_id = 0
 	road.to_node_id = 1
 	road.road_class = Roads.ARTERIAL
-	road.points = PackedVector2Array([Vector2(-1.0, -2.0), Vector2(1.5, 0.5)])
+	road.points = PackedVector2Array([Vector2(-1.0, -1.8), Vector2(1.5, .7)])
 	region.road_links.append(road)
 	for index in range(2):
 		var node = RoadNode.new()

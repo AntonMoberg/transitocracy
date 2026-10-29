@@ -7,9 +7,11 @@ const Roads = preload("res://scripts/simulation/road_link_data.gd")
 const RoadCorridorIndex = preload("res://scripts/simulation/road_corridor_index.gd")
 
 const MIN_DIAGONAL_LENGTH_KM = 0.60
-const MIN_ROTATED_DEPTH_KM = 0.27
+const MIN_SPLIT_DEPTH_KM = 0.03
 const MIN_BLOCK_AREA_KM2 = 0.000015
 const NODE_QUANTIZATION = 100000.0
+const MIN_ROAD_FRONTAGE_KM = 0.12
+const POLICY_VERSION = 4
 
 
 # A straight arterial can separate two street families. Its city-facing side
@@ -29,6 +31,8 @@ static func separating_chart(region, city_id: int, outline: PackedVector2Array, 
 		var nearest_axis_alignment: float = maxf(absf(axis.dot(base_axis)), absf(axis.dot(base_axis.orthogonal())))
 		if nearest_axis_alignment > cos(deg_to_rad(20.0)):
 			continue
+		if not _physical_frontage(first,last,outline):
+			continue
 		var center_side: float = axis.cross(city_center - first)
 		if absf(center_side) < 0.04:
 			center_side = 1.0
@@ -43,12 +47,14 @@ static func separating_chart(region, city_id: int, outline: PackedVector2Array, 
 			if Geometry2D.segment_intersects_segment(first, last, outline[index], outline[(index + 1) % outline.size()]) != null:
 				crossings += 1
 		var enters_from_inside: bool = crossings >= 1 and (Geometry2D.is_point_in_polygon(first, outline) or Geometry2D.is_point_in_polygon(last, outline))
-		var crosses_district: bool = positive_depth >= MIN_ROTATED_DEPTH_KM and negative_depth >= MIN_ROTATED_DEPTH_KM and (crossings >= 2 or enters_from_inside)
+		# Finite physical frontage was checked above. A real crossing remains
+		# a separator even when it clips a shallow corner of a narrow district.
+		var crosses_district: bool = positive_depth >= MIN_SPLIT_DEPTH_KM and negative_depth >= MIN_SPLIT_DEPTH_KM and (crossings >= 2 or enters_from_inside)
 		var domain: Dictionary = _domain_for_corridor(region, city_id, corridor_id, first, last, axis, center_side, base, run.key)
 		if domain.is_empty():
 			continue
 		var rotated_side: float = float(domain["far_side"])
-		var reaches_far_side: bool = not crosses_district and _corridor_reaches_outline(region, city_id, corridor_id, first, last, outline, rotated_side)
+		var reaches_far_side: bool = not crosses_district and _entirely_far(first,last,outline,rotated_side) and _corridor_reaches_outline(region, city_id, corridor_id, first, last, outline, rotated_side)
 		if not crosses_district and not reaches_far_side:
 			continue
 		# A crossing is the strongest cue. Otherwise the closest unblocked
@@ -92,12 +98,13 @@ static func _domain_for_corridor(region, city_id: int, corridor_id: int, first: 
 	return domain
 
 
-# Reach may continue beyond the physical end of a road, but not through a
-# different arterial or a reserved rail corridor. This gives each side a
-# continuous street fabric instead of stopping it at a district edge.
+# A new family needs frontage on the finite road, not its projected heading.
+# Districts beyond it inherit only through committed, road-anchored neighbors.
 static func _corridor_reaches_outline(region, city_id: int, corridor_id: int, first: Vector2, last: Vector2, outline: PackedVector2Array, rotated_side: float) -> bool:
 	var city = region.jurisdictions[region.city_jurisdiction_ids[city_id]]
 	if not _corridor_touches_city(city, first, last):
+		return false
+	if not _physical_frontage(first, last, outline):
 		return false
 	var axis: Vector2 = (last - first).normalized()
 	var center: Vector2 = Geography._bounds(outline).get_center()
@@ -167,6 +174,100 @@ static func _corridor_reaches_outline(region, city_id: int, corridor_id: int, fi
 	return true
 
 
+static func _physical_frontage(first: Vector2, last: Vector2, outline: PackedVector2Array) -> bool:
+	var length := first.distance_to(last)
+	if length < MIN_ROAD_FRONTAGE_KM or outline.size() < 3: return false
+	var axis := (last-first)/length
+	var stations: Array[float] = [0.0,length]
+	for i in range(outline.size()):
+		stations.append(clampf((outline[i]-first).dot(axis),0.0,length))
+		var hit = Geometry2D.segment_intersects_segment(first,last,outline[i],outline[(i+1)%outline.size()])
+		if hit != null: stations.append(clampf((hit-first).dot(axis),0.0,length))
+	stations.sort()
+	var frontage := 0.0
+	for i in range(1,stations.size()):
+		var span: float = stations[i]-stations[i-1]
+		if span < .00001: continue
+		var point := first+axis*((stations[i]+stations[i-1])*.5)
+		var touches := Geometry2D.is_point_in_polygon(point,outline)
+		if not touches:
+			for j in range(outline.size()):
+				if point.distance_to(Geometry2D.get_closest_point_to_segment(point,outline[j],outline[(j+1)%outline.size()])) <= .03:
+					touches = true
+					break
+		if touches: frontage += span
+	return frontage >= MIN_ROAD_FRONTAGE_KM
+
+
+static func _entirely_far(first: Vector2, last: Vector2, outline: PackedVector2Array, side: float) -> bool:
+	var axis := (last-first).normalized()
+	for point in outline:
+		if axis.cross(point-first)*side < -.03: return false
+	return true
+
+
+static func _has_road_anchor(region, chart: Dictionary, outline: PackedVector2Array) -> bool:
+	for run in RoadCorridorIndex.straight_runs(region):
+		if int(run.corridor_id) != int(chart.corridor_id): continue
+		var axis: Vector2 = (run.last-run.first).normalized()
+		var chart_axis: Vector2 = (chart.road_last-chart.road_first).normalized()
+		if absf(axis.dot(chart_axis)) < cos(deg_to_rad(4.0)): continue
+		if chart.road_first.distance_to(Geometry2D.get_closest_point_to_segment(chart.road_first,run.first,run.last)) > .03 or chart.road_last.distance_to(Geometry2D.get_closest_point_to_segment(chart.road_last,run.first,run.last)) > .03: continue
+		if _physical_frontage(run.first,run.last,outline): return true
+	return false
+
+
+# Cache a flood through actual shared rotated frontage. A legacy floating
+# district cannot seed more floating districts, even if it stores a domain ID.
+static func _anchored_neighbors(region, city_id: int, base: Dictionary) -> Dictionary:
+	var stamp := hash([POLICY_VERSION,region.road_geometry_revision,region.road_links.size(),region.urban_sector_claims,region.rail_reservations])
+	var cache_key := "anchors:%d" % city_id
+	var cached: Dictionary = region.urban_grid_domains.get(cache_key,{})
+	if cached.get("stamp",-1) == stamp: return cached.anchored
+	var members := {}
+	var sectors := {}
+	var families := {}
+	for key in region.urban_sector_claims:
+		var pieces := String(key).split(":")
+		if pieces.size()!=3 or int(pieces[0])!=city_id: continue
+		var id: int = int(region.urban_sector_claims[key])
+		if id<0 or id>=region.neighborhoods.size(): continue
+		var layout = region.neighborhoods[id].street_layout
+		if layout==null: continue
+		members[id] = layout
+		sectors[id] = Vector2i(int(pieces[1]),int(pieces[2]))
+		for chart in layout.grid_families:
+			if not chart.has("corridor_id") or not chart.has("road_first") or not chart.has("road_last"): continue
+			var family: String = str(chart.key)
+			if not families.has(family): families[family] = {"chart":chart,"roots":[]}
+			if _has_road_anchor(region,chart,layout.polygon): families[family].roots.append(id)
+	var anchored := {}
+	var boundaries := {}
+	for family in families:
+		var reached := {}
+		var queue: Array = families[family].roots.duplicate()
+		for id in queue: reached[id] = true
+		var cursor := 0
+		while cursor<queue.size():
+			var id: int = queue[cursor]
+			cursor += 1
+			var sector: Vector2i = sectors[id]
+			for step in [Vector2i.LEFT,Vector2i.RIGHT,Vector2i.UP,Vector2i.DOWN,Vector2i(-1,-1),Vector2i(1,-1),Vector2i(-1,1),Vector2i(1,1)]:
+				var adjacent: Vector2i = sector+step
+				var other: int = int(region.urban_sector_claims.get("%d:%d:%d" % [city_id,adjacent.x,adjacent.y],-1))
+				if reached.has(other) or not members.has(other): continue
+				if not boundaries.has(other): boundaries[other] = _nearby_major_boundaries(region,members[other].polygon)
+				for frontage in _shared_frontages(members[other].polygon,members[id].polygon):
+					if _major_boundary_at(boundaries[other],frontage.point,frontage.axis): continue
+					if _chart_at(members[id],frontage.neighbor_point,base).get("key","")!=family or _chart_at(members[other],frontage.candidate_point,base).get("key","")!=family: continue
+					reached[other] = true
+					queue.append(other)
+					break
+		anchored[family] = reached
+	region.urban_grid_domains[cache_key] = {"stamp":stamp,"anchored":anchored}
+	return anchored
+
+
 static func _corridor_touches_city(city, first: Vector2, last: Vector2) -> bool:
 	if city.contains_point(first) or city.contains_point(last) or city.contains_point((first + last) * 0.5):
 		return true
@@ -177,9 +278,8 @@ static func _corridor_touches_city(city, first: Vector2, last: Vector2) -> bool:
 	return false
 
 
-# An approved chart owns its street phase along a shared district edge. The
-# arterial visibility ray is useful for isolated land, but cannot veto a
-# continuous street fabric that is already built next door.
+# An approved chart owns its phase along a shared district edge, provided
+# its contiguous street fabric is anchored to an actual arterial.
 static func continue_chart(region, city_id: int, sector: Vector2i, outline: PackedVector2Array, selected: Dictionary) -> Dictionary:
 	var base: Dictionary = CityPlan.guide(region, city_id, Vector2.ZERO)
 	if base.is_empty():
@@ -211,16 +311,19 @@ static func continue_chart(region, city_id: int, sector: Vector2i, outline: Pack
 			if _major_boundary_at(major_boundaries, frontage["point"], frontage["axis"]):
 				continue
 			var chart: Dictionary = _chart_at(neighbor.street_layout, frontage["neighbor_point"], base)
-			contacts.append({"chart": chart, "length": frontage["length"], "point": frontage["neighbor_point"], "candidate_point": frontage["candidate_point"]})
+			contacts.append({"chart": chart, "neighbor_id": neighborhood_id, "length": frontage["length"], "point": frontage["neighbor_point"], "candidate_point": frontage["candidate_point"]})
 	if selected.is_empty():
 		var inherited_by_key: Dictionary = {}
+		var anchored: Dictionary = {}
+		var anchors_loaded := false
 		for contact in contacts:
 			var chart: Dictionary = contact["chart"]
 			if not chart.has("corridor_id") or not chart.has("road_first") or not chart.has("road_last") or not chart.has("far_side"):
 				continue
-			var axis: Vector2 = (chart["road_last"] - chart["road_first"]).normalized()
-			if axis.cross(contact["candidate_point"] - chart["road_first"]) * float(chart["far_side"]) <= 0.035:
-				continue
+			if not anchors_loaded:
+				anchored = _anchored_neighbors(region,city_id,base)
+				anchors_loaded = true
+			if not anchored.get(str(chart.key),{}).has(contact.neighbor_id): continue
 			var key: String = str(chart["key"])
 			var record: Dictionary = inherited_by_key.get(key, {"chart": chart, "length": 0.0, "longest_edge": 0.0})
 			record["length"] += float(contact["length"])
@@ -239,6 +342,12 @@ static func continue_chart(region, city_id: int, sector: Vector2i, outline: Pack
 				winning_key = str(key)
 				inherited = record["chart"].duplicate(true)
 		if inherited.is_empty():
+			return {}
+		# An approved neighbor owns this shared frontage. Its original straight
+		# road may have ended or bent before reaching this district, so that
+		# road's infinite half-plane cannot delimit the continuing fabric.
+		# A real road/rail through the district still stops uniform inheritance.
+		if _has_interior_boundary(major_boundaries, outline):
 			return {}
 		inherited["base_chart"] = base
 		inherited["far_chart"] = _clean_chart(inherited)
@@ -329,9 +438,34 @@ static func _add_nearby_edges(edges: Array[Dictionary], points: PackedVector2Arr
 		if not Rect2(first.min(last), (last - first).abs()).intersects(bounds):
 			continue
 		var edge: Vector2 = last - first
-		if edge.length() < 0.06:
+		if edge.length() < 0.00001:
 			continue
 		edges.append({"first": first, "last": last, "axis": edge.normalized()})
+
+
+static func _has_interior_boundary(edges: Array[Dictionary], outline: PackedVector2Array) -> bool:
+	for edge in edges:
+		var first: Vector2 = edge.first
+		var last: Vector2 = edge.last
+		var length: float = first.distance_to(last)
+		var stations: Array[float] = [0.0, length]
+		for index in range(outline.size()):
+			var hit = Geometry2D.segment_intersects_segment(first,last,outline[index],outline[(index+1)%outline.size()])
+			if hit != null:
+				stations.append(clampf((hit-first).dot(edge.axis),0.0,length))
+		stations.sort()
+		for index in range(1,stations.size()):
+			if stations[index]-stations[index-1] < 0.00001:
+				continue
+			var point: Vector2 = first+edge.axis*((stations[index]+stations[index-1])*.5)
+			if not Geometry2D.is_point_in_polygon(point,outline):
+				continue
+			var depth := INF
+			for corner in range(outline.size()):
+				depth = minf(depth,point.distance_to(Geometry2D.get_closest_point_to_segment(point,outline[corner],outline[(corner+1)%outline.size()])))
+			if depth > 0.03:
+				return true
+	return false
 
 
 static func _major_boundary_at(edges: Array[Dictionary], point: Vector2, axis: Vector2) -> bool:

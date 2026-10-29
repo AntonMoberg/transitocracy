@@ -25,7 +25,7 @@ func _run() -> void:
 	road.from_node_id = 0
 	road.to_node_id = 1
 	road.road_class = Roads.ARTERIAL
-	road.points = PackedVector2Array([Vector2(-1.0, -1.0), Vector2(1.0, 1.0)])
+	road.points = PackedVector2Array([Vector2(-1.0, -1.8), Vector2(1.0, .2)])
 	region.road_links.append(road)
 	for index in range(2):
 		var node = RoadNode.new()
@@ -54,30 +54,30 @@ func _run() -> void:
 		quit(1)
 		return
 	# A distant turn must not veto the unchanged straight frontage here.
-	road.points.append(Vector2(3.0, 1.0))
+	road.points.append(Vector2(3.0, .2))
 	region.road_geometry_revision += 1
 	var bent_chart: Dictionary = GridFamily.separating_chart(region, 0, UrbanGraph.sector_outline(plan, Vector2i(0, 0)), plan)
 	if bent_chart.is_empty() or bent_chart.key != chart.key:
 		push_error("An unrelated arterial bend removed or changed the local rotated grid.")
 		quit(1)
 		return
-	road.points = PackedVector2Array([Vector2(-1.0, -1.0), Vector2(1.0, 1.0)])
+	road.points = PackedVector2Array([Vector2(-1.0, -1.8), Vector2(1.0, .2)])
 	region.road_geometry_revision += 1
 	road.corridor_id = 77
-	road.points = PackedVector2Array([Vector2(-1.0, -1.0), Vector2.ZERO])
+	road.points = PackedVector2Array([Vector2(-1.0, -1.8), Vector2(0, -.8)])
 	var split = Roads.new()
 	split.id = 1
 	split.road_class = Roads.ARTERIAL
 	split.corridor_id = 77
 	split.corridor_start_km = sqrt(2.0)
-	split.points = PackedVector2Array([Vector2.ZERO, Vector2(1.0, 1.0)])
+	split.points = PackedVector2Array([Vector2(0,-.8), Vector2(1.0, .2)])
 	region.road_links.append(split)
 	if GridFamily.separating_chart(region, 0, UrbanGraph.sector_outline(plan, Vector2i(0, 0)), plan).is_empty():
 		push_error("Splitting an arterial at a junction lost its rotated street family.")
 		quit(1)
 		return
 	region.road_links.remove_at(1)
-	road.points = PackedVector2Array([Vector2(-1.0, -1.0), Vector2(1.0, 1.0)])
+	road.points = PackedVector2Array([Vector2(-1.0, -1.8), Vector2(1.0, .2)])
 	road.corridor_id = -1
 	region.urban_locked_junctions["0:2:-3"] = first
 	region.road_geometry_revision += 1
@@ -100,6 +100,12 @@ func _run() -> void:
 			push_error("The diagonal street field folded a block.")
 			quit(1)
 			return
+	var anchored = Neighborhood.new()
+	anchored.id = 0
+	anchored.city_id = 0
+	anchored.street_layout = district
+	region.neighborhoods.append(anchored)
+	region.urban_sector_claims["0:0:0"] = 0
 	var farther = UrbanGraph.make_layout(region, 0, Vector2i(0, 1))["layout"]
 	if farther.grid_families.is_empty() or farther.blocks.is_empty() or farther.grid_families[-1]["key"] != district.grid_families[-1]["key"]:
 		push_error("The far-side grid changed at a district without arterial frontage.")
@@ -118,16 +124,19 @@ func _run() -> void:
 		quit(1)
 		return
 	var approved_farther = Neighborhood.new()
+	approved_farther.id = 1
+	approved_farther.city_id = 0
 	approved_farther.street_layout = farther
 	region.neighborhoods.append(approved_farther)
-	region.urban_sector_claims["0:0:1"] = 0
+	region.urban_sector_claims["0:0:1"] = 1
 	var next_outline: PackedVector2Array = UrbanGraph.sector_outline(plan, Vector2i(0, 2))
 	var continuation: Dictionary = GridFamily.separating_chart(region, 0, next_outline, plan)
-	if continuation.is_empty() or continuation["key"] != chart["key"]:
-		push_error("A farther district failed to keep the road's grid without arterial frontage.")
+	if not continuation.is_empty():
+		push_error("An infinite road projection seeded an unanchored farther district.")
 		quit(1)
 		return
-	if GridFamily.continue_chart(region, 0, Vector2i(0, 2), next_outline, continuation)["key"] != chart["key"]:
+	continuation = GridFamily.continue_chart(region,0,Vector2i(0,2),next_outline,continuation)
+	if continuation.is_empty() or continuation["key"] != chart["key"]:
 		push_error("Approving an adjacent district changed the planned grid family.")
 		quit(1)
 		return
@@ -137,6 +146,7 @@ func _run() -> void:
 		quit(1)
 		return
 	region.urban_sector_claims.erase("0:0:1")
+	region.urban_sector_claims.erase("0:0:0")
 	road.points = PackedVector2Array([Vector2(-1.0, -2.6), Vector2(2.0, 0.4)])
 	region.road_nodes[0].position_km = road.points[0]
 	region.road_nodes[1].position_km = road.points[1]
@@ -149,10 +159,12 @@ func _run() -> void:
 		quit(1)
 		return
 	var established_base = Neighborhood.new()
+	established_base.id = 2
+	established_base.city_id = 0
 	established_base.street_layout = UrbanGraph.make_layout(region, 0, Vector2i(0, 1))["layout"]
 	established_base.street_layout.grid_families.clear()
 	region.neighborhoods.append(established_base)
-	region.urban_sector_claims["0:0:1"] = 1
+	region.urban_sector_claims["0:0:1"] = 2
 	var south_chart: Dictionary = GridFamily.continue_chart(region, 0, Vector2i(0, 0), shifted["layout"].polygon, shifted_chart)
 	if int(south_chart["far_side"]) != -1 or not south_chart.has("base_chart") or not south_chart.has("far_chart"):
 		push_error("The built base grid did not keep the city-facing side of the diagonal arterial.")
