@@ -10,12 +10,12 @@ const RoadLinkData = preload("res://scripts/simulation/road_link_data.gd")
 # The caller owns this region. A worker receives a detached copy, so UI reads
 # and road or tax edits cannot race against the next day's calculations.
 static func copy_region(source):
-	if source is RegionData and source.is_large_scale:
-		return _copy_large_region(source)
+	if source is RegionData:
+		return _copy_region(source)
 	return _copy_value(source)
 
 
-static func _copy_large_region(source):
+static func _copy_region(source):
 	# Packed geometry is immutable. Ownership lists may grow when zoning creates
 	# a neighborhood, so worker snapshots need their own copies of those lists.
 	var copy = RegionData.new()
@@ -26,7 +26,7 @@ static func _copy_large_region(source):
 	copy.road_project_notice = source.road_project_notice
 	copy.starting_city_ids = source.starting_city_ids.duplicate()
 	copy.neighborhood_development_connected = source.neighborhood_development_connected.duplicate()
-	copy.is_large_scale = true
+	copy.is_large_scale = source.is_large_scale
 	copy.current_day_key = source.current_day_key
 	copy.state_name = source.state_name
 	copy.region_ids = source.region_ids.duplicate()

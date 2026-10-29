@@ -21,34 +21,13 @@ static func separating_chart(region, city_id: int, outline: PackedVector2Array, 
 	var base_axis: Vector2 = base["axis"]
 	var best := -INF
 	var result: Dictionary = {}
-	var corridors: Dictionary = RoadCorridorIndex.arterials(region)
-	for corridor_id in corridors:
-		var links: Array = corridors[corridor_id]
-		var first: Vector2 = links[0].points[0]
-		var last: Vector2 = links[-1].points[-1]
-		var chord: Vector2 = last - first
-		var length: float = chord.length()
-		if length < MIN_DIAGONAL_LENGTH_KM:
-			continue
-		var axis: Vector2 = chord / length
+	for run in RoadCorridorIndex.straight_runs(region):
+		var corridor_id: int = run.corridor_id
+		var first: Vector2 = run.first
+		var last: Vector2 = run.last
+		var axis: Vector2 = (last - first).normalized()
 		var nearest_axis_alignment: float = maxf(absf(axis.dot(base_axis)), absf(axis.dot(base_axis.orthogonal())))
 		if nearest_axis_alignment > cos(deg_to_rad(20.0)):
-			continue
-		var straight := true
-		var previous_end: Vector2 = first
-		for link in links:
-			if link.points[0].distance_to(previous_end) > 0.05:
-				straight = false
-				break
-			for segment in range(1, link.points.size()):
-				var vector: Vector2 = link.points[segment] - link.points[segment - 1]
-				if vector.length_squared() > 0.0001 and (vector.normalized().dot(axis) < cos(deg_to_rad(4.0)) or link.points[segment].distance_to(Geometry2D.get_closest_point_to_segment(link.points[segment], first, last)) > 0.03):
-					straight = false
-					break
-			if not straight:
-				break
-			previous_end = link.points[-1]
-		if not straight:
 			continue
 		var center_side: float = axis.cross(city_center - first)
 		if absf(center_side) < 0.04:
@@ -65,7 +44,7 @@ static func separating_chart(region, city_id: int, outline: PackedVector2Array, 
 				crossings += 1
 		var enters_from_inside: bool = crossings >= 1 and (Geometry2D.is_point_in_polygon(first, outline) or Geometry2D.is_point_in_polygon(last, outline))
 		var crosses_district: bool = positive_depth >= MIN_ROTATED_DEPTH_KM and negative_depth >= MIN_ROTATED_DEPTH_KM and (crossings >= 2 or enters_from_inside)
-		var domain: Dictionary = _domain_for_corridor(region, city_id, corridor_id, first, last, axis, center_side, base)
+		var domain: Dictionary = _domain_for_corridor(region, city_id, corridor_id, first, last, axis, center_side, base, run.key)
 		if domain.is_empty():
 			continue
 		var rotated_side: float = float(domain["far_side"])
@@ -86,19 +65,19 @@ static func separating_chart(region, city_id: int, outline: PackedVector2Array, 
 
 # Choose the changed side once per road geometry. Later approvals cannot
 # reverse an arterial's chart simply because a new neighbor has more frontage.
-static func _domain_for_corridor(region, city_id: int, corridor_id: int, first: Vector2, last: Vector2, axis: Vector2, center_side: float, base: Dictionary) -> Dictionary:
+static func _domain_for_corridor(region, city_id: int, corridor_id: int, first: Vector2, last: Vector2, axis: Vector2, center_side: float, base: Dictionary, run_key: String = "") -> Dictionary:
 	var city = region.jurisdictions[region.city_jurisdiction_ids[city_id]]
 	if not _corridor_touches_city(city, first, last):
 		return {}
-	var domain_key: String = "%d:%d" % [city_id, corridor_id]
-	var cached: Dictionary = region.urban_grid_domains.get(domain_key, {})
+	var domain_key: String = "%d:%s" % [city_id, run_key if not run_key.is_empty() else str(corridor_id)]
+	var cached: Dictionary = region.urban_grid_domains.get(domain_key, region.urban_grid_domains.get("%d:%d" % [city_id, corridor_id], {}))
 	if not cached.is_empty() and cached["road_first"].distance_to(first) < 0.002 and cached["road_last"].distance_to(last) < 0.002:
 		return cached
 	var far_side: float = -signf(center_side)
 	var base_axis: Vector2 = base["axis"]
 	var long_along: bool = absf(axis.dot(base_axis)) >= absf(axis.dot(base_axis.orthogonal()))
 	var domain := {
-		"key": "city:%d:diagonal:%d:%d" % [city_id, corridor_id, int(far_side)],
+		"key": "city:%d:diagonal:%s:%d" % [city_id, run_key if not run_key.is_empty() else str(corridor_id), int(far_side)],
 		"corridor_id": corridor_id,
 		"axis": axis,
 		"origin": region.cities[city_id]["center_km"],

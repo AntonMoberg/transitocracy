@@ -11,7 +11,7 @@ func _wait_edit(main,label:String) -> void:
 	var deadline:=Time.get_ticks_msec()+120000
 	var frames:=0
 	var maximum:=0.0
-	while (main.road_rebuild_thread!=null or not main.deferred_region_edits.is_empty()) and Time.get_ticks_msec()<deadline:
+	while (main.road_rebuild_thread!=null or not main.deferred_region_edits.is_empty() or not main.development_waiting_approval.is_empty()) and Time.get_ticks_msec()<deadline:
 		var start:=Time.get_ticks_usec()
 		await process_frame
 		maximum=maxf(maximum,(Time.get_ticks_usec()-start)/1000.0)
@@ -20,7 +20,7 @@ func _wait_edit(main,label:String) -> void:
 		frames+=1
 	print("%s: %d responsive frames; maximum frame interval %.2f ms"%[label,frames,maximum])
 	print("Publication %.2f ms; worker stages (us): %s"%[main.last_road_rebuild_publish_us/1000.0,main.last_road_rebuild_stages_us])
-	if main.road_rebuild_thread!=null or not main.deferred_region_edits.is_empty(): errors.append(label+" timed out")
+	if main.road_rebuild_thread!=null or not main.deferred_region_edits.is_empty() or not main.development_waiting_approval.is_empty(): errors.append(label+" timed out")
 	if frames<2: errors.append(label+" did not allow UI frames")
 	if maximum>=100.0: errors.append("%s stalled a frame for %.2f ms"%[label,maximum])
 

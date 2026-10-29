@@ -107,6 +107,7 @@ static func _register_candidate(region, layout, neighborhood_id: int, frontage_i
 		var defaults: Dictionary = RegionGenerator.zone_defaults(region, layout.city_id, grid)
 		character_profile = Character.resolve(region, layout.city_id, area.center_km, layout.interior_style, defaults["shares"], defaults["density"])
 	_index_candidate(region, {"id": candidate_id, "key": layout.key, "city_id": layout.city_id, "grid": grid, "polygon": layout.polygon, "center_km": area.center_km, "frontage_link_id": frontage_id, "neighborhood_id": neighborhood_id, "layout": layout, "character_override": Character.AUTO, "character_profile": character_profile})
+	region.development_candidates[-1]["claims_stamp"] = hash([region.road_geometry_revision, region.urban_sector_claims, region.urban_block_claims])
 
 
 static func _index_candidate(region, candidate: Dictionary) -> void:
@@ -145,13 +146,18 @@ static func set_candidate_character(region, candidate_id: int, profile: String) 
 	return true
 
 
-static func set_approval(region, candidate_id: int, approved: bool, allocation: int = -1, shares: Dictionary = {}, density: Dictionary = {}) -> Dictionary:
+static func set_approval(region, candidate_id: int, approved: bool, allocation: int = -1, shares: Dictionary = {}, density: Dictionary = {}, prepared: Dictionary = {}) -> Dictionary:
 	var approval_started:=Time.get_ticks_usec()
 	var stages:Dictionary={}
 	if candidate_id < 0 or candidate_id >= region.development_candidates.size():
 		return {"ok": false, "reason": "Select a neighborhood plan."}
 	var candidate: Dictionary = region.development_candidates[candidate_id]
 	var neighborhood_id: int = candidate["neighborhood_id"]
+	var prepared_matches: bool = not prepared.is_empty() and prepared.get("stamp", -1) == preparation_stamp(region, candidate, shares, density)
+	# The packet already validated this layout against the same road/claim
+	# inputs. Rechecking access and funds below is sufficient when it matches.
+	if approved and not prepared_matches and not ensure_candidate(region, candidate_id):
+		return {"ok": false, "reason": "This proposal changed. Select a current suggestion."}
 	if approved and not shares.is_empty():
 		var reason: String = Budget.validate_zoning(shares, density)
 		if not reason.is_empty():
@@ -203,7 +209,18 @@ static func set_approval(region, candidate_id: int, approved: bool, allocation: 
 			for cell in candidate.get("urban_cells", []):
 				region.urban_block_claims[UrbanGraph.block_key(neighborhood.city_id, cell)] = neighborhood.id
 			UrbanGraph.register_layout(region, neighborhood.street_layout, neighborhood.id)
-		RoadLand.apply_to_new_neighborhood(region, neighborhood,stages)
+		if prepared_matches:
+			var ready = prepared.neighborhood
+			for field in ["street_layout", "baseline_developable_area_ha", "developable_area_ha", "base_housing_capacity", "base_job_capacity", "housing_capacity", "job_capacity", "buildings", "building_model_version", "building_geometry_revision", "building_plan_signature", "block_zoning"]:
+				var value = ready.get(field)
+				neighborhood.set(field, value.duplicate(true) if value is Array or value is Dictionary else value)
+			neighborhood.development_plan = ready.development_plan.copy()
+			neighborhood.development_plan.reserved = 0
+			neighborhood.development_plan.pending_zoning = {}
+			neighborhood.development_plan.zoning_day = -1
+			stages["prepared"] = 1
+		else:
+			RoadLand.apply_to_new_neighborhood(region, neighborhood,stages)
 		neighborhood.development_plan.design_demand=maxf(1,neighborhood.development_plan.target_housing*2+neighborhood.development_plan.target_jobs)
 		candidate["neighborhood_id"] = neighborhood.id
 	else:
@@ -221,6 +238,51 @@ static func set_approval(region, candidate_id: int, approved: bool, allocation: 
 		Budget.queue_zoning(region, neighborhood.id, shares, density, region.current_day_key)
 	region.road_geometry_revision += 1
 	return {"ok": true, "new_neighborhood": new_neighborhood, "allocated": allocation,"stages_us":stages}
+
+
+static func planning_stamp(region) -> int:
+	var policies: Array = []
+	for city in region.cities: policies.append(city.get("urban_policy", {}))
+	var designs: Array = []
+	for candidate in region.development_candidates:
+		if int(candidate.neighborhood_id) < 0:
+			designs.append([candidate.key, candidate.get("design_variant", 0), candidate.get("character_override", "Auto")])
+	return hash([region.generation_seed, region.terrain.get_instance_id() if region.terrain != null else 0, region.road_geometry_revision, region.neighborhoods.size(), region.urban_sector_claims, region.urban_block_claims, region.urban_corridors, region.rail_reservations, region.station_sites, policies, designs])
+
+
+static func preparation_stamp(region, candidate: Dictionary, shares: Dictionary, density: Dictionary) -> int:
+	return hash([planning_stamp(region), candidate.key, region.neighborhoods.size(), candidate.layout.nodes, candidate.layout.classes, shares, density, region.building_model_version])
+
+
+static func prepare_approval(region, candidate_id: int, shares: Dictionary, density: Dictionary) -> Dictionary:
+	if not ensure_candidate(region, candidate_id): return {}
+	var candidate: Dictionary = region.development_candidates[candidate_id]
+	if int(candidate.neighborhood_id) >= 0: return {}
+	var stamp := preparation_stamp(region, candidate, shares, density)
+	var result := set_approval(region, candidate_id, true, 0, shares, density)
+	if not result.get("ok", false): return {}
+	return {"stamp": stamp, "neighborhood": region.neighborhoods[-1]}
+
+
+static func ensure_candidate(region, candidate_id: int) -> bool:
+	if candidate_id < 0 or candidate_id >= region.development_candidates.size(): return false
+	var candidate: Dictionary = region.development_candidates[candidate_id]
+	if int(candidate.neighborhood_id) >= 0 or not candidate.has("urban_sector"): return true
+	var stamp := hash([region.road_geometry_revision, region.urban_sector_claims, region.urban_block_claims])
+	if candidate.get("claims_stamp", -1) == stamp: return true
+	if region.urban_sector_claims.has(UrbanGraph.sector_key(candidate.city_id, candidate.urban_sector)): return false
+	var generated := UrbanGraph.make_layout(region, candidate.city_id, candidate.urban_sector, int(candidate.get("design_variant", 0)))
+	if generated.frontage_id < 0 or generated.layout.blocks.is_empty() or generated.layout.core_paths.is_empty(): return false
+	var cells := UrbanGraph.district_cells(region, candidate.city_id, candidate.urban_sector).duplicate()
+	cells.append_array(generated.layout.border_cells)
+	for cell in cells:
+		if region.urban_block_claims.has(UrbanGraph.block_key(candidate.city_id, cell)): return false
+	candidate.layout = generated.layout
+	candidate.polygon = generated.layout.polygon
+	candidate.frontage_link_id = generated.frontage_id
+	candidate.urban_cells = cells
+	candidate["claims_stamp"] = stamp
+	return true
 
 
 static func _initialize_empty(neighborhood) -> void:

@@ -19,6 +19,39 @@ const SOCIAL_STAY_HOURS = [2, 4, 6]
 const SOCIAL_STAY_SHARES = [0.55, 0.35, 0.10]
 
 
+static func extend_for_empty_districts(previous, region):
+	if previous.is_compact:
+		return CompactTripFlowCalculator.extend_for_empty_districts(previous, region)
+	var profile = FlowProfile.new()
+	for property in previous.get_property_list():
+		if not int(property.usage) & PROPERTY_USAGE_SCRIPT_VARIABLE: continue
+		var field: String = property.name
+		var value = previous.get(field)
+		if field.ends_with("_od") and value is Array:
+			if field.begins_with("hourly_"):
+				var hours: Array = []
+				for matrix in value: hours.append(extend_matrix(matrix, region.neighborhoods.size()))
+				profile.set(field, hours)
+			else:
+				profile.set(field, extend_matrix(value, region.neighborhoods.size()))
+		else:
+			profile.set(field, value.duplicate(true) if value is Dictionary else value)
+	return profile
+
+
+static func extend_matrix(matrix: Array, count: int, fill: float = 0.0) -> Array[PackedFloat32Array]:
+	var result: Array[PackedFloat32Array] = []
+	for i in range(count):
+		var row := PackedFloat32Array()
+		row.resize(count)
+		if fill != 0.0: row.fill(fill)
+		if i < matrix.size():
+			var previous: PackedFloat32Array = matrix[i]
+			for j in range(previous.size()): row[j] = previous[j]
+		result.append(row)
+	return result
+
+
 static func build(region):
 	if region.is_large_scale:
 		return CompactTripFlowCalculator.build(region)

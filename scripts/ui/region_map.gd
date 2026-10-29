@@ -184,12 +184,15 @@ var terrain_detail_workers: Array[Dictionary] = []
 var terrain_detail_active: Dictionary = {}
 
 
+var camera_view_size := Vector2.ZERO
+
 func _ready() -> void:
 	set_process(true)
 	clip_contents = true
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	custom_minimum_size = Vector2(480, 320)
-	resized.connect(refresh_static)
+	camera_view_size = size
+	resized.connect(_on_view_resized)
 	view_pan = pan
 	view_zoom = zoom
 	view_origin = Vector2.ZERO
@@ -1891,7 +1894,7 @@ func _draw_zoning_legend(pen) -> void:
 	var base := Vector2(18.0, size.y - 16.0)
 	pen.draw_rect(Rect2(base - Vector2(9, 60), Vector2(440, 81)), Color(0.04, 0.09, 0.16, 0.90))
 	pen.draw_string(font, base + Vector2(0, -42), "ZONING · SUGGESTED DISTRICTS", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d7e7f1"))
-	pen.draw_string(font, base + Vector2(0, -17), "Amber dots or outlines = suggested · Green = developed", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
+	pen.draw_string(font, base + Vector2(0, -17), "Amber dots or outlines = suggested · Green = approved", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("aebfd0"))
 	pen.draw_string(font, base + Vector2(0, 4), "Zoom toward a city, then click a suggestion to approve", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("aebfd0"))
 
 
@@ -3208,8 +3211,23 @@ func _jurisdiction_at(screen_position: Vector2) -> int:
 
 
 func _map_scale() -> float:
+	return _scale_for_size(size)
+
+
+func _scale_for_size(viewport_size: Vector2) -> float:
 	var world_size: Vector2 = _world_size()
-	return minf((size.x - 110.0) / world_size.x, (size.y - 110.0) / world_size.y)
+	return maxf(.000001, minf((viewport_size.x - 110.0) / world_size.x, (viewport_size.y - 110.0) / world_size.y))
+
+
+func _on_view_resized() -> void:
+	if region != null and camera_view_size.x > 110.0 and camera_view_size.y > 110.0:
+		var previous_pixels: float = _scale_for_size(camera_view_size) * zoom
+		var anchor: Vector2 = _world_center() - pan / previous_pixels
+		zoom = clampf(previous_pixels / _map_scale(), 1.0, minf(MAX_ZOOM, MAX_PIXELS_PER_KM / _map_scale()))
+		pan = (_world_center() - anchor) * _map_scale() * zoom
+		_sync_view()
+	camera_view_size = size
+	refresh_static()
 
 
 func _world_size() -> Vector2:

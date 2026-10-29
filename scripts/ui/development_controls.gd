@@ -4,6 +4,7 @@ signal allocation_requested(neighborhood_id: int, amount: int)
 signal zoning_requested(neighborhood_id: int, shares: Dictionary, density: Dictionary)
 signal design_requested(candidate_id: int, variant: int)
 signal character_requested(candidate_id: int, profile: String)
+signal preparation_requested
 
 const Budget = preload("res://scripts/simulation/development_budget.gd")
 const RegionGenerator = preload("res://scripts/simulation/region_generator.gd")
@@ -226,3 +227,4 @@ func _preview() -> void:
 		if dev_mode:
 			editor_status_label.text += "\nDev Mode funds construction automatically."
 			preview_label.text += "\nDev Mode funds construction automatically."
+	if candidate_id >= 0 and neighborhood_id < 0: preparation_requested.emit()

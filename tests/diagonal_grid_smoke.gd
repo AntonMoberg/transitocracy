@@ -53,6 +53,16 @@ func _run() -> void:
 		push_error("A long diagonal arterial did not establish a straight perpendicular grid across it.")
 		quit(1)
 		return
+	# A distant turn must not veto the unchanged straight frontage here.
+	road.points.append(Vector2(3.0, 1.0))
+	region.road_geometry_revision += 1
+	var bent_chart: Dictionary = GridFamily.separating_chart(region, 0, UrbanGraph.sector_outline(plan, Vector2i(0, 0)), plan)
+	if bent_chart.is_empty() or bent_chart.key != chart.key:
+		push_error("An unrelated arterial bend removed or changed the local rotated grid.")
+		quit(1)
+		return
+	road.points = PackedVector2Array([Vector2(-1.0, -1.0), Vector2(1.0, 1.0)])
+	region.road_geometry_revision += 1
 	road.corridor_id = 77
 	road.points = PackedVector2Array([Vector2(-1.0, -1.0), Vector2.ZERO])
 	var split = Roads.new()

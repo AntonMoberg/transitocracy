@@ -14,7 +14,7 @@ const DAY = 3
 const SECONDS_PER_DAY = 86400
 
 
-static func new_day(region, flow_profile, unix_seconds: int, previous_state = null):
+static func new_day(region, flow_profile, unix_seconds: int, previous_state = null, empty_district_only: bool = false):
 	var state = State.new()
 	state.unix_seconds = unix_seconds
 	state.day_key = floori(float(unix_seconds) / float(SECONDS_PER_DAY))
@@ -46,6 +46,25 @@ static func new_day(region, flow_profile, unix_seconds: int, previous_state = nu
 	elif previous_state != null and previous_state.link_ids == state.link_ids and not previous_state.free_pair_times.is_empty():
 		state.free_pair_times = previous_state.free_pair_times
 		state.paths_by_mode = previous_state.paths_by_mode.duplicate()
+		if previous_state.free_pair_times.size() != region.neighborhoods.size():
+			if empty_district_only:
+				state.free_pair_times = preload("res://scripts/simulation/trip_flow_calculator.gd").extend_matrix(previous_state.free_pair_times, region.neighborhoods.size(), 1000000.0)
+				for i in range(previous_state.free_pair_times.size(), region.neighborhoods.size()):
+					state.free_pair_times[i][i] = region.neighborhoods[i].access_minutes * 2.0
+				for mode in state.paths_by_mode:
+					var rows: Array = []
+					var old: Array = state.paths_by_mode[mode]
+					for i in range(region.neighborhoods.size()):
+						var row: Array = old[i].duplicate() if i < old.size() else []
+						while row.size() < region.neighborhoods.size():
+							var empty: Array[Vector2i] = []
+							row.append(empty)
+						rows.append(row)
+					state.paths_by_mode[mode] = rows
+			else:
+				var routes: Dictionary = RoadGraph.route_pairs(region, state.free_link_costs, [], true)
+				state.free_pair_times = routes.times
+				state.paths_by_mode = {0: routes.paths}
 	else:
 		var free_routes: Dictionary = RoadGraph.route_pairs(region, RoadGraph.free_flow_costs(region), [], true)
 		state.free_pair_times = free_routes["times"]

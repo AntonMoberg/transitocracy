@@ -82,6 +82,13 @@ var generation_start_pending:=false
 var generation_previous_playing:=false
 var generation_thread: Thread
 var road_rebuild_thread: Thread
+var development_thread: Thread
+var development_job
+var development_dirty_cities: Array[int] = []
+var development_prepared: Dictionary = {}
+var development_preparation_request: Dictionary = {}
+var development_waiting_approval: Dictionary = {}
+var approving_keys: Dictionary = {}
 var last_road_rebuild_publish_us:int=0
 var last_road_rebuild_stages_us:Dictionary={}
 var discard_road_rebuild: bool = false
@@ -172,6 +179,7 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	if development_thread != null: development_thread.wait_to_finish()
 	if road_preview_thread != null: road_preview_thread.wait_to_finish()
 	if generation_thread != null:
 		generation_thread.wait_to_finish()
@@ -190,6 +198,7 @@ func _process(delta: float) -> void:
 	var process_started: int = Time.get_ticks_usec()
 	_poll_generation()
 	_poll_road_rebuild()
+	_poll_development_job()
 	_poll_road_preview()
 	_reap_finished_day_threads()
 	_reap_finished_data_threads()
@@ -216,6 +225,8 @@ func _process(delta: float) -> void:
 			edit.call()
 	if _region_snapshot_busy():
 		return
+	_start_development_job()
+	if _region_snapshot_busy(): return
 	var handoff_started: int = Time.get_ticks_usec()
 	_ensure_day_profiles()
 	last_handoff_us = Time.get_ticks_usec() - handoff_started
@@ -601,7 +612,8 @@ func _build_interface() -> void:
 	var inspector_controls_scroll := ScrollContainer.new()
 	inspector_controls_scroll.custom_minimum_size.y = 200
 	inspector_controls_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	inspector_controls_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	# Keep newly visible controls from increasing the sidebar's minimum width.
+	inspector_controls_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
 	inspector_layout.add_child(inspector_controls_scroll)
 	var inspector_controls := VBoxContainer.new()
 	inspector_controls.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -643,6 +655,9 @@ func _build_interface() -> void:
 	development_controls.zoning_requested.connect(_on_development_zoning)
 	development_controls.design_requested.connect(_on_development_design)
 	development_controls.character_requested.connect(_on_development_character)
+	development_controls.preparation_requested.connect(func() -> void:
+		if region != null and selected_candidate_id >= 0:
+			_request_development_preparation(region.development_candidates[selected_candidate_id]))
 	inspector_controls.add_child(development_controls)
 	zoning_controls.visibility_changed.connect(func() -> void: development_controls.visible = zoning_controls.visible)
 	review_queue_label = Label.new()
@@ -1074,6 +1089,12 @@ func _generate_region(seed_value: int) -> void:
 	generation_overlay.back_requested.connect(_dismiss_generation_failure)
 	add_child(generation_overlay)
 	discard_road_rebuild = road_rebuild_thread != null
+	if development_job != null: development_job.cancel()
+	development_dirty_cities.clear()
+	development_prepared.clear()
+	development_preparation_request.clear()
+	development_waiting_approval.clear()
+	approving_keys.clear()
 	seed_input.set_value_no_signal(seed_value)
 	seed_input.editable = false
 	var city_count: int = map_size_selector.get_selected_id()
@@ -1085,7 +1106,7 @@ func _generate_region(seed_value: int) -> void:
 	# asynchronously so generation cannot race their shared routing helpers.
 	await get_tree().process_frame
 	await get_tree().process_frame
-	while not retired_day_threads.is_empty() or road_rebuild_thread!=null or road_preview_thread!=null:
+	while not retired_day_threads.is_empty() or road_rebuild_thread!=null or road_preview_thread!=null or development_thread!=null:
 		await get_tree().process_frame
 	generation_start_pending=false
 	var worker := Thread.new()
@@ -1271,6 +1292,7 @@ func _retire_simulation_data(payload: Dictionary) -> void:
 
 
 func _ensure_compact_hour_worker() -> void:
+	if not development_waiting_approval.is_empty(): return
 	if simulation_mode != MultiScaleTraffic.HOUR or region == null or not region.is_large_scale or traffic_state == null:
 		return
 	if traffic_state.unix_seconds >= (traffic_state.day_key + 1) * 86400:
@@ -1334,6 +1356,7 @@ func _reap_finished_data_threads() -> void:
 
 
 func _ensure_week_worker() -> void:
+	if not development_waiting_approval.is_empty(): return
 	if week_thread != null and not week_thread.is_alive():
 		week_thread.wait_to_finish()
 		week_thread = null
@@ -1394,6 +1417,7 @@ func _effective_day_rate(target_rate: float) -> float:
 
 
 func _queue_next_day(current_day_key: int) -> void:
+	if not development_waiting_approval.is_empty(): return
 	if traffic_state == null or traffic_state.unix_seconds < (current_day_key + 1) * 86400:
 		return
 	if simulation_mode == MultiScaleTraffic.DAY:
@@ -1769,6 +1793,10 @@ func _show_candidate_inspector(reset_scroll: bool = true) -> void:
 	zoning_button.disabled = not approved and neighborhood_id < 0 and int(candidate["frontage_link_id"]) < 0
 	zoning_status_label.text = "Road access lost" if int(candidate["frontage_link_id"]) < 0 else "Funding and zoning update daily"
 	development_controls.show_plan(region, candidate, reset_scroll)
+	if approving_keys.has(candidate.key):
+		zoning_button.disabled = true
+		zoning_status_label.text = "Approving…"
+	_request_development_preparation(candidate)
 	var lines := PackedStringArray()
 	lines.append("[font_size=22][b]Connected growth proposal[/b][/font_size]")
 	lines.append("[color=#91abc0]%s City  •  %.0f ha[/color]" % [region.get_city_name(city_id), hectares])
@@ -1846,9 +1874,13 @@ func _on_development_character(candidate_id: int, profile: String) -> void:
 func _apply_candidate_approval(candidate_id: int, approved: bool, allocation: int, shares: Dictionary, density: Dictionary) -> void:
 	if region == null or candidate_id < 0 or candidate_id >= region.development_candidates.size():
 		return
-	if _region_snapshot_busy():
+	var key: String = region.development_candidates[candidate_id].key
+	if approving_keys.has(key): return
+	if _region_snapshot_busy() or not development_waiting_approval.is_empty():
 		# Candidate indices are rebuilt after every approval. Preserve the
 		# selected district's stable key while another transaction is running.
+		zoning_button.disabled = true
+		zoning_status_label.text = "Approving…" if approved else "Withdrawing approval…"
 		deferred_region_edits.append(Callable(self, "_apply_candidate_approval_key").bind(String(region.development_candidates[candidate_id].key), approved, allocation, shares.duplicate(), density.duplicate()))
 		return
 	var candidate: Dictionary = region.development_candidates[candidate_id]
@@ -1856,7 +1888,17 @@ func _apply_candidate_approval(candidate_id: int, approved: bool, allocation: in
 	var current: bool = neighborhood_id >= 0 and region.neighborhoods[neighborhood_id].development_approved
 	if current == approved:
 		return
-	_start_region_edit({"kind":"approval","candidate_id":candidate_id,"approved":approved,"allocation":allocation,"shares":shares.duplicate(),"density":density.duplicate()})
+	approving_keys[key] = true
+	zoning_button.disabled = true
+	zoning_status_label.text = "Approving…" if approved else "Withdrawing approval…"
+	_discard_pending_day()
+	var request := {"kind":"approval","candidate_id":candidate_id,"key":key,"approved":approved,"allocation":allocation,"shares":shares.duplicate(),"density":density.duplicate()}
+	if approved and development_thread != null and development_job.request.kind == "prepare" and development_job.request.key == key:
+		development_waiting_approval = request
+		return
+	request["prepared"] = development_prepared
+	if development_job != null: development_job.cancel()
+	_start_region_edit(request)
 
 
 func _apply_candidate_approval_key(key:String,approved:bool,allocation:int,shares:Dictionary,density:Dictionary) -> void:
@@ -2237,7 +2279,7 @@ func _on_road_build_pressed() -> void:
 	if road_preview_thread!=null or not road_preview_request.is_empty():
 		road_status_label.text="Preparing road connection…"
 		return
-	if _region_snapshot_busy():
+	if _region_snapshot_busy() or not development_waiting_approval.is_empty():
 		deferred_region_edits.append(Callable(self, "_on_road_build_pressed"))
 		return
 	_start_region_edit({"kind":"road","preview":pending_road_preview.duplicate(true),"day_key":_current_day_key()})
@@ -2248,6 +2290,8 @@ func _start_region_edit(request:Dictionary) -> void:
 	var task:=Callable(RoadRebuild,"edit").bind(region,traffic_state,calendar_clock.unix_seconds,flow_profile,request)
 	if worker.start(task,Thread.PRIORITY_NORMAL)!=OK:
 		road_status_label.text="Could not start construction planning. Please retry."
+		approving_keys.clear()
+		zoning_button.disabled = false
 		return
 	road_rebuild_thread=worker
 	road_build_button.disabled=true
@@ -2414,19 +2458,26 @@ func _poll_road_rebuild() -> void:
 	if discard_road_rebuild:
 		discard_road_rebuild = false
 		return
+	approving_keys.clear()
 	if result.get("edit_failed",false):
+		zoning_button.disabled = false
 		_update_road_status()
 		road_status_label.text=result.reason
 		if result.edit_kind in ["approval","approvals"]: zoning_status_label.text=result.reason
 		return
 	if result.is_empty() or not result["errors"].is_empty():
 		push_error("Road recalculation failed.")
+		zoning_button.disabled = false
+		zoning_status_label.text = "Could not apply development. Please retry."
 		return
 	var publish_started:=Time.get_ticks_usec()
 	last_road_rebuild_stages_us=result.get("stages_us",{})
 	var old_data: Dictionary = {"region": region, "flow": flow_profile, "traffic_state": traffic_state, "traffic_profile": traffic_profile}
 	region = result["region"]
 	region.dev_mode = dev_mode_enabled
+	development_prepared.clear()
+	for city_id in result.get("refresh_cities", []):
+		if not development_dirty_cities.has(int(city_id)): development_dirty_cities.append(int(city_id))
 	flow_profile = result["flow"]
 	traffic_state = result["traffic_state"]
 	traffic_profile = traffic_state.profile
@@ -2531,7 +2582,7 @@ func _approve_review_selection() -> void:
 
 
 func _approve_review_keys(keys: Array[String]) -> void:
-	if _region_snapshot_busy():
+	if _region_snapshot_busy() or not development_waiting_approval.is_empty():
 		deferred_region_edits.append(Callable(self, "_approve_review_keys").bind(keys))
 		return
 	_start_region_edit({"kind":"approvals","keys":keys.duplicate()})
@@ -2626,3 +2677,65 @@ func _format_count(value: int) -> String:
 		formatted = "," + digits.substr(digits.length() - 3, 3) + formatted
 		digits = digits.substr(0, digits.length() - 3)
 	return digits + formatted
+
+
+func _request_development_preparation(candidate: Dictionary) -> void:
+	if int(candidate.neighborhood_id) >= 0:
+		development_preparation_request.clear()
+		return
+	var shares: Dictionary = development_controls.shares()
+	var density: Dictionary = development_controls.densities()
+	var stamp := DevelopmentPlanner.preparation_stamp(region, candidate, shares, density)
+	if development_prepared.get("stamp", -1) == stamp: return
+	if development_job != null and development_job.request.kind == "prepare" and development_job.request.get("stamp", -1) == stamp: return
+	development_preparation_request = {"kind":"prepare", "key":candidate.key, "shares":shares, "density":density, "stamp":stamp}
+
+
+func _start_development_job() -> void:
+	if region == null or development_thread != null or road_rebuild_thread != null or _region_snapshot_busy(): return
+	if generation_start_pending or generation_thread != null or generation_render_pending: return
+	if not development_waiting_approval.is_empty():
+		var approval := development_waiting_approval
+		development_waiting_approval = {}
+		approval["prepared"] = development_prepared
+		_start_region_edit(approval)
+		return
+	if not deferred_region_edits.is_empty(): return
+	var request: Dictionary
+	if not development_preparation_request.is_empty():
+		request = development_preparation_request
+		development_preparation_request = {}
+	elif not development_dirty_cities.is_empty():
+		request = {"kind":"suggestions", "cities":development_dirty_cities.duplicate()}
+	else: return
+	development_job = preload("res://scripts/simulation/development_job.gd").new()
+	development_job.source = region
+	development_job.request = request
+	var worker := Thread.new()
+	if worker.start(Callable(development_job, "run"), Thread.PRIORITY_LOW) != OK:
+		development_job = null
+		return
+	development_thread = worker
+	active_snapshot_buffers.append(development_job)
+
+
+func _poll_development_job() -> void:
+	if development_thread == null or development_thread.is_alive(): return
+	if _region_snapshot_busy(): return
+	var cancelled: bool = development_job.status().cancelled
+	var result: Dictionary = development_thread.wait_to_finish()
+	development_thread = null
+	development_job = null
+	if generation_start_pending or generation_thread != null: return
+	if cancelled: result = {}
+	if result.get("kind", "") == "prepare":
+		development_prepared = result.packet
+	elif region != null and preload("res://scripts/simulation/development_job.gd").publish_suggestions(region, result):
+		development_dirty_cities.clear()
+		_refresh_inspector(false)
+		map_view.queue_redraw()
+	if not development_waiting_approval.is_empty() and not _region_snapshot_busy():
+		var request := development_waiting_approval
+		development_waiting_approval = {}
+		request["prepared"] = development_prepared
+		_start_region_edit(request)
