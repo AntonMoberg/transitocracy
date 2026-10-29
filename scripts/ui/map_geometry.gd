@@ -3,6 +3,7 @@ extends RefCounted
 const Style = preload("res://scripts/ui/map_style.gd")
 const ParcelGeometry = preload("res://scripts/simulation/parcel_geometry.gd")
 const RoadLand = preload("res://scripts/simulation/road_land.gd")
+const RiverGeometry = preload("res://scripts/ui/river_geometry.gd")
 const GRID = 64
 const MAX_VERTICES = 12288
 
@@ -26,6 +27,7 @@ static func index_source(source: Dictionary) -> Dictionary:
 	# A narrow land-cover skirt closes street-width gaps between completed
 	# blocks. It never includes undeveloped administrative city polygons.
 	for feature in source.features:
+		if feature.layer == "water" and feature.kind == "line": RiverGeometry.prepare(feature)
 		if feature.get("urban_fill", false):
 			var expanded: Array[PackedVector2Array] = Geometry2D.offset_polygon(feature.points, 0.012)
 			if not expanded.is_empty(): feature.points = expanded[0]
@@ -55,7 +57,7 @@ static func index_source(source: Dictionary) -> Dictionary:
 	var extent: Rect2 = source.bounds
 	for i in range(source.features.size()):
 		var feature: Dictionary = source.features[i]
-		feature["bounds"] = bounds(feature.points).grow(0.04)
+		feature["bounds"] = bounds(feature.points).grow(RiverGeometry.coverage_margin(feature) if feature.has("river_corners") else .04)
 		var identity: String = feature.get("identity", "%s:%d" % [feature.layer, i])
 		var fingerprint: int = hash(feature)
 		fingerprints[identity] = {"hash": fingerprint, "bounds": feature.bounds, "layer": feature.layer}
@@ -163,12 +165,8 @@ static func build(source: Dictionary, key: Vector3i, layer: String) -> Dictionar
 					buffer["line"] = false
 					append_arrows(buffer, chunks, points, rect, ppk, lanes, highway)
 			else:
-				var widths = feature.get("widths", [])
-				if layer == "water" and widths.size() == feature.points.size():
-					for segment in range(1, feature.points.size()):
-						var river_width: float = (widths[segment - 1] + widths[segment]) * 0.5
-						buffer["fade"] = Style.river_range(river_width)
-						append_line(buffer, chunks, PackedVector2Array([feature.points[segment - 1], feature.points[segment]]), rect, Color(river_width * 500.0, 0.35, slot + 1, 0.0))
+				if layer == "water":
+					append_river(buffer, chunks, feature, rect, ppk, slot)
 				else:
 					append_line(buffer, chunks, points, rect, Color(width * 0.5, pixel_width * 0.5, slot + 1, 0.0))
 		elif feature.kind == "block":
@@ -207,14 +205,14 @@ static func flush(buffer: Dictionary, chunks: Array) -> void:
 	buffer.sides = PackedFloat32Array()
 	buffer.styles = PackedFloat32Array()
 
-static func emit_triangle(buffer: Dictionary, chunks: Array, points: Array, normals: Array, color: Color, sides: Array = []) -> void:
+static func emit_triangle(buffer: Dictionary, chunks: Array, points: Array, normals: Array, color: Color, sides: Array = [], colors: Array = [], fades: Array = []) -> void:
 	for i in range(3):
 		buffer.vertices.append(points[i])
 		buffer.uv.append(normals[i])
-		buffer.colors.append(color)
+		buffer.colors.append(color if colors.is_empty() else colors[i])
 		var side: float = float(sides[i]) if not sides.is_empty() else 0.0
 		buffer.sides.append(side)
-		var fade: Vector2 = buffer.get("fade", Vector2.ZERO)
+		var fade: Vector2 = buffer.get("fade", Vector2.ZERO) if fades.is_empty() else fades[i]
 		buffer.styles.append(side)
 		buffer.styles.append(float(buffer.get("style", 0)))
 		buffer.styles.append(fade.x)
@@ -231,6 +229,19 @@ static func normal(points: PackedVector2Array, i: int) -> Vector2:
 		after = before
 	var bisector := (before.orthogonal() + after.orthogonal()).normalized()
 	return after.orthogonal() if bisector == Vector2.ZERO else bisector / maxf(0.35, bisector.dot(after.orthogonal()))
+
+static func append_river(buffer: Dictionary, chunks: Array, feature: Dictionary, rect: Rect2, ppk: float, slot: int) -> void:
+	for segment in RiverGeometry.segments(feature, rect, ppk):
+		var a: Vector2 = segment.a
+		var b: Vector2 = segment.b
+		var na: Vector2 = segment.na
+		var nb: Vector2 = segment.nb
+		var ca := Color(segment.wa*500.0,.35,slot+1,0.0)
+		var cb := Color(segment.wb*500.0,.35,slot+1,0.0)
+		var fa := Style.river_range(segment.wa)
+		var fb := Style.river_range(segment.wb)
+		emit_triangle(buffer,chunks,[a,a,b],[-na,na,nb],ca,[-1.0,1.0,1.0],[ca,ca,cb],[fa,fa,fb])
+		emit_triangle(buffer,chunks,[a,b,b],[-na,nb,-nb],ca,[-1.0,1.0,-1.0],[ca,cb,cb],[fa,fb,fb])
 
 static func append_line(buffer: Dictionary, chunks: Array, points: PackedVector2Array, rect: Rect2, color: Color, offset_m: float = 0.0) -> void:
 	var expanded := rect.grow(maxf(0.04, rect.size.x * 0.05))

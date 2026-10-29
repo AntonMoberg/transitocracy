@@ -75,6 +75,8 @@ Traffic uses a compact directional color texture updated at most 15 times per se
 
 Map opens with Traffic and Terrain off. The base palette uses pale mint open land, soft green woods, cream dry ground, sand exposed rock, off-white developed blocks and blue water. Land cover uses the same world-space height/vegetation sampling at every tile level; Map relief is limited to ±6% brightness. Terrain adds stronger relief.
 
+Rivers render as continuous strips with shared bank vertices, smoothly interpolated widths, and rounded tangent joins. Workers adapt curve detail to tile resolution and tessellate only nearby stretches; source water levels and simulation paths stay unchanged. River bounds include the full bank width so water cannot disappear at a tile edge. `river_geometry_smoke.gd` checks continuity, refinement, locality, and degenerate paths; `river_gpu_smoke.gd` checks interior pixel coverage across three tile detail levels and saves `user://gpu_rivers.png`.
+
 The default road inspection view shows developed blocks, roads and place labels without neighborhood statistics circles or junction markers. Neighborhood circles appear in Trips analysis; road-node targets appear when a road editing tool is active. Selection outlines and road previews remain available.
 
 Zoning suggestions draw on the live interactive overlay, using the same camera as picking. They appear as overview dots or district outlines at closer zooms; selected suggestions show their street preview. They are not part of the static zoom-band bake. `zoning_map_gpu_smoke.gd` checks rendered visibility across zooms, offset cameras, selection and switching back to the normal map; `zoning_ui_smoke.gd` checks candidate approval through the full UI.

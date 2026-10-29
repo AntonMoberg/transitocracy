@@ -5,6 +5,7 @@ uniform float pixels_per_km = 1.0;
 uniform vec4 road_colors[5];
 uniform vec4 water_color : source_color = vec4(0.58,0.85,0.91,1.0);
 varying flat vec3 cartography;
+varying vec2 fade_range;
 uniform bool traffic_enabled = false;
 uniform bool trips = false;
 uniform sampler2D traffic_previous : filter_nearest, repeat_disable;
@@ -18,7 +19,7 @@ uniform int selected_slot = -1;
 varying vec2 world_position;
 varying flat vec4 attributes;
 varying float side;
-varying flat float half_width;
+varying float half_width;
 
 // UV is the miter normal. CUSTOM0 stores width in meters, minimum pixel width,
 // traffic slot + 1, and pass (0 border/water, 1 casing, 2 forward, 3 reverse, 4 road bed).
@@ -36,6 +37,7 @@ void vertex() {
 	attributes = CUSTOM0;
 	side = sign(CUSTOM1.x);
 	cartography = CUSTOM1.yzw;
+	fade_range = CUSTOM1.zw;
 	half_width = max(CUSTOM0.r * pixels_per_km * 0.001, CUSTOM0.g);
 	VERTEX += UV * (half_width + 0.75) / pixels_per_km;
 	world_position = VERTEX;
@@ -74,8 +76,8 @@ void fragment() {
 		}
 		if (slot == selected_slot && slot >= 0) color = vec4(0.97,0.89,0.63,1.0);
 	}
-	if (cartography.z > 0.0 && !(slot >= 0 && slot == selected_slot)) {
-		color.a *= smoothstep(cartography.y, cartography.z, pixels_per_km);
+	if (fade_range.y > 0.0 && !(slot >= 0 && slot == selected_slot)) {
+		color.a *= smoothstep(fade_range.x, fade_range.y, pixels_per_km);
 	}
 	if (trips) color.a *= 0.23;
 	color.a *= 1.0 - smoothstep(max(0.0, half_width - 0.5), half_width + 0.5, abs(side) * (half_width + 0.75));
